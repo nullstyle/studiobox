@@ -27,6 +27,31 @@ jobs:
         with:
           deno-version: 2.9.1
           cache: true
+      - name: Cache pinned Cap'n Proto build
+        id: capnp-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: /tmp/capnp-bin
+          key: capnp-1.4.0-fa02378ad522b318
+      - name: Install checksum-pinned Cap'n Proto
+        if: steps.capnp-cache.outputs.cache-hit != 'true'
+        env:
+          CAPNP_SHA256: fa02378ad522b318916b9ad928d1372fc9abd43dd1f4f0392e50450f5c87828f
+          CAPNP_VERSION: 1.4.0
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output /tmp/capnp.tar.gz \
+            "https://capnproto.org/capnproto-c++-${CAPNP_VERSION}.tar.gz"
+          echo "${CAPNP_SHA256}  /tmp/capnp.tar.gz" | sha256sum --check
+          tar --extract --gzip --file=/tmp/capnp.tar.gz --directory=/tmp
+          cmake -S "/tmp/capnproto-c++-${CAPNP_VERSION}" \
+            -B /tmp/capnp-build \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/capnp-build --target capnp_tool --parallel 2
+          install -D /tmp/capnp-build/src/capnp/capnp /tmp/capnp-bin/capnp
+      - name: Add Cap'n Proto to PATH
+        run: echo "/tmp/capnp-bin" >> "$GITHUB_PATH"
       - name: Check formatting
         run: deno fmt --check
       - name: Lint

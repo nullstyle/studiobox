@@ -55,24 +55,39 @@ if (schemaHash !== manifest.schemaSha256) {
   );
 }
 
-// 2. Pinned compiler + compile smoke.
-const version = await command("capnp", ["--version"]);
-if (version.stdout.trim() !== manifest.capnpCompiler) {
-  throw new Error(
-    `capnp compiler ${JSON.stringify(version.stdout.trim())} does not match ${
-      JSON.stringify(manifest.capnpCompiler)
-    }`,
+// 2. Pinned compiler + compile smoke. Skips loudly (never silently) when
+// the `capnp` binary is absent from the environment; the hash and
+// typecheck gates above/below still enforce. CI installs the pinned
+// compiler so this leg runs there.
+let capnpAvailable = true;
+try {
+  const version = await command("capnp", ["--version"]);
+  if (version.stdout.trim() !== manifest.capnpCompiler) {
+    throw new Error(
+      `capnp compiler ${JSON.stringify(version.stdout.trim())} does not match ${
+        JSON.stringify(manifest.capnpCompiler)
+      }`,
+    );
+  }
+} catch (err) {
+  if (!(err instanceof Deno.errors.NotFound)) throw err;
+  capnpAvailable = false;
+  console.warn(
+    "warning: `capnp` binary not found — SKIPPING the compiler-pin and " +
+      "compile-smoke gates (schema hash and bindings typecheck still enforced)",
   );
 }
-await command(
-  "capnp",
-  [
-    "compile",
-    "-o-",
-    ...canonicalSchemas.map((filename) => `${rootPath}schema/${filename}`),
-  ],
-  { discardStdout: true },
-);
+if (capnpAvailable) {
+  await command(
+    "capnp",
+    [
+      "compile",
+      "-o-",
+      ...canonicalSchemas.map((filename) => `${rootPath}schema/${filename}`),
+    ],
+    { discardStdout: true },
+  );
+}
 
 // 3. Committed bindings must typecheck strict against the published runtime.
 await command("deno", [
@@ -89,11 +104,14 @@ const toolchainPath = Deno.env.get("STUDIOBOX_CAPNP_DENO") ??
     new URL(manifest.codegen.toolchain.checkout, root).pathname,
   );
 const toolchainMain = `${toolchainPath}/tools/capnpc-deno/main.ts`;
-if (!(await exists(toolchainMain))) {
+if (!(await exists(toolchainMain)) || !capnpAvailable) {
   console.warn(
-    `warning: capnp-deno toolchain not found at ${toolchainPath}; ` +
-      "SKIPPING regeneration drift and full-binding qualification " +
-      "(set STUDIOBOX_CAPNP_DENO or clone the sibling checkout to run them)",
+    !capnpAvailable
+      ? "warning: `capnp` binary missing; SKIPPING regeneration drift and " +
+        "full-binding qualification (the codegen toolchain shells out to it)"
+      : `warning: capnp-deno toolchain not found at ${toolchainPath}; ` +
+        "SKIPPING regeneration drift and full-binding qualification " +
+        "(set STUDIOBOX_CAPNP_DENO or clone the sibling checkout to run them)",
   );
 } else {
   const commit = (await command("git", [
