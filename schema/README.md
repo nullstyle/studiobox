@@ -20,9 +20,14 @@ bundle hash. Its deterministic generated TypeScript is committed under
 `capnpc-deno` toolchain published as `jsr:@nullstyle/capnp`.
 
 The five production schemas compile, but their full generated TypeScript is not
-committed yet: the audited `capnpc-deno` snapshot lowers cross-file structs to
-`TYPE_ANY_POINTER`, loses imported interface service types, and emits a
-collision-prone flat barrel. `compat/wire.json` records this hard M0 blocker and
-`CAPNP_DENO_INTEGRATION.md` contains the reproduction. Until it is fixed,
-`src/wire/contract.ts` enforces handshake and hostile-boundary limits without
-pretending handwritten declarations are production bindings.
+committed yet: the M1 qualification (2026-07-11, `capnp-deno` checkout
+`ad07911`) confirmed the toolchain still lowers cross-file struct references to
+unimported names plus `TYPE_ANY_POINTER` descriptors, surfaces cross-file
+interfaces as raw capability pointers, and emits a barrel whose `*_meta.ts`
+exports hard-collide for any two schemas. `compat/wire.json` records the exact
+blocker inventory, and `deno task wire:check` re-verifies the blocked status on
+every toolchain-present run (it fails once upstream fixes land, forcing the full
+bindings to be committed). Regenerate the committed bindings with
+`deno task wire:generate`. Until the upstream fix, `src/wire/contract.ts`
+enforces handshake and hostile-boundary limits without pretending handwritten
+declarations are production bindings.

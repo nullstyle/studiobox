@@ -329,7 +329,10 @@ pid-adjacent supervisor inside the guest:
 - Listens on AF_VSOCK
   (`Deno.listen({ transport: "vsock", cid: 3, port:
   AGENT_PORT })`), serving
-  `AgentBootstrap` → negotiate/authenticate → `SandboxAgent`.
+  `AgentBootstrap` → negotiate/authenticate → `SandboxAgent`. Deno 2.9 gates the
+  vsock transport behind `--unstable-vsock` (verified at M1 on Linux; recorded
+  in `compat/wire.json`) — studioboxd's launch flags and in-guest tests carry it
+  until the API stabilizes.
 - **Processes:** `Deno.Command` under uid 1000 with the requested stdio modes;
   stdout/stderr flow over `OutputSink` streams; kill maps `Signal` →
   `Deno.kill`; `status` reports code/signal and cgroup-OOM annotation.

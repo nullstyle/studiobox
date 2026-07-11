@@ -35,6 +35,11 @@ jobs:
         run: deno check .
       - name: Dependency provenance gate
         run: deno task compat:check
+      - name: Wire drift gate
+        # Bundle hash + committed-bindings typecheck always run; the
+        # regeneration-reproduction leg skips loudly without the
+        # ../capnp-deno toolchain checkout (not present in CI).
+        run: deno task wire:check
 
   test:
     name: Test (${{ matrix.os }}, Deno ${{ matrix.deno }})

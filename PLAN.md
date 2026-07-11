@@ -52,7 +52,7 @@ Mechanical rename throughout: `limabox→studiobox`, `lbx→sbx`, `LBX→SBX`,
 | `compat/` + `tools/check_{compat,wire,publish}.ts`                                                | same                     | **carry** — provenance gates                                                                                                               |
 | `.github/workflows/ci.yml`                                                                        | same                     | **carry + extend**                                                                                                                         |
 | `vendor/capnp-deno` snapshot                                                                      | —                        | **drop** — replaced by `jsr:@nullstyle/capnp@^0.1` (published); `deno.local.json` maps to the `../capnp-deno` checkout for coordinated dev |
-| `src/wire/generated/` (codegen_probe only)                                                        | —                        | **regenerate** in M1; probe carried as qualification fixture                                                                               |
+| `src/wire/generated/` (codegen_probe only)                                                        | —                        | regenerated at M1 (byte-identical, toolchain `ad07911`); five-schema bindings blocked upstream — see `compat/wire.json`                    |
 | 4 design docs                                                                                     | —                        | superseded by DESIGN.md/PLAN.md; keep `FIRECRACKER_INTEGRATION.md`'s G1–G13 table as `docs/firecracker-contract.md`                        |
 | `@nullstyle/firecracker` raw-URL imports                                                          | —                        | **drop** — JSR pin + `deno.local.json` sibling override                                                                                    |
 
@@ -99,6 +99,25 @@ to `capnp-deno` and comes back as a patch release.
 **Exit:** five schemas → committed drift-checked bindings from the published
 toolchain; compiled probe does RPC on both arches; streaming soak green.
 **Demo:** `deno task wire:check` + probe binary round-trip.
+
+**Outcome (2026-07-11): the go/no-go answered NO on gate 1 and YES on gates
+2–4.** Codegen at toolchain `ad07911` still lowers cross-file types to
+`AnyPointer` (83 fields), leaves 159 cross-file names unresolved, and collides
+101 barrel exports — `c7f33fb` fixed barrel _merging_, not cross-file resolution
+or namespacing; `compat/wire.json` `codegen.blockers` is the authoritative
+inventory and `wire:check` fails the moment upstream fixes land (probe-only
+bindings are committed meanwhile). The published _runtime_ is cleared: it
+round-trips the cross-file wire shape given correct descriptors
+(`cross_file_roundtrip_test.ts`), the 1 GiB soak held window and memory bounds
+(window-atomic fix confirmed under burst sends), close/EOF conformance is pinned
+(17 tests; three upstream gaps filed: `connect()` lacks prompt remote-EOF
+teardown, out-of-band conn destruction leaves a half-open transport
+
+- global unhandledrejection, no UDS composition surface), and the compiled-WASM
+  probe passed on macOS + real aarch64-linux (x86_64 compile-only until x86_64
+  CI; vsock verdict: Deno 2.9 needs `--unstable-vsock`). **M2's wire work is
+  blocked until the emitter is fixed upstream in capnp-deno or the single-file
+  schema-merge fallback is invoked.**
 
 ### M2 — Supervisor plane on fakes (6 pts)
 
@@ -268,7 +287,7 @@ daemons/agent on both arches, concurrency-canceling groups, tag-gated publish.
 | R3 | copy staging blows the 2 s create p95                              | measure at M5; levers: smaller golden rootfs (debootstrap --variant=minbase, or Alpine), parallel copies, warm page cache, pre-staged spare jails                         |
 | R4 | debootstrap reproducibility drifts                                 | pin `snapshot.debian.org` epoch in the manifest                                                                                                                           |
 | R5 | nested-virt constraints (M3+ Mac, macOS 15+)                       | documented requirement; Linux `--no-lima` path is first-class                                                                                                             |
-| R6 | in-guest Deno vsock needs unstable flags / regresses               | settle on the pinned guest Deno at M1; `DENO_SERVE_ADDRESS=vsock:` as alternate serving path                                                                              |
+| R6 | in-guest Deno vsock needs unstable flags / regresses               | settled at M1: Deno 2.9 requires `--unstable-vsock` (recorded in `compat/wire.json`); studioboxd carries the flag; `DENO_SERVE_ADDRESS=vsock:` as alternate serving path  |
 | R7 | upstream `@deno/sandbox` moves (0.13.x → …)                        | parity inventory regen task + pinned-target policy: track latest, hold a two-minor compat window, PARITY.md records the delta                                             |
 | R8 | scope creep vs. one maintainer                                     | Tier C stays Tier C until the soak holds; the horizon list is a fence, not a menu                                                                                         |
 | R9 | an M1 qualification gap needs a breaking `@nullstyle/capnp` change | same maintainer on both sides — fix upstream, pin the new release; 0.x semver churn is acceptable while studiobox is pre-release (no vendoring escape hatch, by decision) |

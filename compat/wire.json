@@ -19,16 +19,38 @@
     "package": "@nullstyle/capnp",
     "version": "0.1.0",
     "releaseSpecifier": "jsr:@nullstyle/capnp@^0.1",
+    "toolchain": {
+      "checkout": "../capnp-deno",
+      "commit": "ad0791189c781c84e636a55425da05ea3377114b",
+      "commitNote": "one commit ahead of the 0.1.0 release-prep commit c266609; capnpc-deno is not shipped in the JSR package, so the sibling checkout is the codegen toolchain of record",
+      "invocation": "deno task wire:generate"
+    },
+    "committedSchemas": [
+      "codegen_probe.capnp"
+    ],
     "probeSchema": "codegen_probe.capnp",
-    "probeStatus": "passing at the limabox baseline; studiobox regeneration is deferred to the M1 capnp-codegen gate",
+    "probeStatus": "regenerated at the studiobox M1 gate on 2026-07-11; byte-identical to the committed src/wire/generated/ bindings and typechecks strict against the published runtime",
     "fullBindingStatus": "blocked",
-    "observedOn": "2026-07-10",
-    "observedAgainst": "pre-0.1.0 capnp snapshot 65cb58dcdb0b1152ad1d621642cbaf2111f0f401; blockers must be re-evaluated against the published 0.1.0 during M1",
+    "observedOn": "2026-07-11",
+    "observedAgainst": "capnp-deno checkout ad0791189c781c84e636a55425da05ea3377114b; upstream fix c7f33fb (declaring interface ids + barrel merge) and c59dcde (window-atomic stream sender) are included, the cross-file lowering class is NOT",
     "blockers": [
-      "cross-file struct imports are emitted as unresolved TypeScript names and TYPE_ANY_POINTER descriptors",
-      "cross-file interface imports lose their generated service type and remain raw capability pointers",
-      "the generated flat barrel re-exports colliding metadata and method helper names",
-      "concurrent StreamSender.send callers can pass capacity admission before a slot is reserved and exceed maxInFlight"
-    ]
+      "cross-file struct/enum references do not typecheck: field types are emitted as bare unimported TypeScript names (SbxError, EmptyResult, TransferCommit, FinishResult, ProtocolOffer, KeyValue, HandshakeResult, AuthResult, ReadResult; 159 TS2304 errors) and their runtime descriptors are lowered to TYPE_ANY_POINTER (83 fields across host_control, sandbox_agent, streams, supervisor)",
+      "cross-file interface references lose the generated service type and surface as raw CapabilityPointer (e.g. sandbox_agent SpawnParams.output for Streams.OutputSink) instead of typed stubs, while same-file interfaces get RpcStub<T>",
+      "the merged mod.ts barrel collides: every generated *_meta.ts exports the same five names (schemaFileId, schemaFilename, schemaImports, schemaNodes, interfaceMethods), a hard TS2308 for ANY two schemas, and 96 further method param/result and domain type names collide across modules (PingParams x4, AuthenticateParams x3, NegotiateParams x3, UsageResult, ProbeResult, KillResults, ...)",
+      "concurrent StreamSender.send maxInFlight race: addressed upstream by c59dcde before 0.1.0; qualified by the M1 streaming gate, not by this codegen gate"
+    ],
+    "blockerNote": "per-interface client/server/register/service-token artifacts DO generate for all 24 schema interfaces; the gap is confined to cross-file type lowering and barrel namespacing. tests/unit/capnp/cross_file_roundtrip_test.ts proves the published runtime codecs round-trip the cross-file composite wire shape, isolating the gap to the emitter. tools/check_wire.ts re-verifies the blocked status on every toolchain-present run and fails when upstream fixes land, forcing the full bindings to be committed."
+  },
+  "compiledProbe": {
+    "tool": "tools/compiled_probe.ts",
+    "task": "compile:probe",
+    "runtime": "jsr:@nullstyle/capnp@0.1.0 (WASM session core embedded via the package's static import of generated/capnp_deno.wasm, 215990 bytes)",
+    "provedOn": "2026-07-11",
+    "targets": {
+      "aarch64-apple-darwin": "executed: PROBE_OK (native; also with empty DENO_DIR + dead proxy, proving WASM embedding)",
+      "aarch64-unknown-linux-gnu": "executed: PROBE_OK inside the fc-smoke Lima VM (Ubuntu, kernel 6.8, Deno 2.9.1 artifact) with empty DENO_DIR",
+      "x86_64-unknown-linux-gnu": "compile-only on this host; execution proof lands with x86_64 CI (see PLAN M12)"
+    },
+    "vsockFlagVerdict": "Deno 2.9.x requires --unstable-vsock for Deno.listen/Deno.connect with transport 'vsock' (probed on guest Deno 2.9.2 aarch64-linux with vsock_loopback: no flag and --unstable-net both fail with 'The --unstable-vsock flag must be provided'); studioboxd and its in-guest tests must pass --unstable-vsock until the API stabilizes"
   }
 }

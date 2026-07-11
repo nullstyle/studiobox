@@ -23,9 +23,13 @@
     "lint": "deno lint",
     "check": "deno fmt --check && deno lint && deno check .",
     "test": "deno task test:unit && deno task test:fake",
-    "test:unit": "deno test --allow-read --allow-write --allow-net=127.0.0.1 tests/unit/",
+    "test:unit": "deno test --allow-read --allow-write --allow-net=127.0.0.1,unix:/tmp/studiobox-unit-uds.sock tests/unit/",
     "test:fake": "deno test --allow-read --allow-write --allow-net --allow-run --allow-env --allow-sys=uid,gid tests/fake/",
-    "compat:check": "deno run --allow-read tools/check_compat.ts"
+    "compat:check": "deno run --allow-read tools/check_compat.ts",
+    "qualify:streaming": "SBX_QUALIFY=1 deno test --v8-flags=--max-old-space-size=192 --allow-net=127.0.0.1 --allow-env=SBX_QUALIFY tests/qualification/",
+    "compile:probe": "deno compile --allow-net=127.0.0.1 --output .build/compiled_probe tools/compiled_probe.ts && .build/compiled_probe",
+    "wire:generate": "deno run --allow-read --allow-write --allow-run=capnp ../capnp-deno/tools/capnpc-deno/main.ts generate --schema schema/codegen_probe.capnp --out src/wire/generated --layout flat",
+    "wire:check": "deno run --allow-read --allow-write --allow-env=STUDIOBOX_CAPNP_DENO --allow-run=capnp,deno,git tools/check_wire.ts"
   },
   "publish": {
     "include": [
