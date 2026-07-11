@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "kernel": {
+    "firecrackerPinned": "v1.16.1",
+    "ciDirectory": "firecracker-ci/v1.15",
+    "version": "6.1.155",
+    "perArch": {
+      "aarch64": {
+        "url": "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-6.1.155",
+        "sha256": "e3544b10603acbf3db492cb52e000d22ba202cb4b63b9add027565683e11c591"
+      },
+      "x86_64": {
+        "url": "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155",
+        "sha256": "e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2"
+      }
+    }
+  },
+  "rootfs": {
+    "suite": "bookworm",
+    "variant": "minbase",
+    "snapshotEpoch": "20260630T210956Z",
+    "mirror": "https://snapshot.debian.org/archive/debian/20260630T210956Z/",
+    "packages": ["ca-certificates", "e2fsprogs"],
+    "imageSizeMiB": 1024,
+    "sandboxUser": {
+      "name": "sandbox",
+      "uid": 1000,
+      "home": "/home/app"
+    }
+  },
+  "guestDeno": {
+    "version": "2.9.1",
+    "perArch": {
+      "aarch64": {
+        "url": "https://dl.deno.land/release/v2.9.1/deno-aarch64-unknown-linux-gnu.zip",
+        "sha256": "0a60d079fa79635a59803074dbbfe86ccc35746dc2c4f8d73f2e50338b3283a9"
+      },
+      "x86_64": {
+        "url": "https://dl.deno.land/release/v2.9.1/deno-x86_64-unknown-linux-gnu.zip",
+        "sha256": "710c54d63477d1100844ef4818f19507ce0dbf40510903b1d883f19e394446a2"
+      }
+    }
+  }
+}
