@@ -1,0 +1,5 @@
+[tools]
+deno = "2.9.1"
+
+[env]
+DENO_FUTURE = "1"

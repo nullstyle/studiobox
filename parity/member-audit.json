@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "upstream": "jsr:@deno/sandbox@0.13.2",
+  "auditedOn": "2026-07-10",
+  "status": "exact-consumer-surface-with-internal-constructor-deviations",
+  "inputs": {
+    "upstream": "deno doc --json jsr:@deno/sandbox@0.13.2",
+    "limabox": "deno doc --json ./src/mod.ts",
+    "compileFixture": "tests/api/upstream_type_compat_test.ts"
+  },
+  "coverage": {
+    "rootSymbols": 129,
+    "memberBearingSymbols": 94,
+    "declaredMemberOccurrences": 473,
+    "classDeclarations": 23,
+    "interfaceDeclarations": 73,
+    "enumDeclarations": 1,
+    "exactStructuralAssertions": 40,
+    "nominalInterfaceKeysetAssertions": 9,
+    "defaultedCallableParityFixtures": 3,
+    "mutablePropertyParityAssertions": 6
+  },
+  "methodology": [
+    "Compared declared class, interface, and enum member names from both Deno documentation graphs.",
+    "Compared exact structural types for the Tier A option/data contracts and representative Tier C management contracts.",
+    "Compared key sets instead of direct equality where otherwise-identical interfaces return package-nominal class instances.",
+    "Compiled the defaulted call forms against both packages and asserted mutable property shapes exactly.",
+    "Reviewed inherited members and std/fs re-export inheritance to eliminate false positives from declared-only member lists."
+  ],
+  "verifiedExactStructuralContracts": [
+    "Signal",
+    "ChildProcessStatus",
+    "ChildProcessOutput",
+    "SandboxEnv",
+    "ReadFileOptions",
+    "WriteFileOptions",
+    "MkdirOptions",
+    "RemoveOptions",
+    "OpenOptions",
+    "DirEntry",
+    "FileInfo",
+    "WalkEntry",
+    "WalkOptions",
+    "ExpandGlobOptions",
+    "CodeExtension",
+    "DenoRunOptions",
+    "DenoReplOptions",
+    "Build",
+    "BuildOptions",
+    "DeployOptions",
+    "ConnectOptions",
+    "RequestInit",
+    "SandboxOptions",
+    "SpawnOptions",
+    "VsCodeOptions",
+    "Memory",
+    "BaseClientOptions",
+    "App",
+    "AppConfig",
+    "AppInit",
+    "AppUpdate",
+    "Apps",
+    "Layer",
+    "Layers",
+    "Revision",
+    "RevisionProgress",
+    "Revisions",
+    "SandboxMetadata",
+    "Timelines",
+    "VolumeInit"
+  ],
+  "nominalReturnInterfacesWithExactKeysets": [
+    "SandboxFs",
+    "SandboxDeno",
+    "Sandboxes",
+    "Snapshots",
+    "Volumes"
+  ],
+  "mismatches": [
+    {
+      "id": "M001",
+      "status": "resolved",
+      "symbol": "Sandbox",
+      "member": "spawn",
+      "kind": "callability",
+      "upstream": "spawn(command: string | URL, options?: SpawnOptions): Promise<ChildProcess>",
+      "limabox": "spawn(command: string | URL, options: SpawnOptions): Promise<ChildProcess>",
+      "impact": "Upstream-valid sandbox.spawn(\"cmd\") calls do not compile against Limabox.",
+      "resolution": "Options are optional on the abstract consumer contract."
+    },
+    {
+      "id": "M002",
+      "status": "resolved",
+      "symbol": "Sandbox",
+      "member": "exposeVscode",
+      "kind": "callability",
+      "upstream": "exposeVscode(path?: string, options?: VsCodeOptions): Promise<VsCode>",
+      "limabox": "exposeVscode(path: string, options: VsCodeOptions): Promise<VsCode>",
+      "impact": "The upstream zero-argument and path-only call forms do not compile.",
+      "resolution": "Path and options are optional on the abstract consumer contract; providers own the upstream defaults."
+    },
+    {
+      "id": "M003",
+      "status": "resolved",
+      "symbol": "Sandbox",
+      "member": "deploy",
+      "kind": "callability",
+      "upstream": "deploy(app: string, options?: DeployOptions): Promise<Build>",
+      "limabox": "deploy(app: string, options: DeployOptions): Promise<Build>",
+      "impact": "The upstream deploy(app) form does not compile, even though this is a Tier C runtime stub.",
+      "resolution": "Options now default to an empty object before the explicit Tier C rejection."
+    },
+    {
+      "id": "M004",
+      "status": "resolved",
+      "symbol": "Sandbox",
+      "member": "sh",
+      "kind": "property-modifier",
+      "upstream": "mutable function property",
+      "limabox": "readonly function property",
+      "impact": "Exact structural equality differs; ordinary command use remains source-compatible.",
+      "resolution": "The sh function property is mutable."
+    },
+    {
+      "id": "M005",
+      "status": "resolved",
+      "symbol": "error classes",
+      "member": "public diagnostic fields",
+      "kind": "property-modifier",
+      "upstream": "mutable fields on ApiError, ConnectionEstablishmentError, ConnectionClosedError, RpcError, and SandboxKillError",
+      "limabox": "readonly constructor parameter properties",
+      "affectedMembers": [
+        "ApiError.status",
+        "ApiError.code",
+        "ApiError.traceId",
+        "ConnectionEstablishmentError.status",
+        "ConnectionEstablishmentError.code",
+        "ConnectionEstablishmentError.traceId",
+        "ConnectionClosedError.code",
+        "ConnectionClosedError.reason",
+        "RpcError.code",
+        "RpcError.data",
+        "SandboxKillError.status",
+        "SandboxKillError.response"
+      ],
+      "impact": "Reads are compatible, but mutation accepted by upstream types is rejected by Limabox.",
+      "resolution": "All affected diagnostics now expose the same mutable and optional/undefined property shapes."
+    },
+    {
+      "id": "M006",
+      "status": "resolved",
+      "symbol": "Sandbox, VsCode, Volume, Snapshot",
+      "member": "[util.inspect.custom]",
+      "kind": "missing-member",
+      "upstream": "public Node custom-inspection method",
+      "limabox": "absent",
+      "impact": "Node inspection output and exact public member keysets differ; execution behavior is unaffected.",
+      "resolution": "All four abstract value contracts implement the upstream Node custom-inspection symbol and shape."
+    }
+  ],
+  "internalConstructorExclusions": {
+    "reason": "Upstream exposes runtime-token constructors in documentation but tags them @internal; normal consumers cannot construct a valid instance. Limabox uses abstract provider-backed contracts instead.",
+    "symbols": [
+      "Sandbox",
+      "VsCode",
+      "KillSignal",
+      "ChildProcess",
+      "FsFile",
+      "DenoProcess",
+      "DenoRepl",
+      "Volume",
+      "Snapshot"
+    ],
+    "exactParity": false
+  },
+  "gate": {
+    "m0MemberParityClosed": true,
+    "blockingMismatchIds": [],
+    "reviewRequiredMismatchIds": []
+  }
+}

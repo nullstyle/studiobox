@@ -1,0 +1,16 @@
+{
+  "extends": "./deno.json",
+  "imports": {
+    "@nullstyle/capnp": "../capnp-deno/src/mod.ts",
+    "@nullstyle/capnp/encoding": "../capnp-deno/src/encoding.ts",
+    "@nullstyle/capnp/rpc": "../capnp-deno/src/rpc.ts",
+    "@nullstyle/firecracker": "../firecracker-deno/mod.ts",
+    "@nullstyle/firecracker/client": "../firecracker-deno/src/api/mod.ts",
+    "@nullstyle/firecracker/jailer": "../firecracker-deno/src/jailer/mod.ts",
+    "@nullstyle/firecracker/testing": "../firecracker-deno/testing/mod.ts",
+    "@nullstyle/firecracker/types": "../firecracker-deno/src/api/types.ts",
+    "@nullstyle/firecracker/vsock": "../firecracker-deno/src/vsock/mod.ts",
+    "@std/assert": "jsr:@std/assert@^1",
+    "@std/path": "jsr:@std/path@^1"
+  }
+}

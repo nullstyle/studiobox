@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-11",
+  "deno": {
+    "development": "2.9.1",
+    "minimum": "2.9.0"
+  },
+  "capnp": {
+    "package": "@nullstyle/capnp",
+    "version": "0.1.0",
+    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.1",
+    "localPath": "../capnp-deno",
+    "wasmAbi": 1
+  },
+  "firecracker": {
+    "package": "@nullstyle/firecracker",
+    "version": "0.2.0",
+    "releaseSpecifier": "jsr:@nullstyle/firecracker@^0.2",
+    "localPath": "../firecracker-deno",
+    "firecrackerPinned": "v1.16.1",
+    "firecrackerMinimum": "v1.15.0"
+  }
+}

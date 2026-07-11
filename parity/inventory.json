@@ -1,0 +1,966 @@
+{
+  "schemaVersion": 1,
+  "upstream": "jsr:@deno/sandbox@0.13.2",
+  "denoDocSchemaVersion": 2,
+  "generatedBy": "deno doc --json",
+  "generatedOn": "2026-07-10",
+  "generationStatus": "complete",
+  "classificationStatus": "reviewed-symbol-level",
+  "expectedSymbolCountFromPlan": 126,
+  "actualSymbolCount": 129,
+  "driftDetected": true,
+  "driftNote": "The current exact 0.13.2 documentation exposes 129 root symbols; the plan's 126-symbol count is stale. Treat this file as authoritative and review the three-symbol delta before freezing M0.",
+  "tierPolicy": {
+    "A": "full fidelity",
+    "B": "local emulation with a documented deviation",
+    "C": "type compatibility with UnsupportedFeatureError at runtime"
+  },
+  "studioboxExtensions": [
+    {
+      "name": "HostCapacityError",
+      "kind": "class"
+    },
+    {
+      "name": "UnsupportedFeatureError",
+      "kind": "class"
+    }
+  ],
+  "symbols": [
+    {
+      "name": "Sandbox",
+      "kind": "class",
+      "source": "sandbox.ts",
+      "tier": "A",
+      "scaffold": "contract",
+      "memberTiers": {
+        "exposeHttp": "B",
+        "exposeSsh": "B",
+        "exposeVscode": "B",
+        "deploy": "C"
+      }
+    },
+    {
+      "name": "VsCode",
+      "kind": "class",
+      "source": "sandbox.ts",
+      "tier": "B",
+      "scaffold": "contract"
+    },
+    {
+      "name": "KillController",
+      "kind": "class",
+      "source": "command/kill_signal.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "KillSignal",
+      "kind": "class",
+      "source": "command/kill_signal.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "KillSignalListener",
+      "kind": "typeAlias",
+      "source": "command/kill_signal.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "ChildProcess",
+      "kind": "class",
+      "source": "child_process.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "ChildProcessOutput",
+      "kind": "interface",
+      "source": "child_process.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "ChildProcessStatus",
+      "kind": "interface",
+      "source": "child_process.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "Signal",
+      "kind": "typeAlias",
+      "source": "child_process.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SandboxEnv",
+      "kind": "interface",
+      "source": "env.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "DirEntry",
+      "kind": "interface",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "ExpandGlobOptions",
+      "kind": "interface",
+      "source": "https://jsr.io/@std/fs/1.0.24/expand_glob.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "FileInfo",
+      "kind": "interface",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "FsFile",
+      "kind": "class",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "MkdirOptions",
+      "kind": "interface",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "OpenOptions",
+      "kind": "interface",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "ReadFileOptions",
+      "kind": "interface",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "RemoveOptions",
+      "kind": "interface",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SandboxFs",
+      "kind": "interface",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SeekMode",
+      "kind": "enum",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "WalkEntry",
+      "kind": "interface",
+      "source": "https://jsr.io/@std/fs/1.0.24/_create_walk_entry.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "WalkOptions",
+      "kind": "interface",
+      "source": "https://jsr.io/@std/fs/1.0.24/walk.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "WriteFileOptions",
+      "kind": "interface",
+      "source": "fs.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "Build",
+      "kind": "interface",
+      "source": "deno.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "BuildOptions",
+      "kind": "typeAlias",
+      "source": "deno.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "CodeExtension",
+      "kind": "typeAlias",
+      "source": "deno.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "DenoProcess",
+      "kind": "class",
+      "source": "deno.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "DenoRepl",
+      "kind": "class",
+      "source": "deno.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "DenoReplOptions",
+      "kind": "typeAlias",
+      "source": "deno.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "DenoRunOptions",
+      "kind": "typeAlias",
+      "source": "deno.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "DeployOptions",
+      "kind": "interface",
+      "source": "deno.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "SandboxDeno",
+      "kind": "interface",
+      "source": "deno.ts",
+      "tier": "A",
+      "scaffold": "contract",
+      "memberTiers": {
+        "deploy": "C"
+      }
+    },
+    {
+      "name": "ConnectOptions",
+      "kind": "interface",
+      "source": "sandbox.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "RequestInit",
+      "kind": "interface",
+      "source": "sandbox.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SandboxOptions",
+      "kind": "interface",
+      "source": "sandbox.ts",
+      "tier": "A",
+      "scaffold": "contract",
+      "memberTiers": {
+        "allowNet": "B",
+        "port": "B",
+        "region": "B",
+        "sandboxEndpoint": "B",
+        "ssh": "B",
+        "root": "C",
+        "volumes": "C",
+        "secrets": "C"
+      }
+    },
+    {
+      "name": "SpawnOptions",
+      "kind": "interface",
+      "source": "sandbox.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "VsCodeOptions",
+      "kind": "interface",
+      "source": "sandbox.ts",
+      "tier": "B",
+      "scaffold": "contract"
+    },
+    {
+      "name": "ApiError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "ConnectionClosedError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "ConnectionEstablishmentError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "InvalidMemoryError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "InvalidTimeoutError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "InvalidTokenError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "MissingTokenError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "NetworkError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "RpcError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SandboxCommandError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SandboxKillError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SandboxSdkError",
+      "kind": "class",
+      "source": "errors.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "Memory",
+      "kind": "typeAlias",
+      "source": "memory.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "App",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "AppConfig",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "AppConfigBase",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "AppId",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "AppInit",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "AppListOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "AppLogsOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Apps",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "AppSlug",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "AppUpdate",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "BuildLog",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "BuildLogsOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "BuildStep",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Cursor",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "DeployAsset",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "DeployConfig",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "DeployInit",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "DeployRevision",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "EnvVar",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "EnvVarInit",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "EnvVarUpdate",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Framework",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Layer",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "LayerAppRef",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "LayerAppsListOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "LayerId",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "LayerInit",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "LayerListOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "LayerRef",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Layers",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "LayerSlug",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "LayerUpdate",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "ListOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "LogLevel",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "PaginatedList",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Region",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "B",
+      "scaffold": "contract"
+    },
+    {
+      "name": "Revision",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionConfig",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionEnvVar",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionFailureReason",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionListOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgress",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressCompletedStage",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressDeployingStage",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressPendingStage",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressRoutingStage",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressRunningStage",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressSkippedStage",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressStage",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressStageStatus",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressStageWithCommand",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressTimelineBlockedStage",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressTimelineRef",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionProgressTimelineStage",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Revisions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RevisionStatus",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RuntimeConfig",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "RuntimeLog",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Sandboxes",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SandboxesListOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SandboxMetadata",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "A",
+      "scaffold": "contract"
+    },
+    {
+      "name": "SecretConfig",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "SnapshotId",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "SnapshotInit",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "SnapshotListOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Snapshots",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "SnapshotSlug",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Timeline",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "TimelineListOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Timelines",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "VolumeId",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "VolumeInit",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "VolumeListOptions",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Volumes",
+      "kind": "interface",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "VolumeSlug",
+      "kind": "typeAlias",
+      "source": "types.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Volume",
+      "kind": "class",
+      "source": "volume.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "Snapshot",
+      "kind": "class",
+      "source": "snapshot.ts",
+      "tier": "C",
+      "scaffold": "type-or-unsupported-stub"
+    },
+    {
+      "name": "BaseClientOptions",
+      "kind": "interface",
+      "source": "client.ts",
+      "tier": "B",
+      "scaffold": "contract",
+      "memberTiers": {
+        "token": "B",
+        "org": "B",
+        "apiEndpoint": "B"
+      }
+    },
+    {
+      "name": "Client",
+      "kind": "class",
+      "source": "client.ts",
+      "tier": "A",
+      "scaffold": "contract",
+      "memberTiers": {
+        "sandboxes": "A",
+        "apps": "C",
+        "volumes": "C",
+        "snapshots": "C",
+        "revisions": "C",
+        "timelines": "C",
+        "layers": "C"
+      }
+    }
+  ]
+}

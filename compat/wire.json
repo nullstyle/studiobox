@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 2,
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "canonicalSchemas": [
+    "common.capnp",
+    "host_control.capnp",
+    "sandbox_agent.capnp",
+    "streams.capnp",
+    "supervisor.capnp"
+  ],
+  "hashAlgorithm": "sha256(filename + NUL + rawBytes + NUL, sorted)",
+  "schemaSha256": "e4ef15197283c9a74b0c4b1ea3ae7d114c4cbf6e43e254bd4aa7ac697468c024",
+  "schemaSha256Note": "re-hashed 2026-07-11 over the carried studiobox schema/ bundle (renamed identifiers; limabox baseline was 617920c8753001a23873f850934fd2a6ebb3b964f81f4ce4a7504ab6d92fbe48)",
+  "capnpCompiler": "Cap'n Proto version 1.4.0",
+  "codegen": {
+    "package": "@nullstyle/capnp",
+    "version": "0.1.0",
+    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.1",
+    "probeSchema": "codegen_probe.capnp",
+    "probeStatus": "passing at the limabox baseline; studiobox regeneration is deferred to the M1 capnp-codegen gate",
+    "fullBindingStatus": "blocked",
+    "observedOn": "2026-07-10",
+    "observedAgainst": "pre-0.1.0 capnp snapshot 65cb58dcdb0b1152ad1d621642cbaf2111f0f401; blockers must be re-evaluated against the published 0.1.0 during M1",
+    "blockers": [
+      "cross-file struct imports are emitted as unresolved TypeScript names and TYPE_ANY_POINTER descriptors",
+      "cross-file interface imports lose their generated service type and remain raw capability pointers",
+      "the generated flat barrel re-exports colliding metadata and method helper names",
+      "concurrent StreamSender.send callers can pass capacity admission before a slot is reserved and exceed maxInFlight"
+    ]
+  }
+}
