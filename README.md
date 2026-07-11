@@ -19,7 +19,7 @@ const result = await sandbox.deno.eval(`1 + 2`); // 3
 
 Built on [`jsr:@nullstyle/firecracker`](https://jsr.io/@nullstyle/firecracker)
 (microVM lifecycle, jailer, vsock, crash recovery) and
-[`@nullstyle/capnp`](https://github.com/nullstyle/capnp-deno) (typed Cap'n
+[`jsr:@nullstyle/capnp`](https://jsr.io/@nullstyle/capnp) (typed Cap'n
 Proto RPC between client, host daemons, and the in-guest agent,
 `studioboxd`). Studiobox adds the policy, authorization, durable state,
 resource accounting, and recovery layers.

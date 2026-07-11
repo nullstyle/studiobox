@@ -18,16 +18,16 @@ could force a redesign is open.** The gates are M1; everything wider waits.
   (its 13 integration gaps G1–G13 all have dispositions; the ones studiobox
   depends on — copy staging, no-adoption, journal-before-spawn, registry
   required when jailed — are library contracts now).
-- `@nullstyle/capnp` works (Level-1 RPC, interop-tested serde) but its
-  codegen cannot compile the five-schema bundle (cross-file imports lower to
-  `AnyPointer`, barrel collisions), `StreamSender` has a non-atomic
-  `maxInFlight` check, and it is unpublished. That is the critical path.
-  Studiobox consumes it only as a real dependency — `jsr:@nullstyle/capnp`
-  once published, pinned-commit https imports from
-  `github.com/nullstyle/capnp-deno` until then. **No vendored snapshots**
+- `@nullstyle/capnp@0.1.0` is **published to JSR** (Level-1 RPC,
+  interop-tested serde). The two blockers limabox hit were fixed upstream
+  before release — `fix(codegen): use declaring interface ids and merge
+  generated barrels` (the cross-file-import/barrel-collision class) and
+  `fix(streaming): make sender drains re-entrancy safe and window-atomic`
+  (the `maxInFlight` race) — but neither has been exercised against *our*
+  five-schema bundle yet; M1 qualifies exactly that before breadth work.
+  Studiobox pins `jsr:@nullstyle/capnp@^0.1`. **No vendored snapshots**
   (user decision, 2026-07-11): limabox's `vendor/capnp-deno` does not carry
-  over, and the limabox snapshot commit (`65cb58dc…`) must be pushed to the
-  GitHub remote (or superseded by M1's fixes) for pins to resolve.
+  over.
 - Upstream fidelity target `@deno/sandbox@0.13.2` is fully digested (API +
   wire semantics); the parity inventory transfers.
 
@@ -51,7 +51,7 @@ Mechanical rename throughout: `limabox→studiobox`, `lbx→sbx`, `LBX→SBX`,
 | `parity/` (inventory, member audit) | `parity/` | **carry** — expensive to reproduce |
 | `compat/` + `tools/check_compat|wire|publish.ts` | same | **carry** — provenance gates |
 | `.github/workflows/ci.yml` | same | **carry + extend** |
-| `vendor/capnp-deno` snapshot | — | **drop** — pinned-commit `https://raw.githubusercontent.com/nullstyle/capnp-deno/<commit>/…` imports (the same pattern limabox used for firecracker) until `jsr:@nullstyle/capnp` ships in M1; `deno.local.json` maps to the `../capnp-deno` checkout for dev |
+| `vendor/capnp-deno` snapshot | — | **drop** — replaced by `jsr:@nullstyle/capnp@^0.1` (published); `deno.local.json` maps to the `../capnp-deno` checkout for coordinated dev |
 | `src/wire/generated/` (codegen_probe only) | — | **regenerate** in M1; probe carried as qualification fixture |
 | 4 design docs | — | superseded by DESIGN.md/PLAN.md; keep `FIRECRACKER_INTEGRATION.md`'s G1–G13 table as `docs/firecracker-contract.md` |
 | `@nullstyle/firecracker` raw-URL imports | — | **drop** — JSR pin + `deno.local.json` sibling override |
@@ -66,43 +66,41 @@ Each milestone ends demoable and CI-green. Points are relative effort
 Scaffold `deno.json` (JSR shape, exports stubs, tasks: `check`, `test`,
 `test:vm`, `smoke:host`), LICENSE (Apache-2.0), `.gitignore`, CI skeleton.
 Apply the carry-forward map with the mechanical rename. Pin
-`jsr:@nullstyle/firecracker@^0.2` and a `nullstyle/capnp-deno` GitHub commit
-(pushed first if the needed snapshot isn't on the remote); add
+`jsr:@nullstyle/firecracker@^0.2` and `jsr:@nullstyle/capnp@^0.1`; add
 `deno.local.json` sibling overrides for both.
 **Exit:** all carried tests green on macOS (`deno task check && deno task
 test`, ~60 unit/host-safe + 3 process-contract); CI green; history starts
 committed (limabox's zero-commit mistake is not repeated).
 **Demo:** clean clone → green board.
 
-### M1 — Foundation gates (13 pts) ← go/no-go
+### M1 — Foundation qualification (8 pts) ← go/no-go
 
-Everything here can force a redesign, so it goes first. Work lands in the
-`capnp-deno` repo where noted.
+`@nullstyle/capnp@0.1.0` (JSR) claims fixes for both limabox-era blockers —
+the codegen barrel/interface-id fix and the window-atomic stream sender.
+M1 proves those claims against *our* workload before breadth work; any gap
+goes upstream to `capnp-deno` and comes back as a patch release.
 
-1. **Codegen:** fix `capnpc-deno` cross-file struct/interface imports
-   (currently lowered to `AnyPointer`/unresolved) and flat-barrel collisions;
-   regenerate all five schemas; commit bindings behind a `wire:check` drift
-   gate. *Fallback (recorded, ugly, workable): merge the five schemas into
-   one file.*
-2. **Atomic streaming bounds:** fix `StreamSender.send()` capacity check;
-   1 GiB transfer soak holding `maxInFlight` and memory bounds.
+1. **Codegen:** generate all five canonical schemas with the published
+   `capnpc-deno`; verify cross-file struct/interface imports resolve to real
+   types (the old `AnyPointer` lowering) and barrels merge without
+   collisions; commit bindings behind a `wire:check` drift gate. *Fallback
+   if a gap resists upstream fixing (recorded, ugly, workable): merge the
+   five schemas into one file.*
+2. **Streaming bounds:** 1 GiB transfer soak holding `maxInFlight` and
+   memory bounds under concurrent senders.
 3. **Close/EOF ownership:** transport-close conformance tests (who closes,
    EOF propagation, no double-close) for `TcpTransport` over UDS/TCP/vsock
    conns.
 4. **Compiled-runtime proof:** `deno compile` a probe binary embedding the
-   capnp WASM (`--include`), cross-compiled to linux-aarch64 + x86_64; prove
-   an RPC round-trip from the compiled artifact. Also settle the in-guest
-   vsock flag question (unstable flag or not) on the pinned Deno.
-5. **Publish:** `@nullstyle/capnp@0.1.0` to JSR (including the WASM asset —
-   the loader must resolve it via the package, not a repo-relative path);
-   studiobox swaps its GitHub pin for the JSR specifier. There is no
-   vendoring fallback: JSR rejects https imports in published packages, so
-   if this slips, development continues on the GitHub pin but studiobox's
-   own release (M12) is blocked until capnp ships.
+   capnp WASM from the JSR package (`--include`; the loader must resolve it
+   via the package, not a repo-relative path), cross-compiled to
+   linux-aarch64 + x86_64; prove an RPC round-trip from the compiled
+   artifact. Also settle the in-guest vsock flag question (unstable flag or
+   not) on the pinned Deno.
 
-**Exit:** five schemas → committed drift-checked bindings; compiled probe
-does RPC on both arches; streaming soak green; capnp published or fallback
-recorded. **Demo:** `deno task wire:check` + probe binary round-trip.
+**Exit:** five schemas → committed drift-checked bindings from the published
+toolchain; compiled probe does RPC on both arches; streaming soak green.
+**Demo:** `deno task wire:check` + probe binary round-trip.
 
 ### M2 — Supervisor plane on fakes (6 pts)
 
@@ -229,14 +227,13 @@ diagnostics bundle; fleet reconcile drills.
 
 Docs (permissions matrix per daemon, threat model, PARITY.md polish,
 macos/linux host guides, testing-your-app with FakeSandboxHost); JSR publish
-(hard prerequisite: `@nullstyle/capnp` on JSR — a package pinning GitHub
-https imports cannot publish); tag-driven
+(the `@nullstyle/capnp`-on-JSR prerequisite is already satisfied); tag-driven
 release workflow (configure the JSR GitHub-Actions publishing link from day
 one — the firecracker-deno lesson).
 **Exit:** `deno add jsr:@nullstyle/studiobox` + quickstart verbatim in a
 fresh project.
 
-**Total: ~93 pts ≈ 6–8 focused weeks.** 1.0 is declared when M11's soak
+**Total: ~88 pts ≈ 6–7 focused weeks.** 1.0 is declared when M11's soak
 holds across releases, not at M12 — 0.x continues until the soak criteria
 have survived real use.
 
@@ -273,7 +270,7 @@ groups, tag-gated publish.
 
 | # | Risk | Mitigation |
 | --- | --- | --- |
-| R1 | capnp codegen fixes are deeper than expected | M1 is first and gated; fallback = single-file schema merge (loses modularity, keeps ordinals) |
+| R1 | the published codegen still fails on our five-schema bundle | M1 is first and gated; gaps fixed upstream + consumed as patches; fallback = single-file schema merge (loses modularity, keeps ordinals) |
 | R2 | WASM session core misbehaves compiled/in-guest | M1 gate 4 proves it before anything depends on it; last-resort fallback is a pure-TS session core (large) — decide only on hard failure |
 | R3 | copy staging blows the 2 s create p95 | measure at M5; levers: smaller golden rootfs (debootstrap --variant=minbase, or Alpine), parallel copies, warm page cache, pre-staged spare jails |
 | R4 | debootstrap reproducibility drifts | pin `snapshot.debian.org` epoch in the manifest |
@@ -281,7 +278,7 @@ groups, tag-gated publish.
 | R6 | in-guest Deno vsock needs unstable flags / regresses | settle on the pinned guest Deno at M1; `DENO_SERVE_ADDRESS=vsock:` as alternate serving path |
 | R7 | upstream `@deno/sandbox` moves (0.13.x → …) | parity inventory regen task + pinned-target policy: track latest, hold a two-minor compat window, PARITY.md records the delta |
 | R8 | scope creep vs. one maintainer | Tier C stays Tier C until the soak holds; the horizon list is a fence, not a menu |
-| R9 | `@nullstyle/capnp` JSR publish slips | dev stays unblocked on the GitHub pin, but studiobox's own JSR release is blocked (no vendoring escape hatch, by decision); de-risk by scoping capnp 0.1.0 to the surface studiobox actually uses |
+| R9 | an M1 qualification gap needs a breaking `@nullstyle/capnp` change | same maintainer on both sides — fix upstream, pin the new release; 0.x semver churn is acceptable while studiobox is pre-release (no vendoring escape hatch, by decision) |
 
 ## 6. Immediate next actions (M0)
 
