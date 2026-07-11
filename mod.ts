@@ -48,3 +48,31 @@ export type {
   JailedLaunchRequest,
   RuntimeMachine,
 } from "./src/rootd/firecracker/mod.ts";
+
+// studiobox-rootd supervisor domain core: journal-driven machine lifecycle
+// (capnp wire adapter attaches on top of `SupervisorApi` in a later
+// milestone; this surface is transport-free).
+export {
+  NOOP_RECLAIM_HOOKS,
+  SupervisorCore,
+} from "./src/rootd/supervisor_core.ts";
+export type {
+  ReclaimHook,
+  SupervisorCoreOptions,
+  SupervisorLaunchPlan,
+  SupervisorLaunchPlanner,
+} from "./src/rootd/supervisor_core.ts";
+export { SupervisorError } from "./src/rootd/supervisor_core_api.ts";
+export { JournalArtifactReferenceReader } from "./src/rootd/artifact_refs.ts";
+export type { SandboxRecordSource } from "./src/rootd/artifact_refs.ts";
+export type { ArtifactReference } from "./src/state/model.ts";
+export type {
+  SupervisorApi,
+  SupervisorErrorCode,
+  SupervisorHealth,
+  SupervisorMachineState,
+  SupervisorMachineStatus,
+  SupervisorMachineUsage,
+  SupervisorReconcileFailure,
+  SupervisorReconcileSummary,
+} from "./src/rootd/supervisor_core_api.ts";

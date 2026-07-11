@@ -265,7 +265,8 @@ A sandbox boots from a **versioned artifact set** keyed by manifest hash:
 each jail chroot (`stage: { mode: "copy" }` in firecracker-deno terms): hardlink
 staging shares inodes, so an in-jail chmod/chown would mutate the golden source.
 Each sandbox gets the read-only golden rootfs copy plus a fresh sparse overlay
-ext4 sized to its disk budget. Artifact builds run inside the Lima VM (root loop
+image sized to its disk budget (created unformatted; the in-guest overlay-init
+formats it on first boot). Artifact builds run inside the Lima VM (root; no loop
 mounts); the cache lives under `~/.studiobox/artifacts/<manifest-hash>/` with GC
 keyed by reference counts in the journal.
 

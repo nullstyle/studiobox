@@ -121,15 +121,20 @@ teardown, out-of-band conn destruction leaves a half-open transport
 
 ### M2 — Supervisor plane on fakes (6 pts)
 
-`studiobox-rootd` v1: `supervisor.capnp` service over a UDS; launch / status /
-kill / reconcile / openBridge implemented against the **fake VMM + fake jailer
-shims** from `@nullstyle/firecracker/testing` — all macOS-safe. Journal wired
-end-to-end (SandboxRecord + nested JailRecord + execution IDs) through the
-carried adapter. **Exit tests:** kill -9 rootd mid-launch → restart →
-destructive reconcile reaps everything, journal converges to
-`terminated(host-restart)`; stale execution CAS rejection; bridge refuses
-unauthorized logical IDs. **Demo:** scripted create→status→kill cycle on a Mac
-with no VM anywhere.
+`studiobox-rootd` v1, split by the M1 NO-GO into domain-core-first: M2 delivers
+the transport-free **`SupervisorApi` domain core** (`src/rootd/supervisor_core*`
+— launch / status / kill / reconcile / openBridge-grant) against the **fake VMM
+
+- fake jailer shims** from `@nullstyle/firecracker/testing` — all macOS-safe;
+  the `supervisor.capnp` service over the root UDS becomes a thin adapter over
+  that interface once the upstream emitter fix lands (**M2-wire**). Journal
+  wired end-to-end (SandboxRecord + nested JailRecord + execution IDs +
+  journaled artifact reference) through the carried adapter. **Exit tests:**
+  kill -9 the supervisor with live executions → restart → destructive reconcile
+  reaps everything, journal converges to `terminated(host-restart)`; stale
+  execution CAS rejection; bridge refuses unauthorized logical IDs. **Demo:**
+  scripted create→status→kill cycle on a Mac with no VM anywhere. _Status
+  2026-07-11: domain core delivered (M2-wire pending upstream)._
 
 ### M3 — studioboxd v1 + agent plane on fakes (8 pts)
 
@@ -149,14 +154,22 @@ studioboxd (both arches) boots and serves the plane over UDS. **Demo:**
 
 `images/`: kernel fetch + sha256 verify (per arch); golden rootfs build via
 pinned debootstrap against `snapshot.debian.org` (user `sandbox`/uid 1000, home
-`/home/app`, pinned Deno, studioboxd baked in, overlay-init); sparse overlay
-creation; `manifest.json` + manifest-hash into `ContractIdentity`; copy-only
-staging into jail layout; artifact cache + refcount GC under
-`~/.studiobox/artifacts/`. Builds run inside the Lima VM (or any Linux with loop
-devices). **Exit:** `studiobox images build` produces a manifest-addressed set
-twice with identical hashes (kernel/rootfs reproducible); staging drill copies
-into a fake jail and never mutates the golden inode (regression test). **Demo:**
-one command → verified artifact set.
+`/home/app`, pinned Deno, studioboxd baked in — committed placeholder until
+M3/M5 delivers the compiled agent; the agent sha is an input pin so the manifest
+hash rolls automatically on swap — overlay-init); sparse overlay creation
+(unformatted; in-guest overlay-init formats on first boot); a `manifest.json`
+whose hash covers input pins only, feeding `ContractIdentity`; copy-only staging
+into jail layout; artifact cache + refcount GC under `~/.studiobox/artifacts/`,
+with journal-referenced sets protected from GC. Builds run inside the Lima VM
+(or any Linux as root — no loop devices needed; `mke2fs -d` packs the tree
+directly). **Exit:** `studiobox images build` produces a manifest-addressed set
+twice with identical hashes — rootfs reproducibility is defined as
+**content-manifest identity** (sorted path/mode/owner/sha per file; raw ext4
+byte-identity is unattainable with mke2fs and the manifest supports `imageBytes`
+identity if e2fsprogs becomes reproducible); staging drill copies into a fake
+jail and never mutates the golden inode (regression test). **Demo:** one command
+→ verified artifact set. _Status 2026-07-11: delivered and fc-smoke-validated
+(two builds, identical content-manifest hashes)._
 
 ### M5 — First real microVM (in-VM happy path) (8 pts)
 
@@ -165,9 +178,13 @@ M4 image; studioboxd comes up on real vsock; `probeAgent` green;
 create→exec→fs→eval→terminate cycle driven by tests running _inside_ the VM (no
 macOS tunnel yet). Port the firecracker-deno `smoke:lima` pattern as
 `deno task test:vm` (provisions/reuses the Lima VM, runs the in-VM suite).
-**Exit:** in-VM integration suite green on aarch64 locally and x86_64 on a KVM
-CI runner (runner = "the Lima VM", no Lima involved). **Demo:**
-`deno task test:vm` from a Mac → real microVM sandbox lifecycle.
+Planner wiring note (from the M4 adversarial pass): `acquire()` the artifact
+cache refcount before (or atomically with) journaling the launch's
+`ArtifactReference` — a GC sweep in the store→journal window reaps a just-stored
+set and fails the launch closed at staging (safe, but spurious). **Exit:** in-VM
+integration suite green on aarch64 locally and x86_64 on a KVM CI runner (runner
+= "the Lima VM", no Lima involved). **Demo:** `deno task test:vm` from a Mac →
+real microVM sandbox lifecycle.
 
 ### M6 — hostd control plane (7 pts)
 
