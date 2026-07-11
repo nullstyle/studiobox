@@ -58,7 +58,7 @@ soak drill in PLAN.md §M11, enforced in CI on both arches.
 | `jsr:@nullstyle/firecracker@^0.2` | JSR package | Published; pinned Firecracker v1.16.1, min v1.15.0 (`FIRECRACKER_COMPAT`) |
 | `jsr:@nullstyle/capnp@^0.1` | JSR package | Published (0.1.0). RPC Level 1 (capabilities, promise pipelining, embargoes), pure-TS serde, WASM session core. **No vendored snapshots.** M1 qualifies it against the five-schema bundle before breadth work (PLAN §M1) |
 | Lima ≥ 2.1 | Host tool (macOS) | `vz` + `nestedVirtualization` (Apple Silicon M3+, macOS 15+) |
-| Deno ≥ 2.5 | Runtime floor | Inherited from firecracker-deno; in-guest Deno is pinned by the artifact manifest |
+| Deno ≥ 2.9 | Runtime floor | Studiobox sets its own floor above firecracker-deno's ≥ 2.5 (modern vsock/serve surface, one less legacy matrix leg); in-guest Deno is pinned by the artifact manifest |
 
 Dev-time coordination uses `deno.local.json` remapping both foundations to
 sibling checkouts (`../firecracker-deno`, `../capnp-deno`), the same pattern
@@ -374,7 +374,7 @@ this; it is also the supported path for Linux workstations).
 ## 12. Package shape
 
 ```
-deno.json      name @nullstyle/studiobox · JSR-only 0.x · Deno ≥ 2.5
+deno.json      name @nullstyle/studiobox · JSR-only 0.x · Deno ≥ 2.9
 exports:
   "."               → SDK: Sandbox, Client, errors, KillController… (upstream-shaped)
   "./unstable-host" → host/daemon programmatic surface (LimaDriver, provisioning)
