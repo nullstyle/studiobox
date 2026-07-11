@@ -59,6 +59,13 @@ jobs:
             /tmp/capnp-prefix/include/capnp/compat/ 2>/dev/null || true
       - name: Add Cap'n Proto to PATH
         run: echo "/tmp/capnp-prefix/bin" >> "$GITHUB_PATH"
+      - name: Install capnp standard schemas
+        # The compiler's standard import paths are /usr/local/include and
+        # /usr/include (compile-time constants, not exe-relative) — the
+        # cached prefix layout alone is invisible to it.
+        run: |
+          sudo mkdir -p /usr/local/include/capnp
+          sudo cp -R /tmp/capnp-prefix/include/capnp/. /usr/local/include/capnp/
       - name: Check formatting
         run: deno fmt --check
       - name: Lint
