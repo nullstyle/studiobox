@@ -1,12 +1,20 @@
 /** Durable, host-owned sandbox lifecycle state. */
 
-export const SANDBOX_RECORD_VERSION = 1 as const;
+export const SANDBOX_RECORD_VERSION = 2 as const;
+
+/**
+ * Versions {@link validateSandboxRecord} accepts. Version 1 predates the
+ * artifact reference: a version-1 record is still valid but may never carry
+ * `artifact` — it is treated as referencing no artifact set.
+ */
+export type SandboxRecordSchemaVersion = 1 | typeof SANDBOX_RECORD_VERSION;
 
 export type SandboxPhase =
   | "allocating"
-  | "starting"
-  | "running"
-  | "stopping"
+  | "staging"
+  | "booting"
+  | "ready"
+  | "terminating"
   | "terminated"
   | "reconciling"
   | "quarantined";
@@ -48,6 +56,23 @@ export interface MachineJournalState {
   updatedAt: string;
 }
 
+/**
+ * Journal reference to the artifact set an execution boots from: the
+ * manifest hash (the `images/` cache key) plus the architecture the set was
+ * built for. Intentionally structural — the state layer never imports the
+ * artifact pipeline; `images/pins.ts` `ArtifactArch` is mirrored here the
+ * same way {@link JailRecordState} mirrors the package `JailRecord`.
+ *
+ * The reference is journaled BEFORE any spawn so that artifact GC
+ * (`images/cache.ts`) can refuse to delete a set a not-yet-terminated
+ * record still cites, even across a supervisor crash.
+ */
+export interface ArtifactReference {
+  /** sha256 hex over the manifest input pins (`images/manifest.ts`). */
+  manifestHash: string;
+  arch: "aarch64" | "x86_64";
+}
+
 /** Studiobox-owned resources that the Firecracker package cannot reclaim. */
 export interface SandboxResources {
   uid?: number;
@@ -60,7 +85,7 @@ export interface SandboxResources {
 
 /** The single durable authority for one public sandbox id. */
 export interface SandboxRecord {
-  schemaVersion: typeof SANDBOX_RECORD_VERSION;
+  schemaVersion: SandboxRecordSchemaVersion;
   id: string;
   revision: number;
   generation: number;
@@ -68,6 +93,8 @@ export interface SandboxRecord {
   createdAt: string;
   updatedAt: string;
   machine?: MachineJournalState;
+  /** Requires schema version 2; absent means "references no artifact set". */
+  artifact?: ArtifactReference;
   resources: SandboxResources;
   terminationReason?: string;
 }
@@ -82,9 +109,10 @@ const SANDBOX_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const EXECUTION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const SANDBOX_PHASES: readonly SandboxPhase[] = [
   "allocating",
-  "starting",
-  "running",
-  "stopping",
+  "staging",
+  "booting",
+  "ready",
+  "terminating",
   "terminated",
   "reconciling",
   "quarantined",
@@ -95,6 +123,11 @@ const MACHINE_PHASES: readonly MachineJournalPhase[] = [
   "running",
   "reclaiming",
 ];
+const ARTIFACT_REFERENCE_ARCHES: readonly ArtifactReference["arch"][] = [
+  "aarch64",
+  "x86_64",
+];
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 export function assertSandboxId(id: string): void {
   if (!SANDBOX_ID.test(id)) {
@@ -136,10 +169,14 @@ export function validateSandboxRecord(value: unknown): SandboxRecord {
     "createdAt",
     "updatedAt",
     "machine",
+    "artifact",
     "resources",
     "terminationReason",
   ], "sandbox record");
-  if (record.schemaVersion !== SANDBOX_RECORD_VERSION) {
+  if (
+    record.schemaVersion !== SANDBOX_RECORD_VERSION &&
+    record.schemaVersion !== 1
+  ) {
     throw new TypeError("unsupported sandbox record schema version");
   }
   if (typeof record.id !== "string") {
@@ -160,7 +197,39 @@ export function validateSandboxRecord(value: unknown): SandboxRecord {
   if (record.machine !== undefined) {
     validateMachine(record.machine);
   }
+  if (record.artifact !== undefined) {
+    if (record.schemaVersion === 1) {
+      throw new TypeError(
+        "sandbox record artifact requires schema version 2",
+      );
+    }
+    validateArtifactReference(record.artifact);
+  }
   return structuredClone(record as SandboxRecord);
+}
+
+function validateArtifactReference(
+  value: unknown,
+): asserts value is ArtifactReference {
+  const artifact = assertRecord(value, "artifact reference") as Partial<
+    ArtifactReference
+  >;
+  assertKeys(artifact, ["manifestHash", "arch"], "artifact reference");
+  if (
+    typeof artifact.manifestHash !== "string" ||
+    !SHA256_HEX.test(artifact.manifestHash)
+  ) {
+    throw new TypeError(
+      "artifact manifestHash must be a lowercase sha256 hex hash",
+    );
+  }
+  if (
+    !ARTIFACT_REFERENCE_ARCHES.includes(
+      artifact.arch as ArtifactReference["arch"],
+    )
+  ) {
+    throw new TypeError("artifact arch is invalid");
+  }
 }
 
 function validateResources(value: unknown): asserts value is SandboxResources {

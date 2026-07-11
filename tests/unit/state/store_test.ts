@@ -24,10 +24,10 @@ Deno.test("sandbox state is create-only and compare-and-swap", async () => {
 
     const updated = await store.compareAndSwap("sbx-1", 0, (record) => ({
       ...record,
-      phase: "running",
+      phase: "ready",
     }));
     assertEquals(updated.revision, 1);
-    assertEquals(updated.phase, "running");
+    assertEquals(updated.phase, "ready");
 
     await assertRejects(
       () => store.compareAndSwap("sbx-1", 0, (record) => record),
