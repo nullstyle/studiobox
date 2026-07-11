@@ -56,7 +56,7 @@ soak drill in PLAN.md §M11, enforced in CI on both arches.
 | Dependency | Form | Status |
 | --- | --- | --- |
 | `jsr:@nullstyle/firecracker@^0.2` | JSR package | Published; pinned Firecracker v1.16.1, min v1.15.0 (`FIRECRACKER_COMPAT`) |
-| `@nullstyle/capnp` | Vendored snapshot (`vendor/capnp-deno`) | RPC Level 1 (capabilities, promise pipelining, embargoes), pure-TS serde, WASM session core. **Codegen fixes + JSR publish are 1.0 gates** (PLAN §M1) |
+| `@nullstyle/capnp` | JSR (target); pinned-commit GitHub imports from `nullstyle/capnp-deno` until it ships | RPC Level 1 (capabilities, promise pipelining, embargoes), pure-TS serde, WASM session core. **No vendored snapshots.** Codegen fixes + JSR publish are 1.0 gates (PLAN §M1) |
 | Lima ≥ 2.1 | Host tool (macOS) | `vz` + `nestedVirtualization` (Apple Silicon M3+, macOS 15+) |
 | Deno ≥ 2.5 | Runtime floor | Inherited from firecracker-deno; in-guest Deno is pinned by the artifact manifest |
 
@@ -396,7 +396,6 @@ parity/       upstream inventory + member audit (regenerable)
 compat/       dependency/wire provenance pins (checked by tools/check_*)
 tools/        drift/compat/publish gates, smoke drivers
 tests/        unit / fake / vm / e2e / parity / soak
-vendor/       capnp-deno snapshot (until @nullstyle/capnp is published)
 ```
 
 Naming: `sbx-` ID prefixes, `SBX_*` error codes, `SBXTUN1`/`SBXACK1` tunnel
@@ -414,8 +413,12 @@ magics, `/run/studiobox/`, `~/.studiobox/`, Lima VM `studiobox-host-<arch>`.
 4. **Tier C at 1.0** for secrets/ssh/vscode/volumes/snapshots/PaaS.
 5. **Destructive reconcile** on supervisor restart (user-confirmed direction).
 6. **Copy-only staging** into each jail (user-confirmed direction).
-7. **`@nullstyle/capnp` must be publishable** — fixing its codegen and
-   publishing 0.1.0 to JSR is on the critical path (M1); vendoring inside the
-   published studiobox package is the recorded fallback.
+7. **`@nullstyle/capnp` is consumed as a real dependency, never a vendored
+   snapshot** (user decision, 2026-07-11). Until it ships on JSR, studiobox
+   pins a commit of `github.com/nullstyle/capnp-deno` via https imports.
+   Because JSR rejects https imports in published packages, fixing capnp's
+   codegen and publishing `@nullstyle/capnp@0.1.0` (M1) is a hard
+   prerequisite for studiobox's own JSR release — there is no vendoring
+   escape hatch.
 8. Names: `studiobox-hostd`, `studiobox-rootd`, `studioboxd` (guest, as
    specified), `studiobox-host-<arch>` (Lima VM).
