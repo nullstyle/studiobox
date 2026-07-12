@@ -148,15 +148,18 @@ with explicit backpressure (`StreamSender`), bounded in-flight windows from
 `TransportLimits`, and a final commit carrying total bytes + SHA-256. No
 unbounded buffering anywhere on the path.
 
-**Upstream gap (capnp 0.2.0):** the published runtime cannot deliver a
-FRESHLY-exported capability in a method return — the WASM session core rejects a
-return frame that references an export id it never emitted, so the call hangs.
-Until upstream fixes the fresh-export return path, capability handout serves the
-gated interface as a **facet of the bootstrap/root capability** (already in the
-export table) rather than exporting a new pointer per call; the root dispatch
-accepts both interface ids and routes by the call's interface id. Relevant to M7
-(the `Supervisor`/agent capability handout splits back into its own capability
-once the return path is fixed).
+**Capability handout (capnp 0.3.0):** the runtime relays freshly host-minted
+exports in method returns and wire-manages their refcounts, so every plane hands
+out capabilities the schema-pure way — a fresh export per call, released by the
+peer's Release frames (the 0.2.0-era merged-root/facet workaround is retired on
+both the agent and supervisor planes). Two upstream client-side gaps remain,
+each with a pinned accommodation: generated stubs over `RpcWireClient`
+auto-finish with `releaseResultCaps: true` (capability-carrying calls must pass
+`finish: { releaseResultCaps: false }`), and the WASM relay auto-releases
+param-cap imports when the originating call returns (a server retaining a param
+cap — the agent's `OutputSink` pumps — exports it with one extra reference).
+Both drop when upstream grows result-cap-aware finish defaults and host-call
+param-cap retention.
 
 ## 5. Public API: fidelity to @deno/sandbox
 

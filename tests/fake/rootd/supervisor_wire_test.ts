@@ -10,19 +10,23 @@
 //     through the GENERATED codecs and result unions;
 //   - reconcile refusal mid-launch surfacing as the typed `unavailable`
 //     SbxError through the wire;
-//   - gate behavior: pre-auth capability use refused; wrong token
+//   - gate behavior: pre-auth capability request refused (typed) and
+//     gate-latching; a live Supervisor stub goes inert once the gate
+//     latches (per-method re-assert, defense in depth); wrong token
 //     rate-limited to the gate's failure budget; authenticate-before-
 //     negotiate refused; tampered schema hash rejected at negotiation;
 //   - transport hygiene: a client that disconnects mid-call leaves the
 //     accept loop healthy for the next client (pinned M1 ownership contract:
 //     every client transport wires onClose -> wire-client close, and
 //     onError);
-//   - capability handout contract: `SupervisorBootstrap.supervisor` returns
-//     a working stub of the ROOT facet, and releasing it cannot drop the
-//     connection's root capability. (Published capnp 0.2.0 cannot deliver
-//     FRESHLY exported capabilities in method returns — see the UPSTREAM
-//     GAP note in src/rootd/service.ts — which is why the Supervisor plane
-//     rides the root capability and `attachSupervisorCapability` exists.)
+//   - capability handout contract (capnp 0.3.0, schema-pure):
+//     `SupervisorBootstrap.supervisor` returns a FRESH wire-managed
+//     `Supervisor` capability per call; releasing one handout drops only
+//     its own export (the bootstrap root and later handouts keep working),
+//     and the released stub itself is dead. Clients over `RpcWireClient`
+//     must finish the handout call with `releaseResultCaps: false` (the
+//     CAP_CALL accommodation below; see the CLIENT CONTRACT note in
+//     src/rootd/service.ts).
 
 import { assert, assertEquals, assertExists, assertRejects } from "@std/assert";
 import { join } from "@std/path";
@@ -38,11 +42,11 @@ import {
 import {
   type BridgeRequest as WireBridgeRequest,
   type LaunchRequest as WireLaunchRequest,
+  type RpcStub,
   type Supervisor,
   SupervisorBootstrap,
 } from "../../../src/wire/generated/supervisor_types.ts";
 import {
-  attachSupervisorCapability,
   buildSupervisorContractIdentity,
   protocolOfferToWire,
   SUPERVISOR_FEATURE_BITS,
@@ -67,6 +71,20 @@ import { BRIDGE_SOCKET_ROOT } from "../../../src/wire/supervisor.ts";
 const TIMEOUT_MS = 5_000;
 // Launch spans jail staging + fake VMM boot + readiness probing.
 const LAUNCH_TIMEOUT_MS = 15_000;
+
+/**
+ * Options for calls whose RESULTS carry a fresh capability (here: only
+ * `bootstrap.supervisor()`). The server exports the handout wire-managed
+ * (its only wire reference is the one the Return frame mints), so the
+ * client must finish the question with `releaseResultCaps: false` to
+ * retain the capability — `RpcWireClient.finish` defaults to eager
+ * release, which would drop the export before its first use. Stub
+ * `close()` releases the retained reference.
+ */
+const CAP_CALL = {
+  timeoutMs: TIMEOUT_MS,
+  finish: { releaseResultCaps: false },
+} as const;
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -266,7 +284,7 @@ async function dialBootstrap(socketPath: string): Promise<WireClient> {
 }
 
 interface AuthenticatedClient extends WireClient {
-  readonly supervisor: Supervisor;
+  readonly supervisor: RpcStub<Supervisor>;
 }
 
 /** Full handshake: negotiate -> authenticate -> Supervisor capability. */
@@ -288,9 +306,8 @@ async function openSupervisor(
     { timeoutMs: TIMEOUT_MS },
   );
   assertEquals(authenticated.which, "accepted", "handshake must authenticate");
-  // The supported post-auth handout (see the UPSTREAM GAP PIN test below
-  // for why this is not `bootstrap.supervisor()` yet).
-  const supervisor = attachSupervisorCapability(client.wireClient);
+  // The schema-pure handout: a fresh wire-managed capability per call.
+  const supervisor = await client.bootstrap.supervisor(CAP_CALL);
   return { ...client, supervisor };
 }
 
@@ -506,21 +523,10 @@ Deno.test("supervisor wire gate: pre-auth capability request is refused and latc
       );
       assertEquals(negotiated.which, "accepted");
 
-      // The well-known capability index is inert pre-auth: methods with a
-      // result union answer permissionDenied, ping rejects typed.
-      const supervisor = attachSupervisorCapability(client.wireClient);
-      const preAuthLaunch = await supervisor.launch(
-        launchRequest("sbx-wire-g", "exec-wg"),
-        { timeoutMs: TIMEOUT_MS },
-      );
-      assertEquals(preAuthLaunch.which, "error");
-      assertEquals(preAuthLaunch.error?.code, "permissionDenied");
-      await assertRejects(() => supervisor.ping(1n, { timeoutMs: TIMEOUT_MS }));
-
-      // Capability request before authenticate: typed rejection.
-      await assertRejects(() =>
-        client.bootstrap.supervisor({ timeoutMs: TIMEOUT_MS })
-      );
+      // Capability request before authenticate: typed rejection, and the
+      // out-of-order call latches the gate closed. (No pre-auth Supervisor
+      // capability exists to probe — the handout IS the only wire path.)
+      await assertRejects(() => client.bootstrap.supervisor(CAP_CALL));
 
       // Even the correct token cannot reopen a latched gate.
       const late = await client.bootstrap.authenticate(
@@ -644,10 +650,10 @@ Deno.test("supervisor wire gate: a tampered schema bundle hash rejects at negoti
 });
 
 // ---------------------------------------------------------------------------
-// Capability handout contract (see the UPSTREAM GAP note in service.ts)
+// Capability handout contract (see the handout note in service.ts)
 // ---------------------------------------------------------------------------
 
-Deno.test("supervisor wire handout: bootstrap.supervisor() returns a working stub of the root facet", async () => {
+Deno.test("supervisor wire handout: bootstrap.supervisor() mints a fresh wire-managed capability per call", async () => {
   await withWireHarness(async (harness) => {
     const client = await dialBootstrap(harness.socketPath);
     try {
@@ -666,35 +672,66 @@ Deno.test("supervisor wire handout: bootstrap.supervisor() returns a working stu
       );
       assertEquals(authenticated.which, "accepted");
 
-      // The schema-pure handout. This works BECAUSE the returned pointer is
-      // the already-exported root capability (the Supervisor facet): per
-      // the UPSTREAM GAP note in service.ts, a freshly exported capability
-      // in a method return never reaches the caller on published capnp
-      // 0.2.0 (the WASM bridge rejects the return frame and the failure is
-      // swallowed) — a timeout here means the facet design regressed to a
-      // fresh export.
-      const sup = await client.bootstrap.supervisor({ timeoutMs: TIMEOUT_MS });
+      // The schema-pure handout: a FRESHLY exported capability in the
+      // method return (capnp 0.3.0 relays host-minted exports — a timeout
+      // here means the fresh-export return path regressed).
+      const sup = await client.bootstrap.supervisor(CAP_CALL);
       assertEquals(await sup.ping(9n, { timeoutMs: TIMEOUT_MS }), 9n);
       const health = await sup.health({ timeoutMs: TIMEOUT_MS });
       assertEquals(health.which, "health");
 
-      // Releasing the handed-out stub must NOT drop the connection's root
-      // capability (the server pins the root's refcount to the connection
-      // lifetime): both the bootstrap plane and a re-attach keep working.
+      // Releasing one handout drops only ITS export: the bootstrap root
+      // still serves, and a second handout mints a fresh working
+      // capability.
       await sup.close();
-      const supervisor = attachSupervisorCapability(client.wireClient);
-      assertEquals(await supervisor.ping(11n, { timeoutMs: TIMEOUT_MS }), 11n);
-      const late = await client.bootstrap.supervisor({
-        timeoutMs: TIMEOUT_MS,
-      });
-      assertEquals(
-        await late.ping(13n, { timeoutMs: TIMEOUT_MS }),
-        13n,
-      );
+      const late = await client.bootstrap.supervisor(CAP_CALL);
+      assertEquals(await late.ping(13n, { timeoutMs: TIMEOUT_MS }), 13n);
+      const lateHealth = await late.health({ timeoutMs: TIMEOUT_MS });
+      assertEquals(lateHealth.which, "health");
       await late.close();
 
       // Nothing on this path may fail silently server-side.
       assertEquals(harness.connectionErrors, []);
+
+      // The wire-managed release is REAL: the closed stub's export is gone,
+      // so calling through it fails typed instead of answering.
+      await assertRejects(() => sup.ping(15n, { timeoutMs: TIMEOUT_MS }));
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+Deno.test("supervisor wire gate: a live Supervisor stub goes inert when the gate latches closed (defense in depth)", async () => {
+  await withWireHarness(async (harness) => {
+    const client = await openSupervisor(harness);
+    try {
+      // Sanity: the authenticated handout works.
+      assertEquals(
+        await client.supervisor.ping(1n, { timeoutMs: TIMEOUT_MS }),
+        1n,
+      );
+
+      // An out-of-order bootstrap call (authenticate AFTER authenticated)
+      // latches the connection gate closed...
+      const repeat = await client.bootstrap.authenticate(
+        harness.credential.slice(),
+        { timeoutMs: TIMEOUT_MS },
+      );
+      assertEquals(repeat.which, "error");
+      assertEquals(repeat.error?.code, "failedPrecondition");
+
+      // ...and every method on the ALREADY-live stub re-asserts the gate:
+      // result-union methods answer permissionDenied, ping rejects typed.
+      const launch = await client.supervisor.launch(
+        launchRequest("sbx-wire-d", "exec-wd"),
+        { timeoutMs: TIMEOUT_MS },
+      );
+      assertEquals(launch.which, "error");
+      assertEquals(launch.error?.code, "permissionDenied");
+      await assertRejects(() =>
+        client.supervisor.ping(2n, { timeoutMs: TIMEOUT_MS })
+      );
     } finally {
       await client.close();
     }

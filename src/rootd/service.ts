@@ -18,7 +18,7 @@
  *   `src/wire/bootstrap_gate.ts`: `negotiate` runs
  *   {@linkcode negotiateProtocol} against a {@linkcode ContractIdentity}
  *   carrying the real schema-bundle hash from `compat/wire.json` plus the
- *   capnp 0.2.0 runtime identity ({@linkcode buildSupervisorContractIdentity}),
+ *   capnp runtime identity ({@linkcode buildSupervisorContractIdentity}),
  *   `authenticate` compares the 32-byte credential in constant time and is
  *   rate-limited by the gate, and the `Supervisor` capability (plus every
  *   method on it, defense in depth) refuses until `authenticated`.
@@ -28,32 +28,33 @@
  * each accepted UDS transport with a fresh connection lives in
  * `src/rootd/main.ts`.
  *
- * ## UPSTREAM GAP — freshly exported capability returns hang (capnp 0.2.0)
+ * ## Capability handout (capnp 0.3.0)
  *
- * On the published runtime, a server METHOD result that carries a NEWLY
- * exported capability (the generated `ctx.exportCapability` path) never
- * reaches the caller: the JS bridge mints an export id the WASM session
- * core never learned, `capnp_peer_respond_host_call_return_frame` rejects
- * the return frame referencing it, and the bridge swallows the failure —
- * the question is never answered and the client waits out its own timeout.
- * A side-registered bridge capability index fails the same way on inbound
- * calls ("host call failed"): only ids the WASM session itself has emitted
- * (the bootstrap root) are usable. Verified against jsr:@nullstyle/capnp
- * 0.2.0 on 2026-07-11.
+ * `SupervisorBootstrap.supervisor @2` returns a FRESH `Supervisor`
+ * capability per call, exported wire-managed through the call context by
+ * the generated service wrapper — the schema's intended shape. Releasing a
+ * handed-out stub drops only that export; the bootstrap root and later
+ * handouts are unaffected. Every `Supervisor` method still re-asserts the
+ * bootstrap gate server-side (defense in depth), so a stub outlives its
+ * usefulness the moment the gate closes.
  *
- * The working shape within those constraints: the `Supervisor` interface is
- * served as a FACET of the root bootstrap capability. The per-connection
- * root dispatch accepts BOTH interface ids (the bridge's `interfaceIds`
- * accept-list exists for exactly this) and routes by the call's interface
- * id, and `SupervisorBootstrap.supervisor @2` returns the ROOT capability
- * pointer — already known to the WASM export table, so the return delivers.
- * Clients may use the schema-pure handout (`bootstrap.supervisor()`) or
- * attach directly with {@linkcode attachSupervisorCapability}. Both are
- * safe: every `Supervisor` method re-asserts the bootstrap gate
- * server-side, so the facet is inert until `authenticate` succeeds. The
- * facet splits back into its own capability once upstream fixes the
- * fresh-export return path; the handout contract is pinned in
- * `tests/fake/rootd/supervisor_wire_test.ts`.
+ * HISTORY: through capnp 0.2.0 the `Supervisor` interface instead rode as a
+ * FACET of the root bootstrap capability (a merged dispatch accepting both
+ * interface ids, with `supervisor @2` returning the root pointer), because
+ * the 0.2.0 WASM session core rejected Return frames naming freshly
+ * host-minted exports — the call would hang. capnp 0.3.0 relays host-minted
+ * exports and wire-manages their refcounts, so the merged-root workaround
+ * (and its `attachSupervisorCapability` side door) is retired; the agent
+ * plane (`src/agent/service.ts`) made the same move.
+ *
+ * CLIENT CONTRACT (capnp 0.3.0 — pinned by
+ * `tests/fake/rootd/supervisor_wire_test.ts`): generated stubs over
+ * `RpcWireClient` auto-finish with `releaseResultCaps: true`, which would
+ * drop a wire-managed fresh export before first use — clients must call
+ * `bootstrap.supervisor()` with `finish: { releaseResultCaps: false }` and
+ * release the stub via its lifecycle `close()`. This is an upstream stub
+ * default gap, not schema semantics; drop the option when capnp-deno grows
+ * result-cap-aware finish defaults on that client path.
  *
  * @module
  */
@@ -70,25 +71,11 @@ import type {
   ProbeAgentResults,
   ReconcileResults,
   ReconcileSummary as WireReconcileSummary,
-  RpcClientTransport,
   RpcStub,
   StatusResults,
   Supervisor,
   SupervisorBootstrap,
   UsageResults,
-} from "../wire/generated/supervisor_types.ts";
-import {
-  createSupervisorClient,
-  createSupervisorServiceClient,
-  Supervisor as SupervisorToken,
-  SupervisorBootstrap as SupervisorBootstrapToken,
-  SupervisorBootstrapInterfaceId,
-  SupervisorInterfaceId,
-} from "../wire/generated/supervisor_types.ts";
-import type {
-  CapabilityPointer,
-  RpcServerDispatch,
-  RpcServiceToken,
 } from "../wire/generated/supervisor_types.ts";
 import type {
   AuthResult as WireAuthResult,
@@ -149,7 +136,7 @@ const SESSION_ID_BYTES = 16;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
 // ---------------------------------------------------------------------------
-// Contract identity: compat/wire.json + capnp 0.2.0 runtime identity
+// Contract identity: compat/wire.json + capnp runtime identity
 // ---------------------------------------------------------------------------
 
 /**
@@ -718,70 +705,17 @@ export function createSupervisorWireAdapter(
   };
 }
 
-/**
- * The root capability index every supervisor connection bootstraps to. The
- * `Supervisor` interface is served as a FACET of this same capability (see
- * the module doc's UPSTREAM GAP note); the facet split into its own
- * capability returns with the upstream return-frame fix.
- */
-export const SUPERVISOR_ROOT_CAPABILITY_INDEX = 0;
-
-/**
- * Client-side attach to the `Supervisor` facet of the root capability. Only
- * meaningful AFTER `negotiate` + `authenticate` succeeded on the same
- * transport — the server gate refuses every method until then
- * (fail-closed).
- */
-export function attachSupervisorCapability(
-  transport: RpcClientTransport,
-): Supervisor {
-  return createSupervisorServiceClient(
-    createSupervisorClient(transport, {
-      capabilityIndex: SUPERVISOR_ROOT_CAPABILITY_INDEX,
-    }),
-    transport,
-  );
-}
-
 /** Everything one accepted transport serves, sharing one gate. */
 export interface SupervisorWireConnection {
-  /** The bootstrap plane (facet of the root capability). */
+  /** The bootstrap plane — register as the connection's root capability. */
   readonly bootstrap: SupervisorBootstrap;
-  /** The gated Supervisor plane (facet of the root capability). */
+  /**
+   * The gated Supervisor service `bootstrap.supervisor()` hands out (a
+   * fresh wire-managed export per call, all wrapping this one instance).
+   */
   readonly supervisor: Supervisor;
   /** Connection-local phase gate (close it when the transport dies). */
   readonly gate: BootstrapGate;
-  /**
-   * The merged root dispatch: accepts both interface ids and routes by the
-   * inbound call's interface id. Export this as the connection's bootstrap
-   * root capability.
-   */
-  readonly rootDispatch: RpcServerDispatch;
-}
-
-/**
- * Harvest the generated low-level dispatch for a high-level service
- * implementation (the generated high-to-low wrapper is private; the token's
- * `registerServer` is the supported way through it).
- */
-function captureDispatch<TClient extends object, TServer extends object>(
-  token: RpcServiceToken<TClient, TServer>,
-  server: TServer,
-): RpcServerDispatch {
-  let captured: RpcServerDispatch | null = null;
-  token.registerServer(
-    {
-      exportCapability: (dispatch: RpcServerDispatch): CapabilityPointer => {
-        captured = dispatch;
-        return { capabilityIndex: 0 };
-      },
-    },
-    server,
-  );
-  if (captured === null) {
-    throw new WireValidationError("service dispatch capture failed");
-  }
-  return captured;
 }
 
 /**
@@ -900,32 +834,14 @@ export function createSupervisorWireConnection(
       // No error arm on this method: a pre-auth request fails closed as a
       // typed RPC exception and the gate latches shut.
       gate.assertAuthorized();
-      // Return the root capability pointer itself — the Supervisor plane is
-      // a facet of it, and the generated wrapper reuses an existing pointer
-      // instead of exporting a fresh one per call. That reuse is
-      // load-bearing: per the module doc's UPSTREAM GAP, a FRESH export
-      // here would never reach the caller on the published 0.2.0 runtime.
-      return Promise.resolve(
-        {
-          capabilityIndex: SUPERVISOR_ROOT_CAPABILITY_INDEX,
-        } as unknown as RpcStub<Supervisor>,
-      );
+      // Return the service implementation itself: the generated wrapper
+      // exports it through the call context as a FRESH wire-managed
+      // capability per call (no `referenceCount` — the Return frame mints
+      // the peer's reference and Release frames drain it). Releasing a
+      // handout drops only its own export, never the bootstrap root.
+      return Promise.resolve(supervisor as unknown as RpcStub<Supervisor>);
     },
   };
 
-  const bootstrapDispatch = captureDispatch(
-    SupervisorBootstrapToken,
-    bootstrap,
-  );
-  const supervisorDispatch = captureDispatch(SupervisorToken, supervisor);
-  const rootDispatch: RpcServerDispatch = {
-    interfaceId: SupervisorBootstrapInterfaceId,
-    interfaceIds: [SupervisorBootstrapInterfaceId, SupervisorInterfaceId],
-    dispatch: (methodId, params, ctx) =>
-      ctx.interfaceId === SupervisorInterfaceId
-        ? supervisorDispatch.dispatch(methodId, params, ctx)
-        : bootstrapDispatch.dispatch(methodId, params, ctx),
-  };
-
-  return { bootstrap, supervisor, gate, rootDispatch };
+  return { bootstrap, supervisor, gate };
 }

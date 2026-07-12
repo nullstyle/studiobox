@@ -24,16 +24,17 @@
  *
  * ## Why the accept loop drives `RpcServerRuntime` directly
  *
- * The package-level `serve()` binds ONE generated service token per
- * connection, but the published 0.2.0 runtime cannot deliver
- * capability-carrying METHOD returns (see the UPSTREAM GAP note in
- * `./service.ts`), so the `Supervisor` interface must ride as a FACET of
- * the root bootstrap capability — a merged dispatch `serve()` cannot
- * express. Each accepted transport therefore gets its own
- * `RpcServerRuntime.createWithRoot` exporting the connection's merged root
- * dispatch. The accept source itself keeps the shape `serve()` expects
- * (`Parameters<typeof serve>[1]`) so the loop can migrate back to `serve()`
- * once upstream lands the return-frame fix.
+ * Each accepted transport gets its own `RpcServerRuntime.createWithRoot`
+ * registering the connection's generated `SupervisorBootstrap` root; the
+ * gated `Supervisor` is exported fresh, wire-managed, per
+ * `bootstrap.supervisor()` call (capnp 0.3.0 — see the handout note in
+ * `./service.ts`). The single-token root shape is exactly what the
+ * package-level `serve()` binds, and the accept source keeps the shape
+ * `serve()` expects (`Parameters<typeof serve>[1]`) — the loop stays
+ * hand-rolled anyway because it owns behavior `serve()` does not express
+ * 1:1: closing each connection's bootstrap gate the moment its transport
+ * dies, surviving transient accept faults, and the pinned
+ * accepted/active/failed stats surface.
  *
  * ## Shutdown
  *
@@ -60,10 +61,10 @@ import { RpcServerRuntime, TcpTransport } from "@nullstyle/capnp";
 import type { RpcAcceptedTransport, serve } from "@nullstyle/capnp";
 import type { BootstrapGate } from "../wire/bootstrap_gate.ts";
 import { WireValidationError } from "../wire/contract.ts";
+import { SupervisorBootstrap as SupervisorBootstrapToken } from "../wire/generated/supervisor_types.ts";
 import {
   buildSupervisorContractIdentity,
   createSupervisorWireConnection,
-  SUPERVISOR_ROOT_CAPABILITY_INDEX,
   type SupervisorCompatIdentitySource,
   type SupervisorWireOptions,
 } from "./service.ts";
@@ -214,9 +215,10 @@ interface ActiveConnection {
 
 /**
  * Bind the supervisor wire service to a UDS path. Each accepted connection
- * gets a FRESH bootstrap gate + service pair (root `SupervisorBootstrap`,
- * pre-exported gated `Supervisor`); a transport that dies closes its gate
- * and tears its runtime down (fail-closed hygiene).
+ * gets a FRESH bootstrap gate + service pair (root `SupervisorBootstrap`;
+ * the gated `Supervisor` is exported per `supervisor()` handout); a
+ * transport that dies closes its gate and tears its runtime down
+ * (fail-closed hygiene).
  */
 export async function startSupervisorServer(
   options: SupervisorServerOptions,
@@ -273,21 +275,11 @@ export async function startSupervisorServer(
       const connection = createSupervisorWireConnection(options);
       const runtime = await RpcServerRuntime.createWithRoot(
         accepted.transport,
-        // The root capability serves BOTH interfaces (bootstrap plane +
-        // gated Supervisor facet); see the UPSTREAM GAP note in service.ts.
-        (bridge, rootDispatch, rootOptions) =>
-          bridge.exportCapability(rootDispatch, rootOptions),
-        connection.rootDispatch,
+        SupervisorBootstrapToken.registerServer,
+        connection.bootstrap,
         {
-          rootCapabilityIndex: SUPERVISOR_ROOT_CAPABILITY_INDEX,
-          // The root capability's lifetime is the connection's: clients
-          // that Finish/Release the supervisor() result (the generated
-          // default eagerly releases result caps) must not be able to
-          // drop the connection's root out of the export table.
-          rootReferenceCount: 0x7fff_ffff,
           bridgeOptions: {
-            // Without this hook, an async dispatch-response failure (e.g.
-            // the pinned fresh-export capability-return WASM gap) is
+            // Without this hook, an async dispatch-response failure is
             // swallowed and the caller hangs invisibly. Surface it.
             onUnhandledError: reportConnectionError,
           },

@@ -111,14 +111,12 @@ export type {
 // adapter over `SupervisorApi` plus the UDS server assembly, surfaced
 // for hostd embedders (M6/M7).
 export {
-  attachSupervisorCapability,
   buildSupervisorContractIdentity,
   contractIdentityFromWire,
   contractIdentityToWire,
   createSupervisorWireConnection,
   protocolOfferToWire,
   SUPERVISOR_FEATURE_BITS,
-  SUPERVISOR_ROOT_CAPABILITY_INDEX,
   supervisorFaultToWire,
   transportLimitsFromWire,
   transportLimitsToWire,
