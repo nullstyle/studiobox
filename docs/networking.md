@@ -12,11 +12,21 @@ not yet wired into `launch_planner.ts` (see
 Every sandbox is confined by nftables egress rules attached to its host-side TAP
 device. Concretely, each sandbox owns **exactly one nftables table**,
 `inet
-sbx_eg_<sandboxId>`, containing:
+sbx_eg_<token>`, containing:
 
 - a single base chain `egress`
   (`type filter hook forward priority 0; policy accept;`), and
 - the allow sets it references.
+
+`<token>` is an **injective** encoding of the raw sandbox id (bytes already in
+`[a-z0-9]` pass through; every other byte — uppercase, `-`, `_`, `.`, … — is
+escaped as `_<hex>`). This matters for isolation: a non-injective mapping (an
+earlier version folded `toLowerCase()` + collapsed every non-`[a-z0-9_]` byte to
+`_`) let case- or separator-only id variants such as `sbx-audit`/`sbx-AUDIT` or
+`sbx-a-b`/`sbx-a_b` collide onto **one** table, so a hostile launcher could aim
+two sandboxes at the same table and have one overwrite (its `add;delete;table`)
+or reclaim (its `delete table`) the other's egress. The encoding is a bijection,
+so distinct ids can never share a table.
 
 Isolating each sandbox in its own table — rather than sharing one table and
 threading per-sandbox jump rules through it — means teardown is a single
@@ -47,7 +57,8 @@ rest.
 ```
 iifname != "<tap>" accept            # 1. not ours — let other tables decide
 ip saddr  != <guestIp> drop          # 2. anti-spoof (IPv4)
-ip6 saddr != <guestIp6> drop         #    anti-spoof (IPv6, if the guest has one)
+ip6 saddr != <guestIp6> drop         #    anti-spoof (IPv6) when guestIp6 is set,
+meta nfproto ipv6 drop               #    else a hard v6 seal (see below)
 ct state established,related accept   # 3. return + related flows
 ip  daddr <resolver> udp dport 53 accept   # 4. DNS to the sandbox resolver
 ip  daddr <resolver> tcp dport 53 accept
@@ -56,9 +67,23 @@ ip6 daddr @allow6 accept
 ip  daddr . tcp dport @allow4_port accept
 ip  daddr . udp dport @allow4_port accept
 ...
-ip  daddr @wild4_0 accept             #    wildcard sets (dnsmasq-synced)
+ip  daddr @wild4_0 ip daddr != @blocked4 accept   # wildcard sets (dnsmasq-synced),
+ip6 daddr @wild6_0 ip6 daddr != @blocked6 accept  # gated on non-private daddr
 drop                                  # 6. default-deny
 ```
+
+Exactly one of the two IPv6 lines in step 2 is emitted:
+`ip6 saddr != <guestIp6>
+drop` when the guest has a provisioned v6 address,
+otherwise `meta nfproto ipv6
+drop` — an explicit hard seal so a guest that
+brings up IPv6 without a provisioned `guestIp6` gets **no** v6 egress, rather
+than depending on the trailing default-deny to catch it implicitly.
+
+The `@blocked4` / `@blocked6` sets in the wildcard rules hold the private,
+link-local, cloud-metadata (`169.254.169.254`), and loopback ranges; see
+[dnsmasq set population](#apply-time-hostname-resolution) below for why the
+wildcard accepts are gated on them.
 
 An **unrestricted** sandbox (unset `allowNet`) still gets a table for lifecycle
 symmetry, but its `egress` chain has an empty body (policy accept), so the TAP's
@@ -107,10 +132,24 @@ kinds of pattern resolve differently:
   ```
 
   As the guest resolves `foo.example.com` **through the sandbox resolver**,
-  dnsmasq adds each answer IP to the set. Because the egress rules only permit
-  DNS to that same resolver, the guest cannot populate the set behind dnsmasq's
-  back. `renderDnsmasqFragment` produces this fragment; the launch integration
-  writes it into the resolver's include directory and reloads it.
+  dnsmasq adds each answer IP to the set. The guest can only reach _this_
+  resolver — but that does **not** mean the set contents are trustworthy: a
+  hostile guest steering an allowlisted wildcard (e.g. `*.ngrok.io`,
+  `*.trycloudflare.com`) can resolve `x.<domain>` to `169.254.169.254`, an
+  RFC-1918 host, or the Lima host itself, and dnsmasq will load that answer into
+  the accept set. The guest therefore **can** influence the set's contents; the
+  _filter_, not the resolver, is what protects. Two defenses apply:
+
+  1. **Ruleset (authoritative).** Every wildcard accept is gated on
+     `ip daddr != @blocked4` / `ip6 daddr != @blocked6`, so even a poisoned
+     private / link-local / metadata / loopback answer that lands in the set
+     never grants egress — it falls through to the trailing `drop`.
+  2. **Resolver (defense in depth).** The dnsmasq fragment enables
+     `stop-dns-rebind`, which rejects upstream answers in the private ranges
+     before they reach the set.
+
+  `renderDnsmasqFragment` produces this fragment; the launch integration writes
+  it into the resolver's include directory and reloads it.
 
 ## Fail-closed guarantees
 
@@ -147,6 +186,19 @@ masquerade table), driving the exact `nft` script this module generates:
 - **reclaim:** the generated reclaim script removed the table, and every
   probe-created resource was torn down by exact name — no leaked table, netns,
   veth, or resolver file, and Lima's base `table ip nat` left intact.
+- **wildcard poisoning (FIX A):** a three-netns forward path with the generated
+  wildcard ruleset in the router netns; injecting a private `10.91.0.50` element
+  into `wild4_0` the way a poisoned DNS answer would. With the `@blocked4` guard
+  the guest→`10.91.0.50` probe is **BLOCKED**; with the pre-fix bare
+  `ip daddr @wild4_0 accept` the same element is **REACHABLE** — the bypass, now
+  closed.
+- **table-name collision (FIX B):** applying the restrictive ruleset for
+  `sbx-audit` then `sbx-AUDIT` in one netns. With injective naming the two land
+  in distinct tables (`sbx_eg_sbx_2daudit` vs `sbx_eg_sbx_2d_41_55_44_49_54`);
+  the victim's table is byte-identical after the colliding-id apply and survives
+  the sibling's reclaim intact. Under the pre-fix folding both ids collided onto
+  `sbx_eg_sbx_audit`, so the second apply overwrote the victim's allow-list and
+  the sibling's reclaim deleted the shared table, leaving the victim unfiltered.
 
 ## Integration point (left for later)
 
@@ -179,10 +231,10 @@ An egress-bypass review is warranted **before merge**. Vectors to check:
   later resolves to. Confirm the snapshot semantics are the intended contract,
   and consider periodic re-resolution or a TTL-bounded refresh so a name pointed
   at a benign IP at apply time cannot keep a stale allowance.
-- **IPv6 leak.** If a guest has working IPv6 but `guestIp6` is unset, the v6
-  anti-spoof rule is absent and only daddr-based allows constrain it — confirm
-  guests get no v6 connectivity unless explicitly provisioned, or always emit
-  the v6 default-deny path.
+- **IPv6 leak.** _(Addressed.)_ When `guestIp6` is unset the ruleset now emits
+  an explicit `meta nfproto ipv6 drop` right after the anti-spoof block,
+  hard-sealing all v6 for the TAP; when it is set, v6 anti-spoof applies. A
+  guest gets no v6 egress unless explicitly provisioned.
 - **Raw-IP bypass of hostname rules.** Hostname rules only allow the resolved
   IPs; a guest connecting by raw IP to a non-allowed address is dropped
   (verified). Confirm there is no host whose allowed hostname shares an IP with
@@ -195,9 +247,14 @@ An egress-bypass review is warranted **before merge**. Vectors to check:
   address. Decide whether a global hardening rule should block link-local
   (`169.254.0.0/16`, `fe80::/10`) and the host address even when `allowNet` is
   unset.
-- **dnsmasq set population trust.** Wildcard sets are filled by dnsmasq from DNS
-  answers; a poisoned upstream answer widens the set. Confirm the sandbox
-  resolver validates/limits answers and that only that resolver is reachable.
+- **dnsmasq set population trust.** _(Addressed.)_ Wildcard sets are filled by
+  dnsmasq from DNS answers the guest can steer, so a poisoned answer (e.g. a
+  wildcard subdomain pointed at `169.254.169.254` or an RFC-1918 host) widens
+  the set. Every wildcard accept is now gated on `ip daddr != @blocked4` /
+  `ip6 daddr != @blocked6` (private / link-local / metadata / loopback ranges),
+  so a poisoned element never grants egress, and the dnsmasq fragment enables
+  `stop-dns-rebind` as a second layer. Live-validated against real nftables (see
+  below).
 - **Established-state abuse.** `ct state established,related accept` trusts
   conntrack; confirm the guest cannot forge a flow into the established state
   (e.g. via a shared conntrack zone) to skip the allow rules.

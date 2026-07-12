@@ -80,6 +80,11 @@ export interface NftSet {
   readonly type: string;
   /** Pre-rendered element tokens (already validated / normalized). */
   readonly elements: readonly string[];
+  /**
+   * Optional set flags, e.g. `["interval"]` for a set that holds CIDR ranges.
+   * Rendered as `flags interval` inside the set body.
+   */
+  readonly flags?: readonly string[];
 }
 
 /** The structured, host-independent egress ruleset for one sandbox. */
@@ -99,6 +104,67 @@ const HOOK_DECL = "type filter hook forward priority 0; policy accept;";
 const DNS_PORT = 53;
 const TAP_NAME = /^[A-Za-z0-9_.-]{1,15}$/;
 const TABLE_TOKEN = /^[a-z0-9_]+$/;
+const TABLE_PREFIX = "sbx_eg_";
+/**
+ * Upper bound on the raw sandbox-id byte length. The injective token encoding
+ * (see {@linkcode egressTableName}) expands each byte to at most 3 output chars,
+ * so `sbx_eg_` + 3·len must stay within nft's identifier length; this bound
+ * keeps every produced name well under 255 and fails closed on absurd ids.
+ */
+const MAX_ID_BYTES = 80;
+const textEncoder = new TextEncoder();
+
+/**
+ * IPv4 ranges a dnsmasq-populated wildcard set must never grant egress to:
+ * RFC-1918 private space, CGNAT, link-local (incl. the `169.254.169.254`
+ * cloud-metadata address), and loopback. Held in an `interval`-flagged nft set
+ * and used to gate every wildcard accept (see {@linkcode appendWildcard}).
+ */
+const BLOCKED4_SET = "blocked4";
+const BLOCKED4_RANGES: readonly string[] = [
+  "10.0.0.0/8",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+];
+/** IPv6 counterpart to {@linkcode BLOCKED4_RANGES}: loopback, ULA, link-local. */
+const BLOCKED6_SET = "blocked6";
+const BLOCKED6_RANGES: readonly string[] = [
+  "::1/128",
+  "fc00::/7",
+  "fe80::/10",
+];
+
+/**
+ * Injectively encode a raw sandbox id into nft's identifier charset
+ * (`[a-z0-9_]`). The mapping must be **collision-free** across distinct ids —
+ * a hostile launcher must not be able to steer two different-but-valid ids onto
+ * one nft table (which would let one sandbox overwrite or reclaim another's
+ * egress). See {@linkcode egressTableName}.
+ *
+ * Bytes that are already unambiguous lowercase identifier characters (`a-z`,
+ * `0-9`) pass through as themselves; **every other byte** — including `_`,
+ * uppercase, `-`, `.`, and any non-ASCII — is escaped as `_<2-hex>`. Because
+ * `_` is emitted *only* as an escape introducer (never as a literal) and each
+ * escape is a fixed 3 chars, the output decodes back to the exact input bytes,
+ * so the encoding is a bijection: `"sbx-audit"` and `"sbx-AUDIT"`, or
+ * `"sbx-a-b"` and `"sbx-a_b"`, can never collide.
+ */
+function encodeIdToken(id: string): string {
+  const bytes = textEncoder.encode(id);
+  let out = "";
+  for (const b of bytes) {
+    const lower = b >= 0x61 && b <= 0x7a; // a-z
+    const digit = b >= 0x30 && b <= 0x39; // 0-9
+    if (lower || digit) {
+      out += String.fromCharCode(b);
+    } else {
+      out += "_" + b.toString(16).padStart(2, "0");
+    }
+  }
+  return out;
+}
 
 /** Raised when a handle or option would produce an invalid / unsafe ruleset. */
 export class EgressRulesetError extends Error {
@@ -110,14 +176,26 @@ export class EgressRulesetError extends Error {
 
 /**
  * Derive the per-sandbox nft table name. Deterministic (apply and reclaim must
- * agree) and constrained to nft's identifier charset.
+ * agree), constrained to nft's identifier charset, and — critically —
+ * **injective**: distinct sandbox ids always yield distinct table names.
+ *
+ * The old implementation folded the id (`toLowerCase` + collapse every
+ * non-`[a-z0-9_]` char to `_`), which was *not* injective: case- or
+ * separator-only variants such as `"sbx-audit"`/`"sbx-AUDIT"` and
+ * `"sbx-a-b"`/`"sbx-a_b"` collided onto one table, letting a hostile launcher
+ * overwrite or reclaim a victim sandbox's egress (DESIGN.md §8 — the workload is
+ * hostile; the filter must resist bypass). The token is now a bijective
+ * encoding of the raw id bytes ({@linkcode encodeIdToken}), so no two distinct
+ * ids can ever share a table.
  */
 export function egressTableName(sandboxId: string): string {
   if (typeof sandboxId !== "string" || sandboxId.length === 0) {
     throw new EgressRulesetError("sandbox id must be a non-empty string");
   }
-  const token = sandboxId.toLowerCase().replace(/[^a-z0-9_]/g, "_");
-  const name = `sbx_eg_${token}`;
+  if (textEncoder.encode(sandboxId).length > MAX_ID_BYTES) {
+    throw new EgressRulesetError("sandbox id is too long for a table name");
+  }
+  const name = `${TABLE_PREFIX}${encodeIdToken(sandboxId)}`;
   if (name.length > 255 || !TABLE_TOKEN.test(name)) {
     throw new EgressRulesetError(
       "sandbox id does not yield a valid table name",
@@ -165,9 +243,17 @@ export function generateRuleset(
 
   // 1. Not our TAP — let other sandbox tables judge it.
   rules.push(`iifname != "${tap}" accept`);
-  // 2. Anti-spoof: the only source addresses this TAP may use.
+  // 2. Anti-spoof: the only source addresses this TAP may use. IPv6 is sealed
+  //    explicitly either way — anti-spoof when the guest has a v6 address, or a
+  //    hard `meta nfproto ipv6 drop` when it does not, so a guest that brings up
+  //    v6 without a provisioned guestIp6 gets no v6 egress (fail closed) rather
+  //    than relying on the trailing default-deny to catch it implicitly.
   rules.push(`ip saddr != ${guestIp} drop`);
-  if (guestIp6 !== undefined) rules.push(`ip6 saddr != ${guestIp6} drop`);
+  if (guestIp6 !== undefined) {
+    rules.push(`ip6 saddr != ${guestIp6} drop`);
+  } else {
+    rules.push("meta nfproto ipv6 drop");
+  }
   // 3. Return + related traffic for already-allowed flows.
   rules.push("ct state established,related accept");
   // 4. DNS to the configured resolver(s).
@@ -206,8 +292,28 @@ export function generateRuleset(
     rules.push("ip6 daddr . udp dport @allow6_port accept");
   }
   // 5c. Wildcard subdomains — empty sets kept in sync by dnsmasq at run time.
-  for (const wildcard of resolved.wildcards) {
-    appendWildcard(sets, rules, wildcard);
+  //     Unlike exact IPs (operator-specified, trusted), a wildcard set is filled
+  //     by dnsmasq from *upstream DNS answers* the hostile guest can steer (e.g.
+  //     resolving x.<allowed-wildcard> to 169.254.169.254 or an RFC-1918 host).
+  //     So each wildcard accept is gated on the destination NOT being in the
+  //     private / link-local / metadata / loopback ranges: even if a poisoned
+  //     answer lands in the set, egress to it still falls through to `drop`.
+  if (resolved.wildcards.length > 0) {
+    sets.push({
+      name: BLOCKED4_SET,
+      type: "ipv4_addr",
+      flags: ["interval"],
+      elements: [...BLOCKED4_RANGES],
+    });
+    sets.push({
+      name: BLOCKED6_SET,
+      type: "ipv6_addr",
+      flags: ["interval"],
+      elements: [...BLOCKED6_RANGES],
+    });
+    for (const wildcard of resolved.wildcards) {
+      appendWildcard(sets, rules, wildcard);
+    }
   }
 
   // 6. Default-deny for everything else on this TAP.
@@ -253,14 +359,19 @@ function appendWildcard(
   const v6 = `wild6_${wildcard.index}`;
   sets.push({ name: v4, type: "ipv4_addr", elements: [] });
   sets.push({ name: v6, type: "ipv6_addr", elements: [] });
+  // Membership in the wildcard set alone is NOT sufficient: the destination must
+  // also be outside the blocked (private/link-local/metadata/loopback) ranges,
+  // so a dnsmasq-poisoned answer cannot open egress to a martian address.
+  const guard4 = `ip daddr @${v4} ip daddr != @${BLOCKED4_SET}`;
+  const guard6 = `ip6 daddr @${v6} ip6 daddr != @${BLOCKED6_SET}`;
   if (wildcard.port === undefined) {
-    rules.push(`ip daddr @${v4} accept`);
-    rules.push(`ip6 daddr @${v6} accept`);
+    rules.push(`${guard4} accept`);
+    rules.push(`${guard6} accept`);
   } else {
-    rules.push(`ip daddr @${v4} tcp dport ${wildcard.port} accept`);
-    rules.push(`ip daddr @${v4} udp dport ${wildcard.port} accept`);
-    rules.push(`ip6 daddr @${v6} tcp dport ${wildcard.port} accept`);
-    rules.push(`ip6 daddr @${v6} udp dport ${wildcard.port} accept`);
+    rules.push(`${guard4} tcp dport ${wildcard.port} accept`);
+    rules.push(`${guard4} udp dport ${wildcard.port} accept`);
+    rules.push(`${guard6} tcp dport ${wildcard.port} accept`);
+    rules.push(`${guard6} udp dport ${wildcard.port} accept`);
   }
 }
 
@@ -274,6 +385,9 @@ export function renderNftScript(ruleset: NftRuleset): string {
   for (const set of ruleset.sets) {
     lines.push(`\tset ${set.name} {`);
     lines.push(`\t\ttype ${set.type}`);
+    if (set.flags !== undefined && set.flags.length > 0) {
+      lines.push(`\t\tflags ${set.flags.join(",")}`);
+    }
     if (set.elements.length > 0) {
       lines.push(`\t\telements = { ${set.elements.join(", ")} }`);
     }
@@ -320,9 +434,13 @@ export function renderReclaimScript(ruleset: NftRuleset): string {
  *
  * For each `*.example.com` pattern, dnsmasq is told to add every A / AAAA answer
  * for `example.com` and its subdomains into this sandbox's `wild4_i` / `wild6_i`
- * nft sets. Because the egress rules only permit DNS to this same resolver, the
- * guest cannot populate the set behind dnsmasq's back. Returns `""` when the
- * spec has no wildcards.
+ * nft sets. The guest can only reach *this* resolver, but it can still steer the
+ * set's contents by resolving an allowlisted subdomain to an attacker-chosen
+ * (possibly private / metadata) address, so the fragment enables dnsmasq's
+ * `stop-dns-rebind` filter to reject upstream answers in the private ranges.
+ * That is defense-in-depth on top of the ruleset's `@blocked4`/`@blocked6`
+ * guard — the nft guard, not dnsmasq, is the authoritative seal. Returns `""`
+ * when the spec has no wildcards.
  */
 export function renderDnsmasqFragment(
   resolved: ResolvedEgress,
@@ -331,10 +449,14 @@ export function renderDnsmasqFragment(
   if (resolved.mode !== "restricted" || resolved.wildcards.length === 0) {
     return "";
   }
-  const lines = resolved.wildcards.map((w) =>
-    `nftset=/${w.baseDomain}/4#inet#${tableName}#wild4_${w.index},` +
-    `6#inet#${tableName}#wild6_${w.index}`
-  );
+  const lines = [
+    // Reject upstream answers in the RFC-1918 private ranges (anti DNS-rebind).
+    "stop-dns-rebind",
+    ...resolved.wildcards.map((w) =>
+      `nftset=/${w.baseDomain}/4#inet#${tableName}#wild4_${w.index},` +
+      `6#inet#${tableName}#wild6_${w.index}`
+    ),
+  ];
   return lines.join("\n") + "\n";
 }
 

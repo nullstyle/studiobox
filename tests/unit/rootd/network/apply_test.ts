@@ -18,7 +18,7 @@ import {
 } from "../../../../src/rootd/network/mod.ts";
 
 const HANDLE: SandboxNetworkHandle = {
-  sandboxId: "sbx_a",
+  sandboxId: "sbxa",
   tapDevice: "tap-a",
   guestIp: "10.0.0.2",
 };
@@ -60,11 +60,11 @@ Deno.test("apply installs the ruleset with a single nft -f transaction", async (
   assertEquals(runner.calls.length, 1);
   assertEquals(runner.calls[0].bin, "nft");
   assertEquals(runner.calls[0].args, ["-f", "-"]);
-  assertEquals(applied.tableName, "sbx_eg_sbx_a");
-  assertStringIncludes(runner.calls[0].stdin, "table inet sbx_eg_sbx_a {");
+  assertEquals(applied.tableName, "sbx_eg_sbxa");
+  assertStringIncludes(runner.calls[0].stdin, "table inet sbx_eg_sbxa {");
   assertStringIncludes(
     runner.calls[0].stdin,
-    "add table inet sbx_eg_sbx_a\ndelete table inet sbx_eg_sbx_a\n",
+    "add table inet sbx_eg_sbxa\ndelete table inet sbx_eg_sbxa\n",
   );
 });
 
@@ -121,12 +121,12 @@ Deno.test("a failed apply installs the deny-all seal and fails closed", async ()
 Deno.test("reclaim deletes exactly the sandbox's table, idempotently", async () => {
   const runner = new FakeRunner();
   const controller = new EgressController({ runner });
-  await controller.reclaim({ sandboxId: "sbx_a" });
+  await controller.reclaim({ sandboxId: "sbxa" });
 
   assertEquals(runner.calls.length, 1);
   assertEquals(
     runner.calls[0].stdin,
-    "add table inet sbx_eg_sbx_a\ndelete table inet sbx_eg_sbx_a\n",
+    "add table inet sbx_eg_sbxa\ndelete table inet sbx_eg_sbxa\n",
   );
 });
 
@@ -138,12 +138,12 @@ Deno.test("reclaim removes exactly what apply added — same table, nothing else
 
   const applyScript = runner.calls[0].stdin;
   const reclaimScript = runner.calls[1].stdin;
-  assertStringIncludes(applyScript, "table inet sbx_eg_sbx_a {");
+  assertStringIncludes(applyScript, "table inet sbx_eg_sbxa {");
 
   const deletes = reclaimScript.split("\n").filter((l) =>
     l.startsWith("delete table")
   );
-  assertEquals(deletes, ["delete table inet sbx_eg_sbx_a"]);
+  assertEquals(deletes, ["delete table inet sbx_eg_sbxa"]);
   // Never a wildcard sweep / flush of shared state (DESIGN.md §8).
   assert(!reclaimScript.includes("flush"), "no flush");
   assert(!reclaimScript.includes("*"), "no wildcard");
@@ -157,7 +157,7 @@ Deno.test("reclaim surfaces an unexpected nft failure as EgressReclaimError", as
   }]);
   const controller = new EgressController({ runner });
   await assertRejects(
-    () => controller.reclaim({ sandboxId: "sbx_a" }),
+    () => controller.reclaim({ sandboxId: "sbxa" }),
     EgressReclaimError,
   );
 });
@@ -165,7 +165,7 @@ Deno.test("reclaim surfaces an unexpected nft failure as EgressReclaimError", as
 Deno.test("reclaim targets the netns when given one", async () => {
   const runner = new FakeRunner();
   const controller = new EgressController({ runner });
-  await controller.reclaim({ sandboxId: "sbx_a", netns: "sbx-ns" });
+  await controller.reclaim({ sandboxId: "sbxa", netns: "sbx-ns" });
   assertEquals(runner.calls[0].bin, "ip");
   assertEquals(runner.calls[0].args, [
     "netns",
