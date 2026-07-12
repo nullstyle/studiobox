@@ -48,7 +48,11 @@ import { AgentError } from "./api.ts";
 import { AgentDeno } from "./deno_runtime.ts";
 import { AgentEnv, guestBaseEnvironment } from "./env.ts";
 import { AgentFs } from "./fs.ts";
-import { AgentProcesses, sandboxHome } from "./processes.ts";
+import {
+  AgentProcesses,
+  createCgroupOomAnnotator,
+  sandboxHome,
+} from "./processes.ts";
 import {
   type AgentWireOptions,
   type AgentWireServer,
@@ -90,7 +94,16 @@ function assembleAgent(
   const env = new AgentEnv(
     guestBaseEnvironment(sandboxHome(config), Deno.env.toObject()),
   );
-  const processes = new AgentProcesses({ config, env });
+  // Real cgroup v2 OOM detection (M10): a `code === 137` exit is annotated
+  // `oom: true` only when the guest cgroup's `memory.events` `oom_kill`
+  // counter incremented around the death. The default reader reads
+  // `/proc/self/cgroup` + `/sys/fs/cgroup` (covered by the baked `-A`); on a
+  // non-cgroup-v2 host it fails safe to `oom: false`.
+  const processes = new AgentProcesses({
+    config,
+    env,
+    oomAnnotator: createCgroupOomAnnotator(),
+  });
   const fs = new AgentFs(config);
   const deno = new AgentDeno({ config, spawner: processes, denoPath });
   const startedAtUnixMs = Date.now();

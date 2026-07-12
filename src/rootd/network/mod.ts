@@ -77,3 +77,49 @@ export {
   EgressReclaimHook,
   type EgressReclaimHookOptions,
 } from "./reclaim_hook.ts";
+
+export {
+  BitmapSubnetAllocator,
+  DEFAULT_POOL_CIDR,
+  type SubnetAllocation,
+  type SubnetAllocator,
+  type SubnetAllocatorOptions,
+  subnetForSlot,
+  SubnetPoolExhaustedError,
+  TAP_NAME_PREFIX,
+} from "./allocator.ts";
+
+export {
+  NetworkController,
+  NetworkControllerError,
+  type NetworkControllerOptions,
+  type NetworkProvisionOptions,
+  STUDIOBOX_ISOLATION_TABLE,
+  STUDIOBOX_NAT_TABLE,
+} from "./dataplane.ts";
+
+export {
+  DenoFileReader,
+  DenoFileRemover,
+  DenoFileWriter,
+  DenoProcessSignaller,
+  DNS_RUN_DIR,
+  DnsmasqController,
+  type DnsmasqControllerOptions,
+  DnsmasqError,
+  type DnsmasqInstallOptions,
+  type DnsmasqInstance,
+  type FileReader,
+  type FileRemover,
+  type FileWriter,
+  type ProcessSignaller,
+} from "./dnsmasq.ts";
+
+export {
+  PortForwardController,
+  type PortForwardControllerOptions,
+  PortForwardError,
+  PortForwardReclaimError,
+  type PortForwardRequest,
+  portForwardTableName,
+} from "./port_forward.ts";

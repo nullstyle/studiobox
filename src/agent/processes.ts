@@ -14,8 +14,9 @@
  *   (SIGTERM 143, SIGKILL 137, ... — `Deno.Command` already reports this
  *   on POSIX, verified for the pinned floor).
  * - `oom` is only meaningful with exit code 137: the spawner consults
- *   its {@linkcode AgentOomAnnotator} seam then (default `false`); real
- *   cgroup `memory.events` detection is M10.
+ *   its {@linkcode AgentOomAnnotator} seam then (default `false`). The
+ *   real cgroup v2 `memory.events` `oom_kill` reader is
+ *   {@linkcode createCgroupOomAnnotator} (wired in `src/agent/main.ts`).
  * - Spawn environments are `agent env (AgentEnv) ⊕ per-spawn env`, with
  *   `clearEnv` dropping the agent layer. The HOST process environment
  *   never leaks: children are always spawned with `clearEnv: true` at
@@ -402,8 +403,9 @@ export interface AgentProcessesOptions {
   readonly env?: EnvSnapshotSource;
   /**
    * The oom annotation seam, consulted once per exit with `code === 137`
-   * (see {@linkcode AgentOomAnnotator}). Default: always `false`; real
-   * cgroup detection replaces this in M10.
+   * (see {@linkcode AgentOomAnnotator}). Default: always `false`. The real
+   * cgroup v2 reader is {@linkcode createCgroupOomAnnotator}, which
+   * `src/agent/main.ts` wires in for the guest.
    */
   readonly oomAnnotator?: AgentOomAnnotator;
 }
@@ -506,6 +508,171 @@ export class AgentProcesses implements AgentProcessSpawner {
       process.releaseResources();
     }));
   }
+}
+
+// ---------------------------------------------------------------------------
+// cgroup v2 OOM annotation (M10)
+// ---------------------------------------------------------------------------
+
+/**
+ * The subset of a cgroup v2 `memory.events` file the OOM annotator needs.
+ * `oom_kill` is the cumulative count of processes in the cgroup (or its
+ * descendants) killed by any OOM killer — the counter upstream collapses
+ * with "exit 137" into {@linkcode AgentProcessStatus.oom}.
+ */
+export interface CgroupMemoryEvents {
+  /** The cgroup v2 `memory.events` `oom_kill` counter (>= 0). */
+  readonly oomKill: number;
+}
+
+/**
+ * Injected accessor for the guest cgroup v2 filesystem so
+ * {@linkcode createCgroupOomAnnotator} is unit-testable on a host with no
+ * cgroupfs (macOS). The default {@linkcode denoCgroupReader} reads the
+ * real files under `/proc` and `/sys/fs/cgroup`.
+ */
+export interface CgroupReader {
+  /**
+   * Resolve the absolute path of the `memory.events` file for the agent's
+   * OWN cgroup. studioboxd runs as guest pid 1 and its children inherit
+   * its cgroup, so its cgroup (read from `/proc/self/cgroup`) is the one a
+   * killed child belonged to — and, unlike `/proc/<pid>/cgroup`, it is
+   * still readable after the child is reaped. Rejects on a non-cgroup-v2
+   * host or a malformed/unreadable `/proc/self/cgroup`.
+   */
+  resolveSelfMemoryEventsPath(): Promise<string>;
+  /**
+   * Read and parse the `memory.events` file at `path`. Rejects on a
+   * missing/unreadable file.
+   */
+  readMemoryEvents(path: string): Promise<CgroupMemoryEvents>;
+}
+
+/**
+ * Map the unified-hierarchy (`0::<path>`) line of a `/proc/<pid>/cgroup`
+ * body to the absolute `memory.events` path under `/sys/fs/cgroup`. cgroup
+ * v2 exposes a single `0::<relpath>` entry; the root cgroup is `0::/`.
+ * Throws {@linkcode AgentError} `SBX_AGENT_STATE` when no unified line is
+ * present (a cgroup-v1-only / hybrid host has no `memory.events` at the v2
+ * mount, so it is treated as "not cgroup v2" and fails safe upstream).
+ */
+export function parseSelfCgroupMemoryEventsPath(procCgroup: string): string {
+  for (const line of procCgroup.split("\n")) {
+    // Unified hierarchy line: hierarchy-id 0, empty controller: "0::<path>".
+    if (line.startsWith("0::")) {
+      const rel = line.slice(3).trim();
+      const base = rel === "" || rel === "/" ? "" : rel.replace(/\/+$/, "");
+      return `/sys/fs/cgroup${base}/memory.events`;
+    }
+  }
+  throw new AgentError(
+    "SBX_AGENT_STATE",
+    "no cgroup v2 unified hierarchy line in /proc/self/cgroup",
+  );
+}
+
+/**
+ * Extract the `oom_kill` counter from a cgroup v2 `memory.events` body
+ * (whitespace-separated `key value` lines). A missing/unparseable
+ * `oom_kill` line yields `0` (no OOM observed) rather than throwing.
+ */
+export function parseMemoryEventsOomKill(body: string): number {
+  for (const line of body.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const sep = trimmed.search(/\s/);
+    if (sep < 0) continue;
+    if (trimmed.slice(0, sep) === "oom_kill") {
+      const value = Number.parseInt(trimmed.slice(sep + 1).trim(), 10);
+      return Number.isFinite(value) && value >= 0 ? value : 0;
+    }
+  }
+  return 0;
+}
+
+/**
+ * The default {@linkcode CgroupReader} over `Deno.readTextFile`. Reads
+ * `/proc/self/cgroup` (resolved once, then cached by the annotator) and
+ * the derived `memory.events` file under `/sys/fs/cgroup`. Requires read
+ * access to both trees at runtime — the compiled studioboxd bakes `-A`
+ * (`deno.json` `agent:compile`), so no extra permission flag is needed.
+ */
+export function denoCgroupReader(): CgroupReader {
+  return {
+    async resolveSelfMemoryEventsPath(): Promise<string> {
+      const proc = await Deno.readTextFile("/proc/self/cgroup");
+      return parseSelfCgroupMemoryEventsPath(proc);
+    },
+    async readMemoryEvents(path: string): Promise<CgroupMemoryEvents> {
+      const body = await Deno.readTextFile(path);
+      return { oomKill: parseMemoryEventsOomKill(body) };
+    },
+  };
+}
+
+/**
+ * A real {@linkcode AgentOomAnnotator} backed by cgroup v2 accounting.
+ *
+ * Semantics (mirroring upstream's "exit 137 + cgroup `memory.events`
+ * `oom_kill`" collapse): the annotator is consulted only for a
+ * `code === 137` (SIGKILL — the OOM killer's signal) exit. It reads the
+ * agent cgroup's `oom_kill` counter and returns `true` iff the counter
+ * INCREMENTED over the last known-good reading, i.e. an OOM kill landed in
+ * the cgroup during this process's lifetime. A baseline is captured at
+ * construction (agent boot, pre-workload) and advanced as a high-water
+ * mark, so each `oom_kill` increment is attributed to exactly one death
+ * and a subsequent non-OOM `137` (e.g. an explicit SIGKILL) stays
+ * `oom: false`.
+ *
+ * Fail-safe: a missing file, a read/parse error, or a non-cgroup-v2 host
+ * yields `false` and never throws into the exit path; a `code === 137`
+ * exit with no OOM evidence stays `oom: false`. Consultations are
+ * serialized so concurrent child deaths cannot double-count one increment.
+ *
+ * NOTE: detection is only effective when studioboxd runs in a NON-root
+ * cgroup (the cgroup v2 root has no `memory.events`); provisioning that
+ * cgroup is a guest-init concern outside these files. When absent, the
+ * reader fails safe (`oom: false`).
+ */
+export function createCgroupOomAnnotator(
+  reader: CgroupReader = denoCgroupReader(),
+): AgentOomAnnotator {
+  let pathPromise: Promise<string> | null = null;
+  const readOomKill = async (): Promise<number | null> => {
+    try {
+      pathPromise ??= reader.resolveSelfMemoryEventsPath();
+      const { oomKill } = await reader.readMemoryEvents(await pathPromise);
+      return Number.isFinite(oomKill) && oomKill >= 0 ? oomKill : null;
+    } catch {
+      // Non-cgroup-v2 host, missing file, or parse error: fail safe and let
+      // a later consultation retry path resolution.
+      pathPromise = null;
+      return null;
+    }
+  };
+  // Baseline at construction: on the real guest this is the pre-workload
+  // count (0); tests seed it through the injected reader. Never rejects
+  // (readOomKill catches), so this pending promise cannot leak.
+  let baseline: Promise<number | null> = readOomKill();
+  let gate: Promise<unknown> = Promise.resolve();
+  return (exit): boolean | Promise<boolean> => {
+    // Only a SIGKILL exit (code 137) can be an OOM kill; the spawner
+    // already gates on this, but stay defensive so the annotator is total.
+    if (exit.code !== 137) return false;
+    const run = gate.then(async (): Promise<boolean> => {
+      const before = await baseline;
+      const after = await readOomKill();
+      if (after === null) return false; // read failed → no OOM evidence
+      const incremented = before !== null && after > before;
+      // Advance the high-water mark so the same count never re-triggers.
+      if (before === null || after > before) baseline = Promise.resolve(after);
+      return incremented;
+    });
+    // Keep the serialization chain alive even if a consultation rejects
+    // (it should not — the inner body is fully guarded).
+    gate = run.then(() => {}, () => {});
+    return run;
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -786,6 +786,11 @@ class ProcessWire implements wire.ProcessService {
 
   status(): wire.ProcessStatusResult {
     if (!this.#settled) {
+      // Still running: the fields below are placeholders the client ignores
+      // while `running` is true. `oom` is only meaningful once the process
+      // has exited with code 137; the real cgroup-annotated value (M10,
+      // `createCgroupOomAnnotator`) is threaded via
+      // `statusToWire(this.#status)` on the settled path below.
       return {
         which: "status",
         status: {
