@@ -189,6 +189,10 @@ export interface SupervisorApi {
 
   health(): Promise<SupervisorHealth>;
 
-  /** Liveness echo. */
-  ping(nonce: number): Promise<number>;
+  /**
+   * Liveness echo. The wire nonce is a `UInt64` (`supervisor.capnp` ping @9),
+   * so it is carried as `bigint` end-to-end — a JS `number` would silently
+   * corrupt nonces above 2^53.
+   */
+  ping(nonce: bigint): Promise<bigint>;
 }

@@ -773,10 +773,15 @@ Deno.test("a spawn that dies still leaves the artifact reference journaled", asy
 Deno.test("health and ping are trivial", async () => {
   await withDir(async (dir) => {
     const harness = makeHarness(dir);
-    assertEquals(await harness.core.ping(0), 0);
-    assertEquals(await harness.core.ping(7), 7);
+    assertEquals(await harness.core.ping(0n), 0n);
+    assertEquals(await harness.core.ping(7n), 7n);
+    // A full-width UInt64 nonce survives (no JS-number truncation above 2^53).
+    assertEquals(
+      await harness.core.ping(0xffff_ffff_ffff_ffffn),
+      0xffff_ffff_ffff_ffffn,
+    );
     const invalid = await assertRejects(
-      () => harness.core.ping(-1),
+      () => harness.core.ping(-1n),
       SupervisorError,
     );
     assertEquals(invalid.code, "SBX_SUP_VALIDATION");

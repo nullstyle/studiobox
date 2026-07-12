@@ -410,12 +410,12 @@ export class SupervisorCore implements SupervisorApi {
     });
   }
 
-  ping(nonce: number): Promise<number> {
-    if (!Number.isSafeInteger(nonce) || nonce < 0) {
+  ping(nonce: bigint): Promise<bigint> {
+    if (nonce < 0n || nonce > 0xffff_ffff_ffff_ffffn) {
       return Promise.reject(
         new SupervisorError(
           "SBX_SUP_VALIDATION",
-          "ping nonce must be an unsigned safe integer",
+          "ping nonce must be an unsigned 64-bit integer",
         ),
       );
     }
