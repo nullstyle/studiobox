@@ -63,10 +63,18 @@ Deno.test("portReservationEnumerator flags ports held by a terminal record", asy
   const journal = stubJournal([
     record("sbx-a", {
       phase: "terminated",
-      resources: { exposedPorts: [40100, 40101] },
+      resources: {
+        exposedPorts: [
+          { hostPort: 40100, guestPort: 8080 },
+          { hostPort: 40101, guestPort: 9090 },
+        ],
+      },
     }),
     // A live sandbox legitimately holds its port — not a leak.
-    record("sbx-b", { phase: "ready", resources: { exposedPorts: [40102] } }),
+    record("sbx-b", {
+      phase: "ready",
+      resources: { exposedPorts: [{ hostPort: 40102, guestPort: 3000 }] },
+    }),
   ]);
   const found = await portReservationEnumerator(journal).enumerate();
   assertEquals([...found].sort(), ["sbx-a:port=40100", "sbx-a:port=40101"]);

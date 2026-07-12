@@ -76,7 +76,7 @@ Deno.test("corrupt nested resource and machine state fails closed", async () => 
         records: {
           "sbx-corrupt": {
             ...record,
-            resources: { exposedPorts: [70000] },
+            resources: { exposedPorts: [{ hostPort: 70000, guestPort: 8080 }] },
             machine: { executionId: "../escape", phase: "running" },
           },
         },

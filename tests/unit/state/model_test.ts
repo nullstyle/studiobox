@@ -62,3 +62,50 @@ Deno.test("artifact references are bounded and unknown-key-rejecting", () => {
     );
   }
 });
+
+Deno.test("M10 network resources round-trip on the record", () => {
+  const resources = {
+    uid: 1000,
+    gid: 1000,
+    tapName: "sbxtap42",
+    hostIp: "10.201.0.169",
+    guestIp: "10.201.0.170",
+    subnet: "10.201.0.168/30",
+    dnsmasqPidfile: "/run/studiobox/dns/42.pid",
+    exposedPorts: [{ hostPort: 40100, guestPort: 8080 }],
+  };
+  const validated = validateSandboxRecord({ ...base(), resources });
+  assertEquals(validated.resources, resources);
+});
+
+Deno.test("exposed ports are bounded {hostPort, guestPort} pairs", () => {
+  const invalid: unknown[] = [
+    [40099], // bare number, not a pair
+    [{ hostPort: 40099, guestPort: 8080 }], // hostPort below the range
+    [{ hostPort: 40200, guestPort: 8080 }], // hostPort above the range
+    [{ hostPort: 40100, guestPort: 70000 }], // guestPort out of range
+    [{ hostPort: 40100 }], // missing guestPort
+    [{ hostPort: 40100, guestPort: 80, extra: 1 }], // unknown key
+    [
+      { hostPort: 40100, guestPort: 80 },
+      { hostPort: 40100, guestPort: 81 }, // duplicate hostPort
+    ],
+  ];
+  for (const exposedPorts of invalid) {
+    assertThrows(
+      () => validateSandboxRecord({ ...base(), resources: { exposedPorts } }),
+      TypeError,
+    );
+  }
+});
+
+Deno.test("unknown resource keys are rejected", () => {
+  assertThrows(
+    () =>
+      validateSandboxRecord({
+        ...base(),
+        resources: { exposedPorts: [], bogus: true },
+      }),
+    TypeError,
+  );
+});

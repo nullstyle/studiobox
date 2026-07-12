@@ -73,14 +73,32 @@ export interface ArtifactReference {
   arch: "aarch64" | "x86_64";
 }
 
+/** One host→guest forward installed by `exposeHttp` (M10). */
+export interface ExposedPort {
+  /** Reserved forward-range host port (40100..40199) dialed on 127.0.0.1. */
+  readonly hostPort: number;
+  /** Guest port the forward DNATs to (1..65535). */
+  readonly guestPort: number;
+}
+
 /** Studiobox-owned resources that the Firecracker package cannot reclaim. */
 export interface SandboxResources {
   uid?: number;
   gid?: number;
   overlayPath?: string;
+  /** Host-side TAP device name (`sbxtap<slot>`); written by the M10 planner. */
   tapName?: string;
+  /** Reserved for a future netns model; unused in the M10 host-namespace path. */
   netnsPath?: string;
-  exposedPorts: number[];
+  /** Host gateway address on the TAP (`10.201.<t>.<b+1>`). */
+  hostIp?: string;
+  /** Guest source address (`10.201.<t>.<b+2>`); the egress anti-spoof source. */
+  guestIp?: string;
+  /** The sandbox's /30 subnet (`10.201.<t>.<b>/30`). */
+  subnet?: string;
+  /** Pidfile of the per-sandbox dnsmasq (`/run/studiobox/dns/<slot>.pid`). */
+  dnsmasqPidfile?: string;
+  exposedPorts: ExposedPort[];
 }
 
 /** The single durable authority for one public sandbox id. */
@@ -242,6 +260,10 @@ function validateResources(value: unknown): asserts value is SandboxResources {
     "overlayPath",
     "tapName",
     "netnsPath",
+    "hostIp",
+    "guestIp",
+    "subnet",
+    "dnsmasqPidfile",
     "exposedPorts",
   ], "sandbox resources");
   for (const field of ["uid", "gid"] as const) {
@@ -249,7 +271,17 @@ function validateResources(value: unknown): asserts value is SandboxResources {
       assertUnsignedInteger(resources[field], field, 0xffff_ffff);
     }
   }
-  for (const field of ["overlayPath", "tapName", "netnsPath"] as const) {
+  for (
+    const field of [
+      "overlayPath",
+      "tapName",
+      "netnsPath",
+      "hostIp",
+      "guestIp",
+      "subnet",
+      "dnsmasqPidfile",
+    ] as const
+  ) {
     if (resources[field] !== undefined) {
       assertText(resources[field], field, 4_096);
     }
@@ -257,13 +289,19 @@ function validateResources(value: unknown): asserts value is SandboxResources {
   if (!Array.isArray(resources.exposedPorts)) {
     throw new TypeError("sandbox exposedPorts must be an array");
   }
-  const ports = new Set<number>();
-  for (const port of resources.exposedPorts) {
-    assertUnsignedInteger(port, "exposed port", 65_535, 1);
-    if (ports.has(port)) {
-      throw new TypeError("sandbox exposedPorts must be unique");
+  // Each forward is a {hostPort (40100..40199), guestPort (1..65535)} pair;
+  // the host port is the leased forward-range slot and is unique per record.
+  const hostPorts = new Set<number>();
+  for (const entry of resources.exposedPorts) {
+    const port = assertRecord(entry, "exposed port") as Partial<ExposedPort>;
+    assertKeys(port, ["hostPort", "guestPort"], "exposed port");
+    assertUnsignedInteger(port.hostPort, "exposed hostPort", 40_199, 40_100);
+    assertUnsignedInteger(port.guestPort, "exposed guestPort", 65_535, 1);
+    const hostPort = port.hostPort as number;
+    if (hostPorts.has(hostPort)) {
+      throw new TypeError("sandbox exposedPorts hostPort must be unique");
     }
-    ports.add(port);
+    hostPorts.add(hostPort);
   }
 }
 

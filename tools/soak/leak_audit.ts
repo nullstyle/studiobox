@@ -415,7 +415,7 @@ export function portReservationEnumerator(
       for (const record of await reader.list()) {
         if (!terminal.has(record.phase)) continue;
         for (const port of record.resources.exposedPorts) {
-          out.push(`${record.id}:port=${port}`);
+          out.push(`${record.id}:port=${port.hostPort}`);
         }
       }
       return out.sort();
