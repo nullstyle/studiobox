@@ -52,12 +52,12 @@ drill in PLAN.md §M11, enforced in CI on both arches.
 
 ## 2. Foundations
 
-| Dependency                        | Form              | Status                                                                                                                                                                                                                   |
-| --------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `jsr:@nullstyle/firecracker@^0.2` | JSR package       | Published; pinned Firecracker v1.16.1, min v1.15.0 (`FIRECRACKER_COMPAT`)                                                                                                                                                |
-| `jsr:@nullstyle/capnp@^0.1`       | JSR package       | Published (0.1.0). RPC Level 1 (capabilities, promise pipelining, embargoes), pure-TS serde, WASM session core. **No vendored snapshots.** M1 qualifies it against the five-schema bundle before breadth work (PLAN §M1) |
-| Lima ≥ 2.1                        | Host tool (macOS) | `vz` + `nestedVirtualization` (Apple Silicon M3+, macOS 15+)                                                                                                                                                             |
-| Deno ≥ 2.9                        | Runtime floor     | Studiobox sets its own floor above firecracker-deno's ≥ 2.5 (modern vsock/serve surface, one less legacy matrix leg); in-guest Deno is pinned by the artifact manifest                                                   |
+| Dependency                        | Form              | Status                                                                                                                                                                                                                                                                  |
+| --------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jsr:@nullstyle/firecracker@^0.2` | JSR package       | Published; pinned Firecracker v1.16.1, min v1.15.0 (`FIRECRACKER_COMPAT`)                                                                                                                                                                                               |
+| `jsr:@nullstyle/capnp@^0.4`       | JSR package       | Published (0.4.0; studiobox tracked 0.1→0.2→0.3→0.4 as cross-file codegen, namespaced barrels, and capability-lifecycle fixes landed upstream). RPC Level 1 (capabilities, promise pipelining, embargoes), pure-TS serde, WASM session core. **No vendored snapshots.** |
+| Lima ≥ 2.1                        | Host tool (macOS) | `vz` + `nestedVirtualization` (Apple Silicon M3+, macOS 15+)                                                                                                                                                                                                            |
+| Deno ≥ 2.9                        | Runtime floor     | Studiobox sets its own floor above firecracker-deno's ≥ 2.5 (modern vsock/serve surface, one less legacy matrix leg); in-guest Deno is pinned by the artifact manifest                                                                                                  |
 
 Dev-time coordination uses `deno.local.json` remapping both foundations to
 sibling checkouts (`../firecracker-deno`, `../capnp-deno`), the same pattern
@@ -425,10 +425,10 @@ magics, `/run/studiobox/`, `~/.studiobox/`, Lima VM `studiobox-host-<arch>`.
 5. **Destructive reconcile** on supervisor restart (user-confirmed direction).
 6. **Copy-only staging** into each jail (user-confirmed direction).
 7. **`@nullstyle/capnp` is consumed as a real dependency, never a vendored
-   snapshot** (user decision, 2026-07-11). It is published — `0.1.0` on JSR —
-   and studiobox pins `jsr:@nullstyle/capnp@^0.1`, with a `deno.local.json`
-   override to the `../capnp-deno` checkout for coordinated dev. Gaps found
-   during M1 qualification are fixed upstream and consumed as patch releases;
+   snapshot** (user decision, 2026-07-11). Published on JSR — studiobox pins
+   `jsr:@nullstyle/capnp@^0.4` (having tracked 0.1→0.4), with a
+   `deno.local.json` override to the `../capnp-deno` checkout for coordinated
+   dev. Gaps found downstream are fixed upstream and consumed as new releases;
    there is no vendoring escape hatch.
 8. Names: `studiobox-hostd`, `studiobox-rootd`, `studioboxd` (guest, as
    specified), `studiobox-host-<arch>` (Lima VM).

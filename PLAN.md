@@ -188,7 +188,10 @@ cache refcount before (or atomically with) journaling the launch's
 set and fails the launch closed at staging (safe, but spurious). **Exit:** in-VM
 integration suite green on aarch64 locally and x86_64 on a KVM CI runner (runner
 = "the Lima VM", no Lima involved). **Demo:** `deno task test:vm` from a Mac →
-real microVM sandbox lifecycle.
+real microVM sandbox lifecycle. _Status 2026-07-12: delivered — real boot +
+studioboxd-over-vsock + full create→exec→fs→eval→terminate + kill-9 reconcile,
+proven in fc-smoke; `deno task test:vm` harness; frame-DoS + journal-tmp
+hardening. x86_64 CI leg pending the push._
 
 ### M6 — hostd control plane (7 pts)
 
@@ -199,6 +202,10 @@ list/attach/metadata/usage; hostd↔rootd supervisor client. **Exit:** lease
 expiry kills sandboxes; over-capacity create fails fast; attach from a second
 client observes the first's sandbox; restart of hostd revokes leases and
 tickets. **Demo:** two concurrent clients, capacity exhaustion, clean recovery.
+_Status 2026-07-12: domain core + HostControl plane delivered against a fake
+rootd (leases with session/duration clocks, capacity ledger, bounded hostd→rootd
+client); lifecycle-leak hardening done. Deferred: openTunnel (M7), exposeHttp
+(M10), resumeLease/durable leases, the real hostd→rootd→VM path (M7)._
 
 ### M7 — End-to-end tunnel (6 pts)
 
@@ -240,7 +247,13 @@ egress per TAP (+ dnsmasq/ipset for wildcard hosts); `region` metadata echo; oom
 boolean (137 + memory.events); `SandboxOptions.env` post-create application;
 labels; `extendTimeout` actual-deadline semantics. **Exit:** parity fixtures
 extended to Tier B rows; egress tests prove allow/deny both ways; exposed HTTP
-survives sandbox restarts of _other_ sandboxes (port isolation).
+survives sandbox restarts of _other_ sandboxes (port isolation). _Status
+2026-07-12: the `allowNet` egress engine landed early (parallel with M6) —
+`src/rootd/network/` fail-closed nftables rulesets, fc-smoke-validated
+allow/deny, adversarially audited (two HIGH bypasses — table-name collision and
+wildcard-set poisoning — fixed + re-validated). Not yet wired into
+`launch_planner` (M6/M10 convergence); `exposeHttp`, `region`/oom/env/labels
+Tier-B rows still to do._
 
 ### M11 — Hardening + the 1.0 soak (9 pts)
 
