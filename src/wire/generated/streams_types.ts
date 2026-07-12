@@ -107,9 +107,12 @@ function withCapabilityStubLifecycle<TClient extends object>(
     closed = true;
     await transport.release?.(capability, 1);
   };
+  // A schema method literally named `close` keeps the property, so the
+  // lifecycle close is then reachable only via Symbol.dispose/asyncDispose.
+  const hasSchemaClose = Reflect.has(client, "close");
   return new Proxy(client as object, {
     get(target, prop, receiver) {
-      if (prop === "close") return close;
+      if (prop === "close" && !hasSchemaClose) return close;
       if (prop === Symbol.asyncDispose) return close;
       if (prop === Symbol.dispose) {
         return (): void => {
@@ -173,7 +176,7 @@ function exportCapabilityFromContext<TClient extends object, TServer extends obj
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
     value as TServer,
-    { referenceCount: 1 },
+    { referenceCount: 0 },
   );
 }
 

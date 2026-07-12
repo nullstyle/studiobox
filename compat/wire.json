@@ -17,12 +17,12 @@
   "capnpCompiler": "Cap'n Proto version 1.4.0",
   "codegen": {
     "package": "@nullstyle/capnp",
-    "version": "0.2.0",
-    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.2",
+    "version": "0.3.0",
+    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.3",
     "toolchain": {
       "checkout": "../capnp-deno",
-      "commit": "f61257bf335aeaeca85b02e541c2341884e66ecf",
-      "commitNote": "the 0.2.0 release commit; capnpc-deno is not shipped in the JSR package, so the sibling checkout is the codegen toolchain of record",
+      "commit": "0d053a20b1d42da218464a018e34f8274d959f6f",
+      "commitNote": "the 0.3.0 release commit; capnpc-deno is not shipped in the JSR package, so the sibling checkout is the codegen toolchain of record",
       "invocation": "deno task wire:generate"
     },
     "committedSchemas": [
@@ -34,22 +34,22 @@
       "supervisor.capnp"
     ],
     "probeSchema": "codegen_probe.capnp",
-    "probeStatus": "regenerated with the full six-schema set at the 0.2.0 adoption on 2026-07-11; byte-identical to the committed src/wire/generated/ bindings and typechecks strict against the published runtime",
+    "probeStatus": "regenerated with the full six-schema set at the 0.3.0 adoption on 2026-07-11; byte-identical to the committed src/wire/generated/ bindings and typechecks strict against the published runtime",
     "fullBindingStatus": "committed",
     "adoptedOn": "2026-07-11",
     "observedOn": "2026-07-11",
-    "observedAgainst": "capnp-deno checkout f61257bf335aeaeca85b02e541c2341884e66ecf (the published 0.2.0): cross-file structs/enums/interfaces resolve with real imports, interface-valued struct fields are typed RpcStub<T>, and the generated mod.ts barrel is namespaced (export * as <schema>)",
+    "observedAgainst": "capnp-deno checkout 0d053a20b1d42da218464a018e34f8274d959f6f (the published 0.3.0): 0.2.0's cross-file/imports/RpcStub<T>/namespaced-barrel behavior carries forward; 0.3.0 additionally forwards schema-defined close methods through stub lifecycle proxies and registers context exports wire-managed (referenceCount 0, one wire ref per Return capTable occurrence), and its WASM session core relays Return frames naming freshly host-minted exports (the M3 agent-plane blocker)",
     "blockers": [],
     "blockerNote": "HISTORICAL: the 0.1.0-era blockers were all resolved by capnp-deno 0.2.0 (adopted 2026-07-11). For provenance, the qualified 0.1.0 inventory was: (1) cross-file struct/enum references emitted bare unimported TypeScript names (SbxError, EmptyResult, TransferCommit, FinishResult, ProtocolOffer, KeyValue, HandshakeResult, AuthResult, ReadResult; 159 TS2304 errors) with runtime descriptors lowered to TYPE_ANY_POINTER (83 fields across host_control, sandbox_agent, streams, supervisor); (2) cross-file interface references surfaced as raw CapabilityPointer instead of typed RpcStub<T>; (3) the merged mod.ts barrel collided (five shared *_meta.ts export names, TS2308, plus 96 method param/result and domain type name collisions). All three are fixed in 0.2.0 by cross-file import lowering and the namespaced barrel; tests/unit/capnp/cross_file_roundtrip_test.ts now round-trips the cross-file composite through the GENERATED host_control/common codecs and a generated-interface client/server ping, and tools/check_wire.ts enforces byte-identical regeneration plus strict typecheck of all six committed schemas on every toolchain-present run."
   },
   "compiledProbe": {
     "tool": "tools/compiled_probe.ts",
     "task": "compile:probe",
-    "runtime": "jsr:@nullstyle/capnp@0.2.0 (WASM session core embedded via the package's static import of generated/capnp_deno.wasm, 215990 bytes)",
+    "runtime": "jsr:@nullstyle/capnp@0.3.0 (WASM session core embedded via the package's static import of generated/capnp_deno.wasm, 231702 bytes)",
     "provedOn": "2026-07-11",
     "targets": {
-      "aarch64-apple-darwin": "executed: PROBE_OK (native; also with empty DENO_DIR + dead proxy, proving WASM embedding)",
-      "aarch64-unknown-linux-gnu": "executed: PROBE_OK inside the fc-smoke Lima VM (Ubuntu, kernel 6.8, Deno 2.9.1 artifact) with empty DENO_DIR",
+      "aarch64-apple-darwin": "executed: PROBE_OK against 0.3.0 (native; the 0.2.0 run additionally proved empty DENO_DIR + dead proxy WASM embedding)",
+      "aarch64-unknown-linux-gnu": "executed: PROBE_OK inside the fc-smoke Lima VM at the 0.2.0 adoption (Ubuntu, kernel 6.8, Deno 2.9.1 artifact) with empty DENO_DIR; not yet re-run against 0.3.0",
       "x86_64-unknown-linux-gnu": "compile-only on this host; execution proof lands with x86_64 CI (see PLAN M12)"
     },
     "vsockFlagVerdict": "Deno 2.9.x requires --unstable-vsock for Deno.listen/Deno.connect with transport 'vsock' (probed on guest Deno 2.9.2 aarch64-linux with vsock_loopback: no flag and --unstable-net both fail with 'The --unstable-vsock flag must be provided'); studioboxd and its in-guest tests must pass --unstable-vsock until the API stabilizes"

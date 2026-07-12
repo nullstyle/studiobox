@@ -7,8 +7,8 @@
   },
   "capnp": {
     "package": "@nullstyle/capnp",
-    "version": "0.2.0",
-    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.2",
+    "version": "0.3.0",
+    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.3",
     "localPath": "../capnp-deno",
     "wasmAbi": 1
   },

@@ -113,11 +113,7 @@ import type {
   RpcStub,
   RpcTransport,
 } from "@nullstyle/capnp/rpc";
-import {
-  RpcServerBridge,
-  RpcServerCallInterceptTransport,
-  RpcServerOutboundClient,
-} from "@nullstyle/capnp/rpc";
+import { RpcServerRuntime } from "@nullstyle/capnp/rpc";
 import type { CapabilityPointer } from "@nullstyle/capnp/encoding";
 
 import * as wire from "../wire/generated/sandbox_agent_types.ts";
@@ -617,6 +613,13 @@ class ConnectionState {
   }
 }
 
+/**
+ * Capabilities exported through the call context are WIRE-MANAGED
+ * (capnp 0.3.0): registration seeds no standing reference; the Return
+ * frame naming the capability mints the peer's reference and inbound
+ * Release frames drain it, so a fully released capability drops its
+ * dispatch entry. Callers must therefore NOT pass a `referenceCount`.
+ */
 function contextRegistry(ctx: RpcCallContext): RpcServerRegistry {
   const exportCapability = ctx.exportCapability;
   if (exportCapability === undefined) {
@@ -1148,7 +1151,6 @@ function processSpawnerServer(
       const pointer = wire.Process.registerServer(
         contextRegistry(ctx),
         new ProcessWire(state, options, process),
-        { referenceCount: 1 },
       );
       startOutputPumps(state, options, process, params.output);
       return {
@@ -1224,7 +1226,6 @@ function fileSystemServer(
         const pointer = wire.RemoteFile.registerServer(
           contextRegistry(ctx),
           new RemoteFileWire(state, params.path, file),
-          { referenceCount: 1 },
         );
         return {
           result: { which: "file", file: asStub<wire.RemoteFile>(pointer) },
@@ -1245,7 +1246,6 @@ function fileSystemServer(
         const pointer = wire.Upload.registerServer(
           contextRegistry(ctx),
           new UploadWire(state, fs, params.path, file),
-          { referenceCount: 1 },
         );
         return {
           result: { which: "upload", upload: asStub<wire.Upload>(pointer) },
@@ -1261,7 +1261,6 @@ function fileSystemServer(
         const pointer = wireStreams.ByteReader.registerServer(
           contextRegistry(ctx),
           new ByteReaderWire(state, file),
-          { referenceCount: 1 },
         );
         return {
           result: {
@@ -1347,7 +1346,6 @@ function denoRuntimeServer(
         const pointer = wire.DenoRepl.registerServer(
           contextRegistry(ctx),
           new ReplWire(state, session),
-          { referenceCount: 1 },
         );
         return {
           result: { which: "repl", repl: asStub<wire.DenoRepl>(pointer) },
@@ -1394,7 +1392,6 @@ function denoRuntimeServer(
       const pointer = wire.DenoProcess.registerServer(
         contextRegistry(ctx),
         new DenoProcessWire(state, options, process),
-        { referenceCount: 1 },
       );
       startOutputPumps(state, options, process, params.output);
       return {
@@ -1417,7 +1414,6 @@ function sandboxAgentServer(
       const pointer = wire.registerProcessSpawnerServer(
         contextRegistry(ctx),
         processSpawnerServer(state, options),
-        { referenceCount: 1 },
       );
       return { service: asStub<wire.ProcessSpawner>(pointer) };
     },
@@ -1426,7 +1422,6 @@ function sandboxAgentServer(
       const pointer = wire.registerFileSystemServer(
         contextRegistry(ctx),
         fileSystemServer(state, options),
-        { referenceCount: 1 },
       );
       return { service: asStub<wire.FileSystem>(pointer) };
     },
@@ -1435,7 +1430,6 @@ function sandboxAgentServer(
       const pointer = wire.registerEnvironmentServer(
         contextRegistry(ctx),
         environmentServer(state, options),
-        { referenceCount: 1 },
       );
       return { service: asStub<wire.Environment>(pointer) };
     },
@@ -1444,7 +1438,6 @@ function sandboxAgentServer(
       const pointer = wire.registerDenoRuntimeServer(
         contextRegistry(ctx),
         denoRuntimeServer(state, options),
-        { referenceCount: 1 },
       );
       return { service: asStub<wire.DenoRuntime>(pointer) };
     },
@@ -1636,7 +1629,6 @@ export function createAgentWireConnection(
       const pointer = wire.registerSandboxAgentServer(
         contextRegistry(ctx),
         sandboxAgentServer(state, options),
-        { referenceCount: 1 },
       );
       return { agent: asStub<wire.SandboxAgent>(pointer) };
     },
@@ -1655,7 +1647,7 @@ export function createAgentWireConnection(
 }
 
 // ---------------------------------------------------------------------------
-// Transport serving (pure-JS RpcServerBridge)
+// Transport serving (WASM session runtime)
 // ---------------------------------------------------------------------------
 
 /** One agent-plane session bound to a started transport. */
@@ -1667,29 +1659,45 @@ export interface AgentWireServer {
 }
 
 /**
- * Serve one agent-plane connection over `transport` with the pure-JS
- * `RpcServerBridge`.
+ * Serve one agent-plane connection over `transport` with
+ * `RpcServerRuntime.createWithRoot`: the WASM session core owns the
+ * protocol state machine, the generated `AgentBootstrap` root sits at
+ * capability index 0, and every capability this plane mints in call
+ * results (`SandboxAgent`/`ProcessSpawner`/`Process`/...) is exported
+ * wire-managed through the call context (see {@linkcode contextRegistry}).
  *
- * Why not `RpcServerRuntime`/`serveConnection`: the published 0.2.0
- * WASM session core relays return-frame capability tables only for
- * export ids its own table already knows (in practice, the bootstrap
- * root) — a `Return` carrying a freshly exported capability (every
- * `SandboxAgent`/`ProcessSpawner`/`Process`/... this plane mints) is
- * rejected wasm-side with `UnknownExport` and the call hangs. The
- * JS bridge implements the same server surface (Bootstrap/Call/Finish/
- * Release, answer table, pipelining, capability export/release,
- * outbound calls on caps received in params) without that limitation,
- * so the whole capability graph works. Revisit when upstream grows a
- * wasm ABI for registering additional session exports.
+ * HISTORY: through capnp 0.2.0 this function hand-rolled a pure-JS
+ * `RpcServerBridge` server, because the 0.2.0 WASM session core
+ * rejected `Return` frames naming freshly host-minted exports
+ * (`UnknownExport`, swallowed — every `agent()` call hung silently).
+ * capnp 0.3.0 relays host-minted exports and wire-manages their
+ * refcounts, so the runtime path serves the whole capability graph;
+ * `tests/fake/agent/agent_wire_test.ts` proves it end-to-end.
  *
- * Dispatch ordering: `RpcServerBridge.handleFrame` runs synchronously
- * from the read callback up to the service method call (no middleware
- * is installed), so inbound `-> stream` calls enter the generated
- * per-capability serialization chains in arrival order. The returned
- * promise is deliberately NOT awaited in the read callback — a
- * long-running call (`Process.wait`, repl eval) must not head-of-line
- * block the connection. Response frames may interleave out of call
- * order, which the protocol permits (clients correlate by answer id).
+ * Dispatch ordering: the runtime pumps host calls in arrival order and
+ * the generated per-capability serialization chains keep inbound
+ * `-> stream` calls sequential (`tests/unit/capnp/
+ * runtime_qualification_test.ts` pins dense sequences with exactly one
+ * active chunk handler). Long-running calls (`Process.wait`, repl
+ * eval) do not head-of-line block the connection; response frames may
+ * interleave out of call order, which the protocol permits.
+ *
+ * Outbound calls (the `OutputSink` pumps) ride the runtime's
+ * intercepted outbound client: Call frames go straight to the wire and
+ * their Returns never reach the WASM peer, which has no knowledge of
+ * server-originated questions.
+ *
+ * CLIENT CONTRACT (capnp 0.3.0 — pinned by the agent-plane suite):
+ * - Calls whose results carry a capability must finish with
+ *   `releaseResultCaps: false`; the generated stubs' finish default
+ *   eagerly releases the wire-managed export before its first use.
+ * - An `OutputSink` passed to `spawn`/`run` must be exported with one
+ *   EXTRA reference: the WASM relay drops its param-cap import (one
+ *   Release frame) when the originating call returns — it cannot yet
+ *   signal that this plane retains the sink for pumping.
+ * Both are upstream wasm-relay/stub gaps, not schema semantics; drop
+ * the workarounds when capnp-deno grows result-cap-aware finish
+ * defaults and host-call param-cap retention.
  *
  * The caller owns the transport lifecycle (`onClose`/`onError` wiring
  * per the M1 close-ownership contract) and calls
@@ -1704,37 +1712,18 @@ export async function serveAgentWireTransport(
 ): Promise<AgentWireServer> {
   const connection = createAgentWireConnection(options);
   const onError = options.onError ?? ((): void => {});
-  const bridge = new RpcServerBridge({
-    onBootstrap: () => ({ capabilityIndex: 0 }),
-    onUnhandledError: (error) => onError(error),
-    // Index 0 is the explicitly registered bootstrap root below; the
-    // allocator must start above it.
-    nextCapabilityIndex: 1,
-  });
-  wire.registerAgentBootstrapServer(bridge, connection.bootstrap, {
-    capabilityIndex: 0,
-    referenceCount: 1,
-  });
-  // Outbound calls (the OutputSink pumps) bypass the bridge's inbound
-  // path: Call frames go straight to the wire and their Returns are
-  // intercepted before reaching the inbound handler.
-  const interceptor = new RpcServerCallInterceptTransport(transport);
-  bridge.setOutboundClient(new RpcServerOutboundClient(interceptor));
-
-  let sendChain: Promise<void> = Promise.resolve();
-  await interceptor.start((frame) => {
-    bridge.handleFrame(frame).then(
-      (response) => {
-        if (response === null) return;
-        sendChain = sendChain
-          .then(() => interceptor.send(response))
-          .catch(() => {
-            // The transport is gone; teardown owns cleanup.
-          });
+  const runtime = await RpcServerRuntime.createWithRoot(
+    transport,
+    wire.registerAgentBootstrapServer,
+    connection.bootstrap,
+    {
+      bridgeOptions: {
+        // Without this hook an async dispatch-response failure is
+        // swallowed and the caller hangs invisibly. Surface it.
+        onUnhandledError: (error) => onError(error),
       },
-      (error: unknown) => onError(error),
-    );
-  });
+    },
+  );
 
   let closed = false;
   return {
@@ -1743,7 +1732,7 @@ export async function serveAgentWireTransport(
       if (closed) return;
       closed = true;
       try {
-        await interceptor.close();
+        await runtime.close();
       } catch {
         // Transport already closed.
       }

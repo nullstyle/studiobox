@@ -47,6 +47,22 @@ const CALL_TIMEOUT_MS = 20_000;
 const KIB = 1024;
 const MIB = 1024 * 1024;
 
+/**
+ * Options for calls whose RESULTS carry a fresh capability. The agent
+ * exports result capabilities wire-managed (their only wire reference
+ * is the one the Return frame mints), so the client must finish these
+ * questions with `releaseResultCaps: false` to retain the capability —
+ * `RpcWireClient.finish` defaults to eager release, which would drop
+ * the export before its first use. Stub `close()` (or `await using`)
+ * releases the retained reference. Capability-free calls keep the
+ * default options: an eager-release finish with no result caps is a
+ * no-op.
+ */
+const CAP_CALL = {
+  timeoutMs: CALL_TIMEOUT_MS,
+  finish: { releaseResultCaps: false },
+} as const;
+
 function toHex(bytes: Uint8Array): string {
   let out = "";
   for (const byte of bytes) out += byte.toString(16).padStart(2, "0");
@@ -322,7 +338,7 @@ async function connectAgent(agentd: RunningAgentd): Promise<AgentSession> {
       bootNonce: new Uint8Array(32),
     }, { timeoutMs: CALL_TIMEOUT_MS });
     assertEquals(auth.which, "accepted", auth.error?.message);
-    const agent = await bootstrap.agent({ timeoutMs: CALL_TIMEOUT_MS });
+    const agent = await bootstrap.agent(CAP_CALL);
     return {
       wireClient: client,
       agent,
@@ -338,12 +354,23 @@ async function connectAgent(agentd: RunningAgentd): Promise<AgentSession> {
   }
 }
 
+/**
+ * Export a client-hosted OutputSink for `spawn`'s `output` param.
+ *
+ * referenceCount 2 pins the export past the WASM relay's post-call
+ * release: the agent RETAINS the sink param cap to pump stdout/stderr
+ * after `spawn` returns, but the relay drops its only param-cap import
+ * (one Release frame) as soon as the host call completes — the ABI has
+ * no way for the host to signal retention yet. One reference absorbs
+ * that Release; the standing one keeps the sink alive for the pumps
+ * (the connection teardown reclaims it).
+ */
 function registerSink(
   wireClient: RpcWireClient,
   sink: SinkCollector,
 ): RpcStub<wireStreams.OutputSink> {
   return wireStreams.OutputSink.registerServer(wireClient, sink, {
-    referenceCount: 1,
+    referenceCount: 2,
   }) as unknown as RpcStub<wireStreams.OutputSink>;
 }
 
@@ -381,10 +408,10 @@ Deno.test("studioboxd serves the capnp agent plane over UDS end to end", async (
     18446744073709551615n,
   );
 
-  const spawner = await agent.processes({ timeoutMs: CALL_TIMEOUT_MS });
-  const fs = await agent.filesystem({ timeoutMs: CALL_TIMEOUT_MS });
-  const env = await agent.environment({ timeoutMs: CALL_TIMEOUT_MS });
-  const deno = await agent.deno({ timeoutMs: CALL_TIMEOUT_MS });
+  const spawner = await agent.processes(CAP_CALL);
+  const fs = await agent.filesystem(CAP_CALL);
+  const env = await agent.environment(CAP_CALL);
+  const deno = await agent.deno(CAP_CALL);
 
   // -- spawn: 256 KiB of stdout streamed through the OutputSink -----------
   {
@@ -396,7 +423,7 @@ Deno.test("studioboxd serves the capnp agent plane over UDS end to end", async (
           args: ["-c", `head -c ${256 * KIB} /dev/zero | tr '\\0' 'x'`],
         }),
         output: registerSink(wireClient, sink),
-      }, { timeoutMs: CALL_TIMEOUT_MS }),
+      }, CAP_CALL),
     );
 
     const commit = await withTimeout(
@@ -449,7 +476,7 @@ Deno.test("studioboxd serves the capnp agent plane over UDS end to end", async (
       await spawner.spawn({
         spec: spec({ command: "/bin/cat", stdin: "piped" }),
         output: registerSink(wireClient, sink),
-      }, { timeoutMs: CALL_TIMEOUT_MS }),
+      }, CAP_CALL),
     );
     const parts = [
       new TextEncoder().encode("hello "),
@@ -502,7 +529,7 @@ Deno.test("studioboxd serves the capnp agent plane over UDS end to end", async (
           stderr: "discard",
         }),
         output: null,
-      }, { timeoutMs: CALL_TIMEOUT_MS }),
+      }, CAP_CALL),
     );
     const running = await process.status({ timeoutMs: CALL_TIMEOUT_MS });
     assertEquals(running.which, "status");
@@ -526,9 +553,7 @@ Deno.test("studioboxd serves the capnp agent plane over UDS end to end", async (
     const uploadResult = await fs.beginUpload({
       path: "/home/app/blob.bin",
       mode: 0o644,
-    }, {
-      timeoutMs: CALL_TIMEOUT_MS,
-    });
+    }, CAP_CALL);
     assertEquals(uploadResult.which, "upload", uploadResult.error?.message);
     assertExists(uploadResult.upload);
     const upload = uploadResult.upload;
@@ -569,9 +594,10 @@ Deno.test("studioboxd serves the capnp agent plane over UDS end to end", async (
     assertEquals(stat.info?.size, BigInt(payload.byteLength));
     assertEquals(stat.info?.kind, "regular");
 
-    const downloadResult = await fs.beginDownload("/home/app/blob.bin", {
-      timeoutMs: CALL_TIMEOUT_MS,
-    });
+    const downloadResult = await fs.beginDownload(
+      "/home/app/blob.bin",
+      CAP_CALL,
+    );
     assertEquals(downloadResult.which, "reader", downloadResult.error?.message);
     assertExists(downloadResult.reader);
     const reader = downloadResult.reader;
@@ -626,9 +652,7 @@ Deno.test("studioboxd serves the capnp agent plane over UDS end to end", async (
 
   // -- deno repl: state across two snippets --------------------------------
   {
-    const replResult = await deno.openRepl([], {
-      timeoutMs: CALL_TIMEOUT_MS,
-    });
+    const replResult = await deno.openRepl([], CAP_CALL);
     assertEquals(replResult.which, "repl", replResult.error?.message);
     assertExists(replResult.repl);
     const repl = replResult.repl;
@@ -653,24 +677,15 @@ Deno.test("studioboxd serves the capnp agent plane over UDS end to end", async (
       42,
       "repl state survives across snippets",
     );
-    // Known upstream wart: the RpcStub lifecycle proxy shadows schema
-    // methods named `close`, so `repl.close()` releases the CAPABILITY
-    // instead of invoking wire `DenoRepl.close`. Drive the wire close
-    // through an unproxied client built from the stub's capability.
-    const replCap = (repl as unknown as Record<PropertyKey, unknown>)[
-      Symbol.for("@nullstyle/capnp/rpcStubCapability")
-    ] as { capabilityIndex: number };
-    assertExists(replCap);
-    const rawRepl = wire.createDenoReplServiceClient(
-      wire.createDenoReplClient(wireClient, replCap),
-      wireClient,
-    );
+    // capnp 0.3.0 forwards schema-defined `close` methods through the
+    // stub lifecycle proxy, so `repl.close()` IS wire `DenoRepl.close`;
+    // the capability release stays reachable via Symbol.asyncDispose.
     assertEquals(
-      (await rawRepl.close({ timeoutMs: CALL_TIMEOUT_MS })).which,
+      (await repl.close({ timeoutMs: CALL_TIMEOUT_MS })).which,
       "ok",
       "wire DenoRepl.close tears the session down",
     );
-    await repl.close(); // stub release (capability drop)
+    await repl[Symbol.asyncDispose](); // stub release (capability drop)
   }
 
   // -- clean close (no hang; sanitizers prove no leaked conns) -------------

@@ -18,8 +18,8 @@
  *
  * Every connection is its own capnp session: a fresh
  * {@linkcode serveAgentWireTransport} (per-connection bootstrap gate,
- * pure-JS `RpcServerBridge` — see that function's doc for why not the
- * WASM session runtime) on a `TcpTransport` wrapping the accepted
+ * `RpcServerRuntime.createWithRoot` over the WASM session core) on a
+ * `TcpTransport` wrapping the accepted
  * conn. Ownership contract (see
  * `tests/unit/rpc_conformance/transport_close_ownership_test.ts`):
  * `onClose` is wired to tear the runtime + connection resources down,
