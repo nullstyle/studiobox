@@ -167,7 +167,14 @@ function sameBinding(
     left.leaseGeneration === right.leaseGeneration;
 }
 
-async function ticketVerifier(ticket: Uint8Array): Promise<string> {
+/**
+ * The lookup key for a ticket: the hex SHA-256 of its bytes. A hostd tunnel
+ * router keys its verifier -> route registry by this so it can resolve a
+ * presented ticket to its route WITHOUT burning it (the burn happens on the
+ * binding-matched {@link SingleUseTicketStore.consume} once the route is found).
+ * Exported so the router computes the same key the store does.
+ */
+export async function ticketVerifier(ticket: Uint8Array): Promise<string> {
   const input = Uint8Array.from(ticket);
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(

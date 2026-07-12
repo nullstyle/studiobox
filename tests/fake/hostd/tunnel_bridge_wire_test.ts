@@ -35,10 +35,7 @@ import {
 import { DEFAULT_TRANSPORT_LIMITS } from "../../../src/wire/contract.ts";
 import * as wire from "../../../src/wire/generated/sandbox_agent_types.ts";
 import { dialTunnel } from "../../../src/transports/tunnel_client.ts";
-import {
-  BridgeServer,
-  type BridgeServerOptions,
-} from "../../../src/rootd/bridge_server.ts";
+import { BridgeServer } from "../../../src/rootd/bridge_server.ts";
 import {
   encodeBridgeRequest,
   readBridgeResponse,
@@ -48,12 +45,7 @@ import {
   type CreateSandboxInput,
   HostControlCore,
 } from "../../../src/hostd/control_core.ts";
-import type { SupervisorBridgeGrant } from "../../../src/rootd/supervisor_core_api.ts";
-import {
-  type FakeAgent,
-  FakeGateway,
-  startFakeAgent,
-} from "./tunnel_harness.ts";
+import { BridgeWireGateway, startFakeAgent } from "./tunnel_harness.ts";
 
 const CALL_TIMEOUT_MS = 20_000;
 const DIAL_BUDGET_MS = 20_000;
@@ -62,70 +54,6 @@ const CAP_CALL = {
   timeoutMs: CALL_TIMEOUT_MS,
   finish: { releaseResultCaps: false },
 } as const;
-
-// ---------------------------------------------------------------------------
-// A RootdGateway whose openBridge stands up a REAL BridgeServer (the rootd half)
-// ---------------------------------------------------------------------------
-
-/**
- * Stands in for the two-daemon split: `openBridge` mints a grant + binds a
- * per-bridge UDS whose guest dial reaches the fake agent, exactly as rootd's
- * `onBridgeGranted` does in production (there the guest dial is a real vsock).
- */
-class BridgeWireGateway extends FakeGateway implements AsyncDisposable {
-  readonly openedBridges: SupervisorBridgeGrant[] = [];
-  readonly #servers = new Set<BridgeServer>();
-  readonly #dir: string;
-  #seq = 0;
-
-  private constructor(
-    dir: string,
-    private readonly guestSocket: string,
-    private readonly agentCredential: Uint8Array,
-  ) {
-    super();
-    this.#dir = dir;
-  }
-
-  static async start(agent: FakeAgent): Promise<BridgeWireGateway> {
-    const dir = await Deno.makeTempDir({ prefix: "sbx-brg-" });
-    return new BridgeWireGateway(dir, agent.socket, agent.credential);
-  }
-
-  override openBridge(): Promise<SupervisorBridgeGrant> {
-    const bridgeId = `b-${(this.#seq++).toString().padStart(4, "0")}`;
-    const socketPath = `${this.#dir}/${bridgeId}.sock`;
-    const bridgeCredential = crypto.getRandomValues(new Uint8Array(32));
-    const options: BridgeServerOptions = {
-      socketPath,
-      credential: bridgeCredential,
-      dialGuest: () =>
-        Deno.connect({ transport: "unix", path: this.guestSocket }),
-    };
-    const server = BridgeServer.open(options);
-    this.#servers.add(server);
-    void server.finished.then(() => this.#servers.delete(server));
-    const grant: SupervisorBridgeGrant = {
-      bridgeId,
-      socketPath,
-      bridgeCredential,
-      agentCredential: this.agentCredential.slice(),
-      expiresAtUnixMs: Date.now() + 10_000,
-    };
-    this.openedBridges.push(grant);
-    return Promise.resolve(grant);
-  }
-
-  /** The most recent bridge server (for adversarial probing of its endpoint). */
-  get lastSocketPath(): string {
-    return `${this.#dir}/b-${(this.#seq - 1).toString().padStart(4, "0")}.sock`;
-  }
-
-  async [Symbol.asyncDispose](): Promise<void> {
-    await Promise.allSettled([...this.#servers].map((s) => s.close()));
-    await Deno.remove(this.#dir, { recursive: true }).catch(() => {});
-  }
-}
 
 function makeCore(gateway: BridgeWireGateway): HostControlCore {
   return new HostControlCore({

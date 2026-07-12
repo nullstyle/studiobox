@@ -115,6 +115,19 @@ The full Deno-mirroring set — `readFile` … `utime`, `open` / `FsFile` with
 agent is a near-passthrough to in-guest `Deno.*`, so the fidelity work is
 largely free.
 
+> **Real-backend wire-plane status (M8 Parity-real gate).** The
+> `sandbox_agent.capnp` `FileSystem` plane carries
+> `stat / list / makeDir /
+> remove / rename / open / beginUpload / beginDownload`.
+> Over that core the SDK backend (`src/sdk/wire_agent.ts`) COMPOSES `copyFile`,
+> `makeTempDir`, `makeTempFile`, `walk`, and `expandGlob` client-side — these
+> are **green against real sandboxes**. `lstat`, `symlink`, `readLink`,
+> `realPath` (and `chmod` / `chown` / `link` / `umask` / `utime`) each need a
+> distinct guest syscall the core cannot express and remain **typed not-yet** on
+> the real backend pending a `sandbox_agent.capnp` extension (an M1
+> codegen-gated change); the fixture `fs: stat/lstat/symlink/readLink/realPath`
+> is the one Tier-A fs row still red against real sandboxes.
+
 ### `env.*`
 
 `get / set / toObject / delete`. `SandboxOptions.env` is applied **post-create**
@@ -127,6 +140,21 @@ through `env.set` (upstream behavior), not injected at boot.
 - `deno.run({ entrypoint | code, watch, scriptArgs })`.
 - `DenoProcess.fetch` targets the in-runtime HTTP server; `httpReady` resolves
   on the first `Deno.serve` / `createServer`.
+
+> **Real-backend wire-plane status (M8 Parity-real gate).** `deno.eval`/`repl`
+> with primitive, `Map`/`Set`/`Date`, and plain-object results, `repl` state,
+> `close`, and `deno.run({ entrypoint })` are **green against real sandboxes**.
+> Three Tier-A `deno.*` rows are still red against the real backend and need
+> guest-agent work (batched with the next `sandbox_agent.capnp` extension): (1)
+> an error THROWN by evaluated code surfaces as a generic `SandboxAgentError`
+> rather than re-throwing with the guest error's `name` (the agent service
+> returns a wire `SbxError` instead of a captured value/error frame); (2)
+> `deno.run({ code })` with inline source (no entrypoint file) — the wire
+> `DenoRuntime.run` requires the `SpawnSpec` to carry an entrypoint path; (3)
+> `repl.call` with a non-JSON argument (e.g. a `Map`) — the wire `DenoRepl`
+> exposes only `eval`, so `call` is composed as a JSON-argument `eval` and the
+> codec-preserving native `call` op the repl server already implements is not
+> reachable over the wire.
 
 ### `Sandbox.fetch`
 

@@ -41,12 +41,48 @@ export interface ParityBackend {
    * an installed provider reaching the same host).
    */
   readonly supportsConnect?: boolean;
+  /**
+   * Skip every fixture (register them as ignored `Deno.test`s). The in-VM
+   * real backend sets this off-guest so the file still imports/typechecks on
+   * macOS while the tier only runs where a live stack exists.
+   */
+  readonly ignore?: boolean;
+  /**
+   * Disable Deno's per-test op/resource sanitizers. The in-VM real backend
+   * holds long-lived rootd/hostd subprocesses (and their stdio pumps) OPEN
+   * across every fixture, which the per-test leak detector would otherwise
+   * flag; the fake backend keeps sanitizers on, where leaks DO matter.
+   */
+  readonly ignoreSanitizers?: boolean;
+  /**
+   * Fixtures this backend cannot yet satisfy, mapped to the REASON (a
+   * documented wire-plane / lifecycle gap). Each is registered as an ignored
+   * `Deno.test` whose name carries the reason, so the gap is visible in the run
+   * output rather than a silent hole. The key is the fixture's short name (the
+   * `test(name, …)` argument). The real backend uses this for the Tier-A
+   * surface that needs a `sandbox_agent.capnp` extension (see PARITY.md); the
+   * fake backend leaves it empty (every fixture must pass in-process).
+   */
+  readonly notYet?: ReadonlyMap<string, string>;
 }
 
 /** Register the parity fixtures as `Deno.test`s against `backend`. */
 export function runParitySuite(backend: ParityBackend): void {
+  const ignore = backend.ignore ?? false;
+  const sanitize = !(backend.ignoreSanitizers ?? false);
+  const denoTest = (name: string, fn: () => Promise<void>) => {
+    const reason = backend.notYet?.get(name);
+    Deno.test({
+      name: reason === undefined
+        ? `parity[${backend.label}]: ${name}`
+        : `parity[${backend.label}]: ${name} [backend not-yet: ${reason}]`,
+      ignore: ignore || reason !== undefined,
+      sanitizeOps: sanitize,
+      sanitizeResources: sanitize,
+    }, fn);
+  };
   const test = (name: string, fn: (sandbox: Sandbox) => Promise<void>) => {
-    Deno.test(`parity[${backend.label}]: ${name}`, async () => {
+    denoTest(name, async () => {
       await using sandbox = await backend.create();
       await fn(sandbox);
     });
@@ -457,7 +493,7 @@ export function runParitySuite(backend: ParityBackend): void {
     assertEquals(await sandbox.env.get("PARITY_TWO"), "2");
   });
 
-  Deno.test(`parity[${backend.label}]: SandboxOptions.env lands in env.* and in spawns`, async () => {
+  denoTest("SandboxOptions.env lands in env.* and in spawns", async () => {
     await using sandbox = await backend.create({
       env: { PARITY_SEED: "seeded" },
     });
@@ -579,7 +615,7 @@ export function runParitySuite(backend: ParityBackend): void {
   // lifecycle
   // -------------------------------------------------------------------
 
-  Deno.test(`parity[${backend.label}]: dispose === close; closed resolves; later use throws`, async () => {
+  denoTest("dispose === close; closed resolves; later use throws", async () => {
     const sandbox = await backend.create();
     let closedSettled = false;
     const closedWatcher = sandbox.closed.then(() => {
@@ -592,7 +628,7 @@ export function runParitySuite(backend: ParityBackend): void {
     await sandbox.close(); // idempotent
   });
 
-  Deno.test(`parity[${backend.label}]: kill() is authoritative teardown with live children`, async () => {
+  denoTest("kill() is authoritative teardown with live children", async () => {
     const sandbox = await backend.create();
     const child = await sandbox.spawn("sleep", { args: ["30"] });
     await sandbox.kill();
@@ -605,15 +641,18 @@ export function runParitySuite(backend: ParityBackend): void {
   });
 
   if (backend.supportsConnect) {
-    Deno.test(`parity[${backend.label}]: connect(id) reaches the live sandbox; unknown ids fail`, async () => {
-      await using sandbox = await backend.create();
-      await sandbox.env.set("PARITY_CONNECT", "shared");
-      const connected = await SandboxStatic.connect(sandbox.id);
-      assertEquals(connected.id, sandbox.id);
-      assertEquals(await connected.env.get("PARITY_CONNECT"), "shared");
-      await assertRejects(() =>
-        SandboxStatic.connect("sbx_loc_00000000000000000000")
-      );
-    });
+    denoTest(
+      "connect(id) reaches the live sandbox; unknown ids fail",
+      async () => {
+        await using sandbox = await backend.create();
+        await sandbox.env.set("PARITY_CONNECT", "shared");
+        const connected = await SandboxStatic.connect(sandbox.id);
+        assertEquals(connected.id, sandbox.id);
+        assertEquals(await connected.env.get("PARITY_CONNECT"), "shared");
+        await assertRejects(() =>
+          SandboxStatic.connect("sbx_loc_00000000000000000000")
+        );
+      },
+    );
   }
 }

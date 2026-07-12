@@ -275,7 +275,7 @@ export class TunnelServer {
 }
 
 /** Human/dialable endpoint description from a bound listener. */
-function describeEndpoint(
+export function describeEndpoint(
   listener: Deno.Listener,
   spec: TunnelListenSpec,
 ): TunnelEndpoint {
@@ -286,13 +286,19 @@ function describeEndpoint(
   return { transport: "tcp", hostname: addr.hostname, port: addr.port };
 }
 
-function bridgeFailureStatus(error: unknown): TunnelStatus {
+/**
+ * Map a bridge-dial failure onto the tunnel ACK status the client receives when
+ * a ticket was valid (and is now spent) but the guest bridge could not be
+ * opened. Shared with {@link TunnelRouter}.
+ */
+export function bridgeFailureStatus(error: unknown): TunnelStatus {
   const code = (error as { code?: unknown }).code;
   if (code === "SBX_SUP_UNAVAILABLE") return TunnelStatus.SupervisorUnavailable;
   return TunnelStatus.DialFailed;
 }
 
-async function sendResponse(
+/** Write the fixed `SBXACK1` response frame in full. Shared with the router. */
+export async function sendResponse(
   conn: Deno.Conn,
   status: TunnelStatus,
 ): Promise<void> {
@@ -303,7 +309,8 @@ async function sendResponse(
   }
 }
 
-function asPrefaceReader(conn: Deno.Conn) {
+/** Adapt a `Deno.Conn` to the fixed-preface reader. Shared with the router. */
+export function asPrefaceReader(conn: Deno.Conn) {
   return {
     read: (destination: Uint8Array): Promise<number | null> =>
       conn.read(destination),
@@ -311,7 +318,8 @@ function asPrefaceReader(conn: Deno.Conn) {
   };
 }
 
-function safeClose(conn: Deno.Conn): void {
+/** Close a conn, swallowing an already-closed error. Shared with the router. */
+export function safeClose(conn: Deno.Conn): void {
   try {
     conn.close();
   } catch {

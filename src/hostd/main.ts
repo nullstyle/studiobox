@@ -40,7 +40,9 @@ import {
   type HostCompatIdentitySource,
   type HostControlWireOptions,
 } from "./service.ts";
+import { buildSupervisorContractIdentity } from "../rootd/service.ts";
 import { HostControlCore } from "./control_core.ts";
+import type { TunnelListenSpec } from "./tunnel_server.ts";
 import { WireBridgeFactory } from "./wire_bridge.ts";
 import {
   connectSupervisorSession,
@@ -50,6 +52,17 @@ import {
 
 const BUILD_ID_DEFAULT = DEFAULT_HOST_BUILD_ID;
 const TRANSPORT_CLOSE_TIMEOUT_MS = 5_000;
+/**
+ * The statically-forwarded tunnel loopback port (DESIGN.md §11). The shared
+ * tunnel router binds here; a client dials `127.0.0.1:40001` with its grant
+ * ticket (the wire `TunnelGrant` carries no endpoint — the address is a fixed
+ * convention, forwarded into the host VM alongside control 40000).
+ */
+export const DEFAULT_TUNNEL_LISTEN: TunnelListenSpec = {
+  transport: "tcp",
+  hostname: "127.0.0.1",
+  port: 40001,
+};
 
 // `RpcTransportAcceptSource` is not exported by the package; the pinned M1
 // pattern types custom acceptors structurally via serve()'s signature.
@@ -331,6 +344,7 @@ export async function startHostControlServer(
 
 interface HostdFlags {
   listen: HostListen;
+  tunnelListen: TunnelListenSpec;
   rootdSocket: string;
   tokenFile: string;
   rootdTokenFile: string;
@@ -347,6 +361,7 @@ export function parseHostdFlags(args: readonly string[]): HostdFlags {
   let rootdTokenFile: string | undefined;
   let buildId: string | undefined;
   let compat: string | undefined;
+  let tunnelListen: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -375,6 +390,10 @@ export function parseHostdFlags(args: readonly string[]): HostdFlags {
       buildId = take("build-id");
     } else if (arg === "--compat" || arg.startsWith("--compat=")) {
       compat = take("compat");
+    } else if (
+      arg === "--tunnel-listen" || arg.startsWith("--tunnel-listen=")
+    ) {
+      tunnelListen = take("tunnel-listen");
     } else {
       throw new WireValidationError(`unknown flag: ${arg}`);
     }
@@ -401,6 +420,9 @@ export function parseHostdFlags(args: readonly string[]): HostdFlags {
     listen: socket !== undefined
       ? { kind: "unix", socketPath: socket }
       : parseTcpListen(listenAddr!),
+    tunnelListen: tunnelListen === undefined
+      ? DEFAULT_TUNNEL_LISTEN
+      : parseTunnelListen(tunnelListen),
     rootdSocket,
     tokenFile,
     rootdTokenFile,
@@ -408,6 +430,20 @@ export function parseHostdFlags(args: readonly string[]): HostdFlags {
     compat: compat ??
       fromFileUrl(import.meta.resolve("../../compat/wire.json")),
   };
+}
+
+/** Parse `--tunnel-listen host:port` into a {@link TunnelListenSpec}. */
+function parseTunnelListen(value: string): TunnelListenSpec {
+  const at = value.lastIndexOf(":");
+  if (at <= 0) {
+    throw new WireValidationError("--tunnel-listen must be host:port");
+  }
+  const hostname = value.slice(0, at);
+  const port = Number.parseInt(value.slice(at + 1), 10);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new WireValidationError("--tunnel-listen port must be 1..65535");
+  }
+  return { transport: "tcp", hostname, port };
 }
 
 function parseTcpListen(value: string): HostListen {
@@ -457,7 +493,11 @@ async function main(): Promise<void> {
   const identity = await buildHostContractIdentity(compat, {
     buildId: flags.buildId,
   });
-  const rootdIdentity = await buildHostContractIdentity(compat, {
+  // The rootd-facing peer identity is a SUPERVISOR identity: the supervisor
+  // client's `negotiate` requires SUPERVISOR_FEATURE_BITS, and rootd advertises
+  // the supervisor plane — offering a HOST identity (HOST_FEATURE_BITS) makes
+  // rootd reject the handshake with "required peer features are unavailable".
+  const rootdIdentity = await buildSupervisorContractIdentity(compat, {
     buildId: flags.buildId,
   });
   const credential = parseHostToken(await Deno.readTextFile(flags.tokenFile));
@@ -489,6 +529,7 @@ async function main(): Promise<void> {
   const core = new HostControlCore({
     gateway: session,
     bridgeFactory: new WireBridgeFactory(session),
+    tunnelListen: flags.tunnelListen,
   });
   const server = await startHostControlServer({
     listen: flags.listen,
@@ -512,6 +553,8 @@ async function main(): Promise<void> {
     // destructive reconcile reclaims the orphaned executions on the next start.
     core.revokeAll();
     await server.close();
+    // Tear down the shared tunnel router (frees the static listener + socket).
+    await core.closeAllTunnels().catch(() => {});
     await session.close().catch(() => {});
     Deno.exit(0);
   };

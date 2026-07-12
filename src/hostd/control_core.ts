@@ -41,7 +41,7 @@ import {
   type LeaseTimeout,
   systemClock,
 } from "./leases.ts";
-import { SingleUseTicketStore } from "../security/tickets.ts";
+import { SingleUseTicketStore, ticketVerifier } from "../security/tickets.ts";
 import type { RootdGateway } from "./supervisor_client.ts";
 import type { SupervisorMachineUsage } from "../rootd/supervisor_core_api.ts";
 import {
@@ -51,8 +51,9 @@ import {
 } from "./tunnel_authorizer.ts";
 import {
   DEFAULT_TUNNEL_DIAL_BUDGET_MS,
-  TunnelServer,
+  type TunnelListenSpec,
 } from "./tunnel_server.ts";
+import { type TunnelRouteHandle, TunnelRouter } from "./tunnel_router.ts";
 import type { TunnelEndpoint } from "../transports/tunnel_client.ts";
 import { DEFAULT_AGENT_VSOCK_PORT } from "../rootd/launch_planner.ts";
 
@@ -147,7 +148,13 @@ export interface AttachSandboxResult {
  * `SandboxAgent` plane over the spliced connection (DESIGN.md §4).
  */
 export interface TunnelGrant {
-  /** The per-tunnel loopback endpoint the client presents its preface to. */
+  /**
+   * The SHARED tunnel router endpoint the client presents its preface to. Every
+   * sandbox's tunnel is multiplexed onto this one static address (DESIGN.md
+   * §11); the router routes the dial to this tunnel by the {@link ticket}. Not a
+   * wire field — an over-the-wire client dials the statically-forwarded address
+   * it was configured with out of band.
+   */
   readonly endpoint: TunnelEndpoint;
   /** The 32-byte single-use ticket (15s TTL, 10s dial budget). */
   readonly ticket: Uint8Array;
@@ -229,8 +236,18 @@ export interface HostControlCoreOptions {
    */
   readonly bridgeFactory?: PrivilegedBridgeReserver<Deno.Conn>;
   /**
-   * Directory the per-tunnel UDS endpoints are bound under. A fresh temp dir
-   * is created lazily when omitted; keep it short (`sun_path` ~104B).
+   * Where the SHARED tunnel router binds (DESIGN.md §11: the statically
+   * forwarded tunnel port, e.g. `127.0.0.1:40001`). Every sandbox's tunnel is
+   * multiplexed onto this one listener and routed by ticket, so an over-the-wire
+   * client dials this known address (the wire grant carries no endpoint). When
+   * omitted a fresh temp-dir UDS is bound lazily on the first `openTunnel`; keep
+   * a path short (`sun_path` ~104B).
+   */
+  readonly tunnelListen?: TunnelListenSpec;
+  /**
+   * Directory the lazily-bound router UDS is created under when
+   * {@link tunnelListen} is omitted. A fresh temp dir is created when this too
+   * is omitted; keep it short (`sun_path` ~104B).
    */
   readonly tunnelSocketDir?: string;
   /** Dial budget for a valid preface. @default {@link DEFAULT_TUNNEL_DIAL_BUDGET_MS} */
@@ -276,10 +293,13 @@ export class HostControlCore {
   readonly #bridgeFactory: PrivilegedBridgeReserver<Deno.Conn> | undefined;
   readonly #tunnelDialBudgetMs: number;
   readonly #agentVsockPort: number;
+  readonly #tunnelListen: TunnelListenSpec | undefined;
   #tunnelSocketDir: string | undefined;
   #tunnelSocketDirOwned = false;
-  /** Live per-tunnel endpoints per sandbox id, closed on lease expiry / restart. */
-  readonly #tunnels = new Map<string, Set<TunnelServer>>();
+  /** The single shared tunnel listener, bound lazily on the first openTunnel. */
+  #router: TunnelRouter | undefined;
+  /** Live tunnel routes per sandbox id, freed on lease expiry / restart. */
+  readonly #tunnels = new Map<string, Set<TunnelRouteHandle>>();
   readonly #sandboxes = new Map<string, SandboxEntry>();
   /** Lease id -> sandbox id, so a Lease capability resolves its sandbox. */
   readonly #leaseToSandbox = new Map<string, string>();
@@ -306,6 +326,7 @@ export class HostControlCore {
     this.#overlayDiskBytes = options.overlayDiskBytes ??
       DEFAULT_OVERLAY_DISK_BYTES;
     this.#bridgeFactory = options.bridgeFactory;
+    this.#tunnelListen = options.tunnelListen;
     this.#tunnelSocketDir = options.tunnelSocketDir;
     this.#tunnelDialBudgetMs = options.tunnelDialBudgetMs ??
       DEFAULT_TUNNEL_DIAL_BUDGET_MS;
@@ -324,6 +345,13 @@ export class HostControlCore {
   /** Outstanding tunnel-ticket count (hostd-restart revocation assertion seam). */
   get ticketCount(): number {
     return this.#tickets.size;
+  }
+
+  /** Live tunnel-route count across every sandbox (teardown assertion seam). */
+  get activeTunnelCount(): number {
+    let count = 0;
+    for (const set of this.#tunnels.values()) count += set.size;
+    return count;
   }
 
   /**
@@ -523,12 +551,14 @@ export class HostControlCore {
 
   /**
    * Open a ticketed tunnel to the sandbox's guest agent (DESIGN.md §4; PLAN.md
-   * §M7). Issues a single-use ticket bound to the sandbox + current lease,
-   * stands up a per-tunnel loopback endpoint, and returns the {@link TunnelGrant}
-   * the client dials. The ticket is BURNED by the endpoint's authorizer BEFORE
-   * rootd's bridge is ever opened; the endpoint is freed when the authorized
-   * splice ends, when the 10s dial budget lapses unused, or when the lease is
-   * revoked (which also revokes the ticket).
+   * §M7/§M8). Issues a single-use ticket bound to the sandbox + current lease and
+   * REGISTERS A ROUTE (keyed by the ticket's verifier) on the SHARED tunnel
+   * router — the one static listener every sandbox's tunnel is multiplexed onto
+   * (DESIGN.md §11) — then returns the {@link TunnelGrant} the client dials. The
+   * ticket is BURNED by the route's authorizer BEFORE rootd's bridge is ever
+   * opened; the route is freed when the authorized splice ends, when the 10s dial
+   * budget lapses unused, or when the lease is revoked (which also revokes the
+   * ticket). The shared listener itself outlives any one tunnel.
    *
    * Rejects a sandbox with no live lease (`SBX_HOST_STATE`) and, until a bridge
    * factory is wired, fails typed-unimplemented (`SBX_HOST_UNIMPLEMENTED`).
@@ -561,6 +591,10 @@ export class HostControlCore {
       guestPort: this.#agentVsockPort,
     };
 
+    // Bind (or reuse) the SHARED tunnel router BEFORE minting anything. A bind
+    // failure fails the whole openTunnel with nothing committed to clean up.
+    const router = await this.#ensureRouter();
+
     // Reserve the bridge BEFORE minting a ticket (PLAN.md §M8): rootd mints the
     // grant — yielding the launch-scoped `agentCredential` the client must
     // present to the guest agent — and binds its per-bridge UDS, but does NOT
@@ -587,41 +621,42 @@ export class HostControlCore {
       throw error;
     }
 
-    // Adapt the reservation onto the PrivilegedBridgeFactory the tunnel server
-    // consumes: the authorizer burns the ticket, then `openBridge` here is the
-    // post-burn guest dial (`reservation.connect`).
+    // Adapt the reservation onto the PrivilegedBridgeFactory the authorizer
+    // consumes: it burns the ticket, then `openBridge` here is the post-burn
+    // guest dial (`reservation.connect`).
     const connectFactory: PrivilegedBridgeFactory<Deno.Conn> = {
       openBridge: (_request, signal) => reservation.connect(signal),
     };
     const authorizer = new TunnelAuthorizer(this.#tickets, connectFactory);
-    let server: TunnelServer;
+    // Key the route by the ticket's verifier so a presented ticket resolves to
+    // THIS route only — a ticket for sandbox A can never reach sandbox B's
+    // tunnel on the shared listener.
+    const verifier = await ticketVerifier(issued.ticket);
+    let handle: TunnelRouteHandle;
     try {
-      server = TunnelServer.open({
-        authorizer,
+      handle = router.register({
+        verifier,
         binding,
         bridgeRequest,
-        listen: {
-          transport: "unix",
-          path: await this.#allocTunnelSocketPath(),
-        },
+        authorizer,
         ttlMs: this.#tunnelDialBudgetMs,
       });
     } catch (error) {
-      // Could not stand up the endpoint: revoke the just-issued ticket so it
-      // cannot be spent against a bridge with no server in front of it, and free
-      // the reservation.
+      // Could not register the route: revoke the just-issued ticket so it cannot
+      // be spent against a bridge with no route in front of it, and free the
+      // reservation.
       this.#tickets.revokeSandbox(entry.id);
       await reservation.close().catch(() => {});
       throw error;
     }
-    this.#trackTunnel(entry.id, server);
-    // Free the reservation when the endpoint is freed (splice ended, ttl lapsed,
-    // or closed) — best effort, since a claimed reservation's conn owns its own
+    this.#trackTunnel(entry.id, handle);
+    // Free the reservation when the route is freed (splice ended, ttl lapsed, or
+    // closed) — best effort, since a claimed reservation's conn owns its own
     // teardown and an un-dialed one self-frees on rootd's dial-budget TTL.
-    void server.finished.then(() => void reservation.close().catch(() => {}));
+    void handle.finished.then(() => void reservation.close().catch(() => {}));
 
     return {
-      endpoint: server.endpoint,
+      endpoint: router.endpoint,
       ticket: issued.ticket,
       guestPort: this.#agentVsockPort,
       expiresAtUnixMs: issued.expiresAt,
@@ -754,55 +789,62 @@ export class HostControlCore {
     return entry;
   }
 
-  /** Track a live tunnel endpoint; self-prune when its splice / ttl frees it. */
-  #trackTunnel(sandboxId: string, server: TunnelServer): void {
+  /** Track a live tunnel route; self-prune when its splice / ttl frees it. */
+  #trackTunnel(sandboxId: string, handle: TunnelRouteHandle): void {
     let set = this.#tunnels.get(sandboxId);
     if (set === undefined) {
       set = new Set();
       this.#tunnels.set(sandboxId, set);
     }
-    set.add(server);
+    set.add(handle);
     const forget = (): void => {
       const current = this.#tunnels.get(sandboxId);
       if (current === undefined) return;
-      current.delete(server);
+      current.delete(handle);
       if (current.size === 0) this.#tunnels.delete(sandboxId);
     };
     // Both edges converge on forget(): finished resolves on natural teardown
     // (splice EOF / ttl lapse), and the reclaim path calls close() directly.
-    void server.finished.then(forget);
+    void handle.finished.then(forget);
   }
 
-  /** Close (and free) every endpoint of one sandbox — a reclaim-path step. */
+  /** Close (and free) every tunnel route of one sandbox — a reclaim-path step. */
   #closeTunnels(sandboxId: string): void {
     const set = this.#tunnels.get(sandboxId);
     if (set === undefined) return;
     this.#tunnels.delete(sandboxId);
-    for (const server of set) void server.close();
+    for (const handle of set) void handle.close();
   }
 
-  /** Allocate a short per-tunnel UDS path under the (lazily created) socket dir. */
-  async #allocTunnelSocketPath(): Promise<string> {
+  /** Bind (once) the shared tunnel router the whole core multiplexes onto. */
+  async #ensureRouter(): Promise<TunnelRouter> {
+    if (this.#router !== undefined) return this.#router;
+    const listen: TunnelListenSpec = this.#tunnelListen ??
+      { transport: "unix", path: await this.#allocRouterSocketPath() };
+    this.#router = TunnelRouter.open(listen);
+    return this.#router;
+  }
+
+  /** Allocate the short shared-router UDS path under the (lazy) socket dir. */
+  async #allocRouterSocketPath(): Promise<string> {
     if (this.#tunnelSocketDir === undefined) {
       this.#tunnelSocketDir = await Deno.makeTempDir({ prefix: "sbx-tun-" });
       this.#tunnelSocketDirOwned = true;
     }
-    const name = `t-${crypto.randomUUID().slice(0, 8)}.sock`;
-    return `${this.#tunnelSocketDir}/${name}`;
+    return `${this.#tunnelSocketDir}/router.sock`;
   }
 
   /**
-   * Close every live tunnel endpoint (hostd shutdown / test teardown) and
-   * remove the owned socket directory. Idempotent; leaves no listener or
-   * socket file behind.
+   * Close the shared tunnel router (hostd shutdown / test teardown) — freeing
+   * every live route, the listener, and the socket file — and remove the owned
+   * socket directory. Idempotent; leaves no listener or socket file behind.
    */
   async closeAllTunnels(): Promise<void> {
-    const pending: Promise<void>[] = [];
-    for (const set of this.#tunnels.values()) {
-      for (const server of set) pending.push(server.close());
-    }
     this.#tunnels.clear();
-    await Promise.allSettled(pending);
+    if (this.#router !== undefined) {
+      await this.#router.close();
+      this.#router = undefined;
+    }
     if (this.#tunnelSocketDirOwned && this.#tunnelSocketDir !== undefined) {
       await Deno.remove(this.#tunnelSocketDir, { recursive: true }).catch(
         () => {},

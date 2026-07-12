@@ -60,6 +60,31 @@ export function validateEnvValue(value: string): void {
 }
 
 /**
+ * Default search PATH a real guest sandbox exposes. `overlay-init` execs
+ * studioboxd as pid 1 with the kernel's bare init environment (no PATH, no
+ * HOME), so without this a bare-name spawn (`bash`, `sleep`, …) fails in the
+ * guest with "no path to search". The value mirrors the golden rootfs's Debian
+ * layout and matches an upstream `@deno/sandbox` guest.
+ */
+export const DEFAULT_GUEST_PATH =
+  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/**
+ * Seed the guest's base environment. A default `PATH` sits UNDER the boot
+ * environment (a boot-provided `PATH` wins; absent it, bare-name spawns still
+ * resolve). `HOME`, by contrast, is FORCED to the sandbox home OVER the boot
+ * value: `overlay-init` execs studioboxd as pid 1, whose init `HOME` is `/`
+ * (or `/root`), which is NOT the sandbox's home — so `$HOME/.bashrc` (bash's
+ * `BASH_ENV`) and `~` must resolve to `/home/app`, exactly as upstream. Pure.
+ */
+export function guestBaseEnvironment(
+  home: string,
+  bootEnv: Readonly<Record<string, string>>,
+): Record<string, string> {
+  return { PATH: DEFAULT_GUEST_PATH, ...bootEnv, HOME: home };
+}
+
+/**
  * Compute the environment of one spawn from the agent base environment
  * and the per-spawn overlay: `clearEnv` drops the base; `env` entries
  * win over base entries on conflict. Pure — neither input is mutated.

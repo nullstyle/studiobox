@@ -47,14 +47,17 @@ const CAP_CALL = {
 // Small helpers
 // ---------------------------------------------------------------------------
 
-async function pollUntilAbsent(path: string, budgetMs = 5_000): Promise<void> {
+async function pollUntil(
+  predicate: () => boolean,
+  label: string,
+  budgetMs = 5_000,
+): Promise<void> {
   const deadline = Date.now() + budgetMs;
   while (Date.now() < deadline) {
-    const present = await Deno.lstat(path).then(() => true, () => false);
-    if (!present) return;
+    if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`endpoint ${path} was not freed within ${budgetMs}ms`);
+  throw new Error(`${label} did not settle within ${budgetMs}ms`);
 }
 
 async function writeAll(conn: Deno.Conn, bytes: Uint8Array): Promise<void> {
@@ -62,6 +65,12 @@ async function writeAll(conn: Deno.Conn, bytes: Uint8Array): Promise<void> {
   while (offset < bytes.byteLength) {
     offset += await conn.write(bytes.subarray(offset));
   }
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 async function readN(conn: Deno.Conn, length: number): Promise<Uint8Array> {
@@ -195,10 +204,6 @@ Deno.test("tunnel: openTunnel -> preface -> ACK -> bridge -> capnp agent ping + 
   assertEquals(bridge.requests.length, 1, "exactly one bridge opened");
   assertEquals(bridge.requests[0].executionId.length > 0, true);
 
-  const endpointPath = grant.endpoint.transport === "unix"
-    ? grant.endpoint.path
-    : "";
-
   {
     await using session = await agentSessionOverTunnel(conn, agent.credential);
     const { agent: sandbox, wireClient } = session;
@@ -253,9 +258,12 @@ Deno.test("tunnel: openTunnel -> preface -> ACK -> bridge -> capnp agent ping + 
     await sandbox.close();
   }
 
-  // Teardown from the client end propagated EOF: the endpoint is freed with no
-  // leaked listener / socket file.
-  await pollUntilAbsent(endpointPath);
+  // Teardown from the client end propagated EOF: the tunnel ROUTE is freed
+  // (the shared router listener stays up for other tunnels). No leaked route.
+  await pollUntil(
+    () => h.core.activeTunnelCount === 0,
+    "the tunnel route frees on client EOF",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -417,4 +425,70 @@ Deno.test("tunnel: accept loop survives connect-then-close and garbage prefaces"
   } finally {
     globalThis.removeEventListener("unhandledrejection", onRejection);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 6) Two concurrent tunnels on the ONE shared listener route by ticket:
+//    ticket A reaches tunnel A, ticket B reaches tunnel B, and A cannot reach B.
+// ---------------------------------------------------------------------------
+
+Deno.test("tunnel: two concurrent tunnels on one shared listener route by ticket", async () => {
+  await using echo = await EchoServer.start();
+  const bridge = echo.bridgeFactory();
+  await using h = makeTunnelCore({
+    bridgeFactory: bridge,
+    tunnelDialBudgetMs: DIAL_BUDGET_MS,
+  });
+  const idA = await h.createSandbox();
+  const idB = await h.createSandbox();
+
+  const grantA = await h.core.openTunnel(idA);
+  const grantB = await h.core.openTunnel(idB);
+
+  // Both tunnels are multiplexed onto ONE static listener, each with its own
+  // single-use ticket.
+  assertEquals(grantA.endpoint, grantB.endpoint, "one shared tunnel listener");
+  assert(
+    !bytesEqual(grantA.ticket, grantB.ticket),
+    "each tunnel carries its own ticket",
+  );
+
+  // Dialing ticket A is routed (by ticket) to sandbox A's bridge — not B's.
+  const connA = await dialTunnel(grantA.endpoint, grantA.ticket, {
+    timeoutMs: DIAL_BUDGET_MS,
+  });
+  assertEquals(bridge.requests.length, 1);
+  assertEquals(
+    bridge.requests[0].sandboxId,
+    idA,
+    "ticket A routed to tunnel A",
+  );
+
+  // Dialing ticket B is routed to sandbox B's bridge.
+  const connB = await dialTunnel(grantB.endpoint, grantB.ticket, {
+    timeoutMs: DIAL_BUDGET_MS,
+  });
+  assertEquals(bridge.requests.length, 2);
+  assertEquals(
+    bridge.requests[1].sandboxId,
+    idB,
+    "ticket B routed to tunnel B",
+  );
+
+  // The two splices are independent duplexes over the one listener.
+  await writeAll(connA, new TextEncoder().encode("AAAA"));
+  assertEquals(new TextDecoder().decode(await readN(connA, 4)), "AAAA");
+  await writeAll(connB, new TextEncoder().encode("BBBB"));
+  assertEquals(new TextDecoder().decode(await readN(connB, 4)), "BBBB");
+
+  // Ticket A cannot reach tunnel B: its route was claimed + deregistered on the
+  // first dial, so a replay opens no further bridge and B is untouched.
+  await assertRejects(
+    () => dialTunnel(grantA.endpoint, grantA.ticket, { timeoutMs: 2_000 }),
+    TunnelDialError,
+  );
+  assertEquals(bridge.requests.length, 2, "a replayed ticket opens no bridge");
+
+  connA.close();
+  connB.close();
 });

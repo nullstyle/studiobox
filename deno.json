@@ -6,7 +6,8 @@
     ".": "./mod.ts",
     "./cli": "./src/cli/main.ts",
     "./images": "./images/mod.ts",
-    "./testing": "./testing/mod.ts"
+    "./testing": "./testing/mod.ts",
+    "./sdk": "./src/sdk/mod.ts"
   },
   "imports": {
     "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.4",
@@ -38,6 +39,7 @@
     "soak:vm": "deno run -A --unstable-vsock tools/soak/soak_vm_main.ts",
     "test:vm": "deno run -A tools/lima_vm_test.ts",
     "test:vm:run": "deno test -A --unstable-vsock tests/vm/",
+    "test:vm:parity": "deno run -A tools/parity_vm_test.ts",
     "images:build": "deno run -A tools/build_golden_set.ts",
     "agent:compile": "deno compile -A --unstable-vsock --output .build/studioboxd src/agent/main.ts && deno compile -A --unstable-vsock --target aarch64-unknown-linux-gnu --output .build/studioboxd-aarch64-unknown-linux-gnu src/agent/main.ts && deno compile -A --unstable-vsock --target x86_64-unknown-linux-gnu --output .build/studioboxd-x86_64-unknown-linux-gnu src/agent/main.ts",
     "compat:check": "deno run --allow-read tools/check_compat.ts",

@@ -1,11 +1,33 @@
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { AgentError } from "../../../src/agent/api.ts";
 import {
   AgentEnv,
+  DEFAULT_GUEST_PATH,
+  guestBaseEnvironment,
   layerSpawnEnv,
   validateEnvName,
   validateEnvValue,
 } from "../../../src/agent/env.ts";
+
+Deno.test("guestBaseEnvironment: default PATH + HOME sit UNDER the boot env", () => {
+  // A bare init env (overlay-init execs studioboxd with no PATH/HOME) still
+  // yields a usable PATH so bare-name spawns resolve, and HOME = sandbox home.
+  const base = guestBaseEnvironment("/home/app", {});
+  assertEquals(base.PATH, DEFAULT_GUEST_PATH);
+  assertEquals(base.HOME, "/home/app");
+  assert(base.PATH.includes("/usr/bin") && base.PATH.includes("/bin"));
+
+  // A boot-provided PATH WINS; HOME is FORCED to the sandbox home over the
+  // init's `HOME=/` so `$HOME/.bashrc` and `~` resolve inside the sandbox.
+  const overridden = guestBaseEnvironment("/home/app", {
+    PATH: "/custom/bin",
+    HOME: "/",
+    EXTRA: "1",
+  });
+  assertEquals(overridden.PATH, "/custom/bin");
+  assertEquals(overridden.HOME, "/home/app");
+  assertEquals(overridden.EXTRA, "1");
+});
 
 Deno.test("get/set/delete/toObject round-trip", async () => {
   const env = new AgentEnv({ SEEDED: "yes" });

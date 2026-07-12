@@ -26,6 +26,10 @@ import type {
 } from "../../../src/hostd/tunnel_authorizer.ts";
 import type { Clock, ClockTimer } from "../../../src/hostd/leases.ts";
 import type { RootdGateway } from "../../../src/hostd/supervisor_client.ts";
+import {
+  BridgeServer,
+  type BridgeServerOptions,
+} from "../../../src/rootd/bridge_server.ts";
 import type {
   SupervisorBridgeGrant,
   SupervisorLaunchRequest,
@@ -350,6 +354,72 @@ export async function startFakeAgent(): Promise<FakeAgent> {
       await Deno.remove(socketDir, { recursive: true }).catch(() => {});
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// The rootd half: a gateway whose openBridge stands up a REAL BridgeServer
+// ---------------------------------------------------------------------------
+
+/**
+ * Stands in for the two-daemon split: `openBridge` mints a grant + binds a
+ * per-bridge UDS whose guest dial reaches the fake agent, exactly as rootd's
+ * `onBridgeGranted` does in production (there the guest dial is a real vsock).
+ * The hostd side dials that UDS with the grant's `bridgeCredential` in the fixed
+ * `SBXBRG1` preface before the guest is reached (the assembled bridge leg).
+ */
+export class BridgeWireGateway extends FakeGateway implements AsyncDisposable {
+  readonly openedBridges: SupervisorBridgeGrant[] = [];
+  readonly #servers = new Set<BridgeServer>();
+  readonly #dir: string;
+  #seq = 0;
+
+  private constructor(
+    dir: string,
+    private readonly guestSocket: string,
+    private readonly agentCredential: Uint8Array,
+  ) {
+    super();
+    this.#dir = dir;
+  }
+
+  static async start(agent: FakeAgent): Promise<BridgeWireGateway> {
+    const dir = await Deno.makeTempDir({ prefix: "sbx-brg-" });
+    return new BridgeWireGateway(dir, agent.socket, agent.credential);
+  }
+
+  override openBridge(): Promise<SupervisorBridgeGrant> {
+    const bridgeId = `b-${(this.#seq++).toString().padStart(4, "0")}`;
+    const socketPath = `${this.#dir}/${bridgeId}.sock`;
+    const bridgeCredential = crypto.getRandomValues(new Uint8Array(32));
+    const options: BridgeServerOptions = {
+      socketPath,
+      credential: bridgeCredential,
+      dialGuest: () =>
+        Deno.connect({ transport: "unix", path: this.guestSocket }),
+    };
+    const server = BridgeServer.open(options);
+    this.#servers.add(server);
+    void server.finished.then(() => this.#servers.delete(server));
+    const grant: SupervisorBridgeGrant = {
+      bridgeId,
+      socketPath,
+      bridgeCredential,
+      agentCredential: this.agentCredential.slice(),
+      expiresAtUnixMs: Date.now() + 10_000,
+    };
+    this.openedBridges.push(grant);
+    return Promise.resolve(grant);
+  }
+
+  /** The most recent bridge server socket (for adversarial endpoint probing). */
+  get lastSocketPath(): string {
+    return `${this.#dir}/b-${(this.#seq - 1).toString().padStart(4, "0")}.sock`;
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    await Promise.allSettled([...this.#servers].map((s) => s.close()));
+    await Deno.remove(this.#dir, { recursive: true }).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------

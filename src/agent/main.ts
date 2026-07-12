@@ -46,7 +46,7 @@ import { TcpTransport } from "@nullstyle/capnp";
 import type { AgentApi, AgentInfo, AgentRootConfig } from "./api.ts";
 import { AgentError } from "./api.ts";
 import { AgentDeno } from "./deno_runtime.ts";
-import { AgentEnv } from "./env.ts";
+import { AgentEnv, guestBaseEnvironment } from "./env.ts";
 import { AgentFs } from "./fs.ts";
 import { AgentProcesses, sandboxHome } from "./processes.ts";
 import {
@@ -82,10 +82,14 @@ function assembleAgent(
   config: AgentRootConfig,
   denoPath: string | undefined,
 ): AgentAssembly {
-  // The real guest seeds the agent environment from its boot
-  // environment; the fake host seeds explicitly instead (see
+  // The real guest seeds the agent environment from its boot environment,
+  // under a guaranteed default PATH + HOME (overlay-init execs studioboxd with
+  // the kernel's bare init env, so a bare-name spawn would otherwise fail with
+  // "no path to search"); the fake host seeds explicitly instead (see
   // `testing/mod.ts`).
-  const env = new AgentEnv(Deno.env.toObject());
+  const env = new AgentEnv(
+    guestBaseEnvironment(sandboxHome(config), Deno.env.toObject()),
+  );
   const processes = new AgentProcesses({ config, env });
   const fs = new AgentFs(config);
   const deno = new AgentDeno({ config, spawner: processes, denoPath });
