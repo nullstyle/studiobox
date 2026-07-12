@@ -4,7 +4,7 @@ import {
   CodegenProbeInterfaceId,
   createCodegenProbeChunkStreamSender,
   ProbeResultCodec,
-} from "../../../src/wire/generated/mod.ts";
+} from "../../../src/wire/generated/codegen_probe_types.ts";
 
 Deno.test("generated probe bindings encode the declared 64-bit values", () => {
   const encoded = ProbeResultCodec.encode({

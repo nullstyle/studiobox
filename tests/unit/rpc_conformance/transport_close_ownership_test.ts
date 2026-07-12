@@ -49,7 +49,7 @@ import {
   CodegenProbe,
   type CodegenProbe as CodegenProbeClient,
   type CodegenProbeService,
-} from "../../../src/wire/generated/mod.ts";
+} from "../../../src/wire/generated/codegen_probe_types.ts";
 
 const TIMEOUT_MS = 2_000;
 // Long enough that any prompt settlement observed below is attributable to

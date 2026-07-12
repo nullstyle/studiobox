@@ -42,7 +42,7 @@ import {
   type CodegenProbe as CodegenProbeApi,
   type CodegenProbeService,
   createCodegenProbeChunkStreamSender,
-} from "../../src/wire/generated/mod.ts";
+} from "../../src/wire/generated/codegen_probe_types.ts";
 
 /** One logical stream pushed through `CodegenProbe.chunk` during a soak. */
 export interface ChunkStreamPlan {

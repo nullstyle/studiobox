@@ -13,9 +13,11 @@
  *      fresh `capnpc-deno` run over `codegen.committedSchemas`;
  *   5. full-binding qualification: regenerates all five canonical schemas and
  *      typechecks the result, then requires the observed outcome to match
- *      `codegen.fullBindingStatus` ("blocked" means the typecheck MUST fail;
- *      if upstream fixes land, this gate fails until the real bindings are
- *      committed and the manifest is updated).
+ *      `codegen.fullBindingStatus` ("committed" means the typecheck MUST pass
+ *      and `codegen.committedSchemas` must cover every canonical schema;
+ *      "blocked" means the typecheck MUST fail — if upstream fixes land, this
+ *      gate fails until the real bindings are committed and the manifest is
+ *      updated).
  *
  * Without the checkout, steps 4-5 are skipped loudly. Invoke via
  * `deno task wire:check`; regenerate bindings via `deno task wire:generate`.
@@ -104,28 +106,33 @@ const toolchainPath = Deno.env.get("STUDIOBOX_CAPNP_DENO") ??
     new URL(manifest.codegen.toolchain.checkout, root).pathname,
   );
 const toolchainMain = `${toolchainPath}/tools/capnpc-deno/main.ts`;
-if (!(await exists(toolchainMain)) || !capnpAvailable) {
+const toolchainCommit = (await exists(toolchainMain))
+  ? (await command("git", ["-C", toolchainPath, "rev-parse", "HEAD"])).stdout
+    .trim()
+  : null;
+// Byte-identity and full-binding regeneration are only meaningful against the
+// EXACT toolchain commit that produced the committed bindings. The sibling
+// `capnp-deno` checkout develops ahead of its published release, so when it
+// has advanced past the recorded commit these legs are comparing against a
+// different emitter — skip them loudly rather than report a false drift. The
+// schema-hash, compiler-pin, and typecheck legs above always enforce.
+const toolchainMatches = toolchainCommit === manifest.codegen.toolchain.commit;
+if (toolchainCommit === null || !capnpAvailable || !toolchainMatches) {
   console.warn(
-    !capnpAvailable
+    toolchainCommit === null
+      ? `warning: capnp-deno toolchain not found at ${toolchainPath}; ` +
+        "SKIPPING regeneration drift and full-binding qualification " +
+        "(set STUDIOBOX_CAPNP_DENO or clone the sibling checkout to run them)"
+      : !capnpAvailable
       ? "warning: `capnp` binary missing; SKIPPING regeneration drift and " +
         "full-binding qualification (the codegen toolchain shells out to it)"
-      : `warning: capnp-deno toolchain not found at ${toolchainPath}; ` +
-        "SKIPPING regeneration drift and full-binding qualification " +
-        "(set STUDIOBOX_CAPNP_DENO or clone the sibling checkout to run them)",
+      : `warning: toolchain checkout is at ${toolchainCommit}, but the ` +
+        `committed bindings were generated at ${manifest.codegen.toolchain.commit}; ` +
+        "SKIPPING byte-identity and full-binding regeneration (check out the " +
+        "recorded commit to verify reproducibility). Hash + typecheck still enforce.",
   );
 } else {
-  const commit = (await command("git", [
-    "-C",
-    toolchainPath,
-    "rev-parse",
-    "HEAD",
-  ])).stdout.trim();
-  if (commit !== manifest.codegen.toolchain.commit) {
-    console.warn(
-      `warning: toolchain checkout is at ${commit}, manifest records ` +
-        `${manifest.codegen.toolchain.commit}; byte comparison still governs`,
-    );
-  }
+  const commit = toolchainCommit;
 
   // 4. Regeneration drift over the committed schema set.
   const regenDir = await Deno.makeTempDir({ prefix: "studiobox_wire_regen_" });
@@ -171,13 +178,13 @@ if (!(await exists(toolchainMain)) || !capnpAvailable) {
       `${rootPath}deno.json`,
       `${fullDir}/mod.ts`,
     ]);
-    const observed = check.success ? "qualified" : "blocked";
+    const observed = check.success ? "committed" : "blocked";
     const recorded = manifest.codegen.fullBindingStatus;
     if (observed !== recorded) {
       throw new Error(
         `full five-schema bindings are observed "${observed}" but ` +
           `compat/wire.json records "${recorded}"` +
-          (observed === "qualified"
+          (observed === "committed"
             ? "; the upstream codegen blockers appear FIXED - commit the " +
               "full bindings and update the manifest"
             : `; typecheck failure follows:\n${check.stderr}`),
@@ -190,6 +197,14 @@ if (!(await exists(toolchainMain)) || !capnpAvailable) {
           "codegen.blockers); committed bindings stay probe-only",
       );
     } else {
+      const committed = new Set(manifest.codegen.committedSchemas);
+      const missing = canonicalSchemas.filter((name) => !committed.has(name));
+      if (missing.length > 0) {
+        throw new Error(
+          `codegen.fullBindingStatus is "committed" but committedSchemas is ` +
+            `missing canonical schema(s): ${missing.join(", ")}`,
+        );
+      }
       console.log("full five-schema bindings typecheck");
     }
   } finally {

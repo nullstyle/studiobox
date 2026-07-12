@@ -8,9 +8,9 @@
     "./testing": "./testing/mod.ts"
   },
   "imports": {
-    "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.1",
-    "@nullstyle/capnp/encoding": "jsr:@nullstyle/capnp@^0.1/encoding",
-    "@nullstyle/capnp/rpc": "jsr:@nullstyle/capnp@^0.1/rpc",
+    "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.2",
+    "@nullstyle/capnp/encoding": "jsr:@nullstyle/capnp@^0.2/encoding",
+    "@nullstyle/capnp/rpc": "jsr:@nullstyle/capnp@^0.2/rpc",
     "@nullstyle/firecracker": "jsr:@nullstyle/firecracker@^0.2",
     "@nullstyle/firecracker/client": "jsr:@nullstyle/firecracker@^0.2/client",
     "@nullstyle/firecracker/jailer": "jsr:@nullstyle/firecracker@^0.2/jailer",
@@ -29,13 +29,13 @@
     "test:unit": "deno test --allow-read --allow-write --allow-net=127.0.0.1,unix:/tmp/studiobox-unit-uds.sock tests/unit/",
     "test:fake": "deno test --allow-read --allow-write --allow-net --allow-run --allow-env --allow-sys=uid,gid tests/fake/",
     "test:parity": "deno test --allow-read --allow-write --allow-net --allow-run --allow-env --allow-sys=uid,gid tests/parity/",
-    "agent:compile": "deno compile -A --output .build/studioboxd src/agent/main.ts && deno compile -A --target aarch64-unknown-linux-gnu --output .build/studioboxd-aarch64-unknown-linux-gnu src/agent/main.ts && deno compile -A --target x86_64-unknown-linux-gnu --output .build/studioboxd-x86_64-unknown-linux-gnu src/agent/main.ts",
+    "agent:compile": "deno compile -A --unstable-vsock --output .build/studioboxd src/agent/main.ts && deno compile -A --unstable-vsock --target aarch64-unknown-linux-gnu --output .build/studioboxd-aarch64-unknown-linux-gnu src/agent/main.ts && deno compile -A --unstable-vsock --target x86_64-unknown-linux-gnu --output .build/studioboxd-x86_64-unknown-linux-gnu src/agent/main.ts",
     "compat:check": "deno run --allow-read tools/check_compat.ts",
     "images:fetch-kernel": "deno run --allow-read=images --allow-write=images/dist --allow-net=s3.amazonaws.com tools/images_fetch_kernel.ts",
     "qualify:images": "SBX_QUALIFY=1 deno test --allow-read --allow-write --allow-net=s3.amazonaws.com --allow-env=SBX_QUALIFY tests/qualification/kernel_fetch_test.ts",
     "qualify:streaming": "SBX_QUALIFY=1 deno test --v8-flags=--max-old-space-size=192 --allow-net=127.0.0.1 --allow-env=SBX_QUALIFY tests/qualification/",
     "compile:probe": "deno compile --allow-net=127.0.0.1 --output .build/compiled_probe tools/compiled_probe.ts && .build/compiled_probe",
-    "wire:generate": "deno run --allow-read --allow-write --allow-run=capnp ../capnp-deno/tools/capnpc-deno/main.ts generate --schema schema/codegen_probe.capnp --out src/wire/generated --layout flat",
+    "wire:generate": "deno run --allow-read --allow-write --allow-run=capnp ../capnp-deno/tools/capnpc-deno/main.ts generate --schema schema/codegen_probe.capnp --schema schema/common.capnp --schema schema/host_control.capnp --schema schema/sandbox_agent.capnp --schema schema/streams.capnp --schema schema/supervisor.capnp --out src/wire/generated --layout flat",
     "wire:check": "deno run --allow-read --allow-write --allow-env=STUDIOBOX_CAPNP_DENO --allow-run=capnp,deno,git tools/check_wire.ts"
   },
   "publish": {

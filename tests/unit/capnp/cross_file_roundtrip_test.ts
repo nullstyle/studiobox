@@ -1,198 +1,36 @@
-// M1 codegen-qualification round trip: a host_control composite embedding
-// common.capnp types, encoded and decoded through the PUBLISHED
-// jsr:@nullstyle/capnp runtime codecs.
+// Cross-file codegen qualification round trip, adopted with capnp 0.2.0.
 //
-// capnpc-deno at the qualified toolchain commit cannot yet emit these
-// descriptors itself: cross-file struct references are lowered to
-// TYPE_ANY_POINTER and the referenced TypeScript names are left unimported
-// (see compat/wire.json `codegen.blockers`). The descriptors below mirror,
-// byte-for-byte in layout, what the emitter produces for common.capnp's own
-// module plus what it SHOULD produce for host_control's `KillResults`
-// wrapper (`kill @6 () -> (result :Common.EmptyResult)`), proving the
-// published runtime handles the cross-file composite wire shape and that the
-// remaining gap is confined to the code generator.
-import { assertEquals } from "@std/assert";
+// Under 0.1.0 this file proved the PUBLISHED runtime handled the cross-file
+// composite wire shape through HAND-BUILT descriptors, isolating the gap to
+// the emitter (cross-file references were lowered to TYPE_ANY_POINTER; see
+// the historical inventory in compat/wire.json `codegen.blockerNote`).
+// capnp-deno 0.2.0 fixed cross-file lowering and namespaced the barrel, so
+// these tests now exercise the REAL generated modules end to end:
+//
+//   1. host_control's `KillResults` wrapper (`kill @6 () ->
+//      (result :Common.EmptyResult)`) round-trips through the generated
+//      `hostControl.KillResultsCodec`, whose descriptor references
+//      common.capnp's `EmptyResult`/`SbxError` via real cross-file imports —
+//      both union arms, against the published jsr:@nullstyle/capnp runtime.
+//   2. A generated-interface client/server ping (`HostControl.ping`) runs
+//      over an in-process MessagePort transport pair, proving the generated
+//      service token bootstrap/dispatch path against the published runtime.
+//
+// Both legs import through the NAMESPACED src/wire/generated/mod.ts barrel
+// (`export * as hostControl`, `export * as common`), pinning the 0.2.0
+// barrel shape that unblocked committing all six schemas.
+import { assertEquals, assertRejects } from "@std/assert";
 import {
-  decodeStructMessage,
-  encodeStructMessage,
-  TYPE_BOOL,
-  TYPE_TEXT,
-} from "@nullstyle/capnp/encoding";
-import type {
-  EnumTypeDescriptor,
-  StructDescriptor,
-} from "@nullstyle/capnp/encoding";
+  connect,
+  MessagePortTransport,
+  serveConnection,
+} from "@nullstyle/capnp";
+import { common, hostControl } from "../../../src/wire/generated/mod.ts";
 
-// --- common.capnp mirrors (identical to capnpc-deno output for common) ----
+const CALL_TIMEOUT_MS = 2_000;
 
-const ErrorCodeValues = [
-  "unknown",
-  "invalidArgument",
-  "unauthenticated",
-  "permissionDenied",
-  "notFound",
-  "alreadyExists",
-  "failedPrecondition",
-  "resourceExhausted",
-  "aborted",
-  "deadlineExceeded",
-  "unavailable",
-  "internal",
-  "incompatibleProtocol",
-  "incompatibleSchema",
-  "incompatibleRuntime",
-  "hostCapacity",
-  "sandboxTerminated",
-  "unsupportedFeature",
-  "conflict",
-  "cleanupIncomplete",
-] as const;
-type ErrorCode = typeof ErrorCodeValues[number];
-
-const ErrorCodeType: EnumTypeDescriptor<ErrorCode> = {
-  kind: "enum",
-  byOrdinal: ErrorCodeValues,
-  toOrdinal: Object.fromEntries(
-    ErrorCodeValues.map((name, ordinal) => [name, ordinal]),
-  ) as Record<ErrorCode, number>,
-};
-
-interface ErrorDetail {
-  key: string;
-  value: string;
-}
-
-const ErrorDetailStruct: StructDescriptor<ErrorDetail> = {
-  kind: "struct",
-  name: "ErrorDetail",
-  dataWordCount: 0,
-  pointerCount: 2,
-  createDefault: () => ({ key: "", value: "" }),
-  fields: [
-    { kind: "slot", name: "key", offset: 0, type: TYPE_TEXT },
-    { kind: "slot", name: "value", offset: 1, type: TYPE_TEXT },
-  ],
-};
-
-interface SbxError {
-  code: ErrorCode;
-  message: string;
-  retryable: boolean;
-  operationId: string;
-  sandboxId: string;
-  details: ErrorDetail[];
-}
-
-const SbxErrorStruct: StructDescriptor<SbxError> = {
-  kind: "struct",
-  name: "SbxError",
-  dataWordCount: 1,
-  pointerCount: 4,
-  createDefault: () => ({
-    code: ErrorCodeValues[0],
-    message: "",
-    retryable: false,
-    operationId: "",
-    sandboxId: "",
-    details: [],
-  }),
-  fields: [
-    { kind: "slot", name: "code", offset: 0, type: ErrorCodeType },
-    { kind: "slot", name: "message", offset: 0, type: TYPE_TEXT },
-    { kind: "slot", name: "retryable", offset: 16, type: TYPE_BOOL },
-    { kind: "slot", name: "operationId", offset: 1, type: TYPE_TEXT },
-    { kind: "slot", name: "sandboxId", offset: 2, type: TYPE_TEXT },
-    {
-      kind: "slot",
-      name: "details",
-      offset: 3,
-      type: {
-        kind: "list",
-        element: { kind: "struct", get: () => ErrorDetailStruct },
-      },
-    },
-  ],
-};
-
-interface Empty {
-  _?: never;
-}
-
-const EmptyStruct: StructDescriptor<Empty> = {
-  kind: "struct",
-  name: "Empty",
-  dataWordCount: 0,
-  pointerCount: 0,
-  createDefault: () => ({}),
-  fields: [],
-};
-
-interface EmptyResult {
-  which?: "ok" | "error";
-  ok?: Empty;
-  error?: SbxError;
-}
-
-const EmptyResultStruct: StructDescriptor<EmptyResult> = {
-  kind: "struct",
-  name: "EmptyResult",
-  dataWordCount: 1,
-  pointerCount: 1,
-  createDefault: () => ({
-    ok: EmptyStruct.createDefault(),
-    error: SbxErrorStruct.createDefault(),
-    which: "ok",
-  }),
-  union: {
-    discriminantOffset: 0,
-    defaultDiscriminant: 0,
-    byName: { ok: 0, error: 1 },
-    byDiscriminant: { 0: "ok", 1: "error" },
-  },
-  fields: [
-    {
-      kind: "slot",
-      name: "ok",
-      offset: 0,
-      type: { kind: "struct", get: () => EmptyStruct },
-      discriminantValue: 0,
-    },
-    {
-      kind: "slot",
-      name: "error",
-      offset: 0,
-      type: { kind: "struct", get: () => SbxErrorStruct },
-      discriminantValue: 1,
-    },
-  ],
-};
-
-// --- host_control.capnp cross-file wrapper -------------------------------
-// What capnpc-deno SHOULD emit for `KillResults { result :Common.EmptyResult }`.
-// The actual generated descriptor lowers `result` to TYPE_ANY_POINTER.
-
-interface KillResults {
-  result: EmptyResult;
-}
-
-const KillResultsStruct: StructDescriptor<KillResults> = {
-  kind: "struct",
-  name: "KillResults",
-  dataWordCount: 0,
-  pointerCount: 1,
-  createDefault: () => ({ result: EmptyResultStruct.createDefault() }),
-  fields: [
-    {
-      kind: "slot",
-      name: "result",
-      offset: 0,
-      type: { kind: "struct", get: () => EmptyResultStruct },
-    },
-  ],
-};
-
-Deno.test("published runtime round-trips a host_control composite embedding common types (error arm)", () => {
-  const value: KillResults = {
+Deno.test("generated hostControl.KillResultsCodec round-trips the cross-file composite (error arm)", () => {
+  const value: hostControl.KillResults = {
     result: {
       which: "error",
       error: {
@@ -208,8 +46,8 @@ Deno.test("published runtime round-trips a host_control composite embedding comm
       },
     },
   };
-  const encoded = encodeStructMessage(KillResultsStruct, value);
-  const decoded = decodeStructMessage(KillResultsStruct, encoded);
+  const encoded = hostControl.KillResultsCodec.encode(value);
+  const decoded = hostControl.KillResultsCodec.decode(encoded);
   assertEquals(decoded.result.which, "error");
   const error = decoded.result.error;
   assertEquals(error?.code, "sandboxTerminated");
@@ -223,14 +61,131 @@ Deno.test("published runtime round-trips a host_control composite embedding comm
   ]);
 });
 
-Deno.test("published runtime round-trips the same composite through the ok arm", () => {
-  const encoded = encodeStructMessage(KillResultsStruct, {
+Deno.test("generated hostControl.KillResultsCodec round-trips the same composite through the ok arm", () => {
+  const encoded = hostControl.KillResultsCodec.encode({
     result: { which: "ok", ok: {} },
   });
-  const decoded = decodeStructMessage(KillResultsStruct, encoded);
+  const decoded = hostControl.KillResultsCodec.decode(encoded);
   assertEquals(decoded.result.which, "ok");
   assertEquals(decoded.result.ok, {});
-  // Non-active union arms decode to their defaults, mirroring the generated
-  // codec behavior for same-file unions.
+  // Non-active union arms decode to their defaults, matching the generated
+  // codec behavior the 0.1.0-era hand-built mirror pinned.
   assertEquals(decoded.result.error?.code, "unknown");
+});
+
+Deno.test("generated codec agrees with common.EmptyResultCodec on the embedded cross-file struct", () => {
+  // The `result` field's descriptor must be the real common.capnp struct,
+  // not an AnyPointer lowering: encoding the embedded value standalone via
+  // common's own generated codec and via the host_control wrapper must agree.
+  const embedded: common.EmptyResult = {
+    which: "error",
+    error: {
+      code: "deadlineExceeded",
+      message: "kill deadline elapsed",
+      retryable: false,
+      operationId: "op-7",
+      sandboxId: "sbx-0002",
+      details: [],
+    },
+  };
+  const viaWrapper = hostControl.KillResultsCodec.decode(
+    hostControl.KillResultsCodec.encode({ result: embedded }),
+  ).result;
+  const viaCommon = common.EmptyResultCodec.decode(
+    common.EmptyResultCodec.encode(embedded),
+  );
+  assertEquals(viaWrapper, viaCommon);
+});
+
+function createMessagePortPair(): {
+  clientTransport: MessagePortTransport;
+  serverTransport: MessagePortTransport;
+  accepted: {
+    transport: MessagePortTransport;
+    localAddress: { transport: string };
+    remoteAddress: { transport: string };
+    id: string;
+  };
+} {
+  const channel = new MessageChannel();
+  const options = {
+    closePortOnClose: true,
+    maxInboundFrameBytes: 1024 * 1024,
+    maxOutboundFrameBytes: 1024 * 1024,
+    maxQueuedOutboundFrames: 128,
+    maxQueuedOutboundBytes: 4 * 1024 * 1024,
+    sendTimeoutMs: CALL_TIMEOUT_MS,
+  };
+  const serverTransport = new MessagePortTransport(channel.port1, options);
+  const clientTransport = new MessagePortTransport(channel.port2, options);
+  return {
+    clientTransport,
+    serverTransport,
+    accepted: {
+      transport: serverTransport,
+      localAddress: { transport: "messageport" },
+      remoteAddress: { transport: "messageport" },
+      id: "studiobox-cross-file-ping",
+    },
+  };
+}
+
+Deno.test("generated HostControl interface serves a client/server ping over an in-process transport", async () => {
+  const { clientTransport, serverTransport, accepted } =
+    createMessagePortPair();
+  const pinged: bigint[] = [];
+  const unimplemented = (method: string) => {
+    throw new Error(`${method} is not under test`);
+  };
+  const service: hostControl.HostControl = {
+    ping(nonce) {
+      pinged.push(nonce);
+      return Promise.resolve(nonce ^ 0xffn);
+    },
+    create: () => unimplemented("create"),
+    attach: () => unimplemented("attach"),
+    sandbox: () => unimplemented("sandbox"),
+    resumeLease: () => unimplemented("resumeLease"),
+    list: () => unimplemented("list"),
+    capacity: () => unimplemented("capacity"),
+  };
+
+  const handle = await serveConnection(
+    hostControl.HostControl,
+    accepted,
+    service,
+  );
+  let client:
+    | Awaited<
+      ReturnType<typeof connect<hostControl.HostControl>>
+    >
+    | null = null;
+
+  try {
+    client = await connect(hostControl.HostControl, clientTransport, {
+      defaultTimeoutMs: CALL_TIMEOUT_MS,
+    });
+    assertEquals(
+      await client.ping(0x1020_3040n, { timeoutMs: CALL_TIMEOUT_MS }),
+      0x1020_3040n ^ 0xffn,
+    );
+    assertEquals(
+      await client.ping(7n, { timeoutMs: CALL_TIMEOUT_MS }),
+      7n ^ 0xffn,
+    );
+    assertEquals(pinged, [0x1020_3040n, 7n]);
+
+    // Handler failures surface to the caller as typed rejections rather than
+    // hangs, so the generated dispatch path is proven in both directions.
+    await assertRejects(
+      () => client!.list({ timeoutMs: CALL_TIMEOUT_MS }),
+      Error,
+      "list",
+    );
+  } finally {
+    await client?.close().catch(() => {});
+    await Promise.resolve(clientTransport.close()).catch(() => {});
+    await handle.close();
+    await Promise.resolve(serverTransport.close()).catch(() => {});
+  }
 });

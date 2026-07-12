@@ -24,7 +24,7 @@ import {
   CodegenProbe,
   type CodegenProbeService,
   createCodegenProbeChunkStreamSender,
-} from "../src/wire/generated/mod.ts";
+} from "../src/wire/generated/codegen_probe_types.ts";
 
 const CALL_TIMEOUT_MS = 5_000;
 const WATCHDOG_MS = 30_000;

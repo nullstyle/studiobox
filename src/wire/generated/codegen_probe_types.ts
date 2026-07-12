@@ -504,7 +504,13 @@ export interface CodegenProbeService {
   chunk(params: ChunkParams, ctx: RpcCallContext): Promise<void> | void;
 }
 
-function createCodegenProbeServiceClient(
+/**
+ * Adapt a low-level `CodegenProbeClient` into the high-level `CodegenProbe` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<CodegenProbe>` values for cross-file interface references.
+ */
+export function createCodegenProbeServiceClient(
   client: CodegenProbeClient,
   transport: RpcClientTransport,
 ): CodegenProbe {

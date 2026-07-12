@@ -8,7 +8,7 @@ import {
 import {
   CodegenProbe,
   type CodegenProbeService,
-} from "../../../src/wire/generated/mod.ts";
+} from "../../../src/wire/generated/codegen_probe_types.ts";
 
 const TIMEOUT_MS = 2_000;
 

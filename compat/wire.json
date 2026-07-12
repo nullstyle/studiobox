@@ -17,34 +17,35 @@
   "capnpCompiler": "Cap'n Proto version 1.4.0",
   "codegen": {
     "package": "@nullstyle/capnp",
-    "version": "0.1.0",
-    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.1",
+    "version": "0.2.0",
+    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.2",
     "toolchain": {
       "checkout": "../capnp-deno",
-      "commit": "ad0791189c781c84e636a55425da05ea3377114b",
-      "commitNote": "one commit ahead of the 0.1.0 release-prep commit c266609; capnpc-deno is not shipped in the JSR package, so the sibling checkout is the codegen toolchain of record",
+      "commit": "f61257bf335aeaeca85b02e541c2341884e66ecf",
+      "commitNote": "the 0.2.0 release commit; capnpc-deno is not shipped in the JSR package, so the sibling checkout is the codegen toolchain of record",
       "invocation": "deno task wire:generate"
     },
     "committedSchemas": [
-      "codegen_probe.capnp"
+      "codegen_probe.capnp",
+      "common.capnp",
+      "host_control.capnp",
+      "sandbox_agent.capnp",
+      "streams.capnp",
+      "supervisor.capnp"
     ],
     "probeSchema": "codegen_probe.capnp",
-    "probeStatus": "regenerated at the studiobox M1 gate on 2026-07-11; byte-identical to the committed src/wire/generated/ bindings and typechecks strict against the published runtime",
-    "fullBindingStatus": "blocked",
+    "probeStatus": "regenerated with the full six-schema set at the 0.2.0 adoption on 2026-07-11; byte-identical to the committed src/wire/generated/ bindings and typechecks strict against the published runtime",
+    "fullBindingStatus": "committed",
+    "adoptedOn": "2026-07-11",
     "observedOn": "2026-07-11",
-    "observedAgainst": "capnp-deno checkout ad0791189c781c84e636a55425da05ea3377114b; upstream fix c7f33fb (declaring interface ids + barrel merge) and c59dcde (window-atomic stream sender) are included, the cross-file lowering class is NOT",
-    "blockers": [
-      "cross-file struct/enum references do not typecheck: field types are emitted as bare unimported TypeScript names (SbxError, EmptyResult, TransferCommit, FinishResult, ProtocolOffer, KeyValue, HandshakeResult, AuthResult, ReadResult; 159 TS2304 errors) and their runtime descriptors are lowered to TYPE_ANY_POINTER (83 fields across host_control, sandbox_agent, streams, supervisor)",
-      "cross-file interface references lose the generated service type and surface as raw CapabilityPointer (e.g. sandbox_agent SpawnParams.output for Streams.OutputSink) instead of typed stubs, while same-file interfaces get RpcStub<T>",
-      "the merged mod.ts barrel collides: every generated *_meta.ts exports the same five names (schemaFileId, schemaFilename, schemaImports, schemaNodes, interfaceMethods), a hard TS2308 for ANY two schemas, and 96 further method param/result and domain type names collide across modules (PingParams x4, AuthenticateParams x3, NegotiateParams x3, UsageResult, ProbeResult, KillResults, ...)",
-      "concurrent StreamSender.send maxInFlight race: addressed upstream by c59dcde before 0.1.0; qualified by the M1 streaming gate, not by this codegen gate"
-    ],
-    "blockerNote": "per-interface client/server/register/service-token artifacts DO generate for all 24 schema interfaces; the gap is confined to cross-file type lowering and barrel namespacing. tests/unit/capnp/cross_file_roundtrip_test.ts proves the published runtime codecs round-trip the cross-file composite wire shape, isolating the gap to the emitter. tools/check_wire.ts re-verifies the blocked status on every toolchain-present run and fails when upstream fixes land, forcing the full bindings to be committed."
+    "observedAgainst": "capnp-deno checkout f61257bf335aeaeca85b02e541c2341884e66ecf (the published 0.2.0): cross-file structs/enums/interfaces resolve with real imports, interface-valued struct fields are typed RpcStub<T>, and the generated mod.ts barrel is namespaced (export * as <schema>)",
+    "blockers": [],
+    "blockerNote": "HISTORICAL: the 0.1.0-era blockers were all resolved by capnp-deno 0.2.0 (adopted 2026-07-11). For provenance, the qualified 0.1.0 inventory was: (1) cross-file struct/enum references emitted bare unimported TypeScript names (SbxError, EmptyResult, TransferCommit, FinishResult, ProtocolOffer, KeyValue, HandshakeResult, AuthResult, ReadResult; 159 TS2304 errors) with runtime descriptors lowered to TYPE_ANY_POINTER (83 fields across host_control, sandbox_agent, streams, supervisor); (2) cross-file interface references surfaced as raw CapabilityPointer instead of typed RpcStub<T>; (3) the merged mod.ts barrel collided (five shared *_meta.ts export names, TS2308, plus 96 method param/result and domain type name collisions). All three are fixed in 0.2.0 by cross-file import lowering and the namespaced barrel; tests/unit/capnp/cross_file_roundtrip_test.ts now round-trips the cross-file composite through the GENERATED host_control/common codecs and a generated-interface client/server ping, and tools/check_wire.ts enforces byte-identical regeneration plus strict typecheck of all six committed schemas on every toolchain-present run."
   },
   "compiledProbe": {
     "tool": "tools/compiled_probe.ts",
     "task": "compile:probe",
-    "runtime": "jsr:@nullstyle/capnp@0.1.0 (WASM session core embedded via the package's static import of generated/capnp_deno.wasm, 215990 bytes)",
+    "runtime": "jsr:@nullstyle/capnp@0.2.0 (WASM session core embedded via the package's static import of generated/capnp_deno.wasm, 215990 bytes)",
     "provedOn": "2026-07-11",
     "targets": {
       "aarch64-apple-darwin": "executed: PROBE_OK (native; also with empty DENO_DIR + dead proxy, proving WASM embedding)",
