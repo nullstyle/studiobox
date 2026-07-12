@@ -36,6 +36,21 @@ Not usable yet.
 - [PLAN.md](PLAN.md) — carry-forward map, milestones M0 → 1.0, testing strategy,
   risks
 
+## Documentation
+
+- [PARITY.md](PARITY.md) — the authoritative fidelity map vs
+  `@deno/sandbox@0.13.2`: what works, what diverges, what throws.
+- [docs/architecture.md](docs/architecture.md) — a concise architecture overview
+  (start here).
+- [docs/permissions.md](docs/permissions.md) — the Deno permission matrix per
+  daemon/component.
+- [docs/threat-model.md](docs/threat-model.md) — trust boundaries and the
+  two-daemon privilege split.
+- [docs/testing-your-app.md](docs/testing-your-app.md) — test your
+  studiobox-consuming app with `FakeSandboxHost`, no VM required.
+- [docs/firecracker-contract.md](docs/firecracker-contract.md) — the low-level
+  `@nullstyle/firecracker` integration contract.
+
 1.0 means: repeatedly create, use, terminate, and reconcile real microVM
 sandboxes on both supported Linux architectures with bounded resources and no
 leaks — proven by a soak drill in CI, not by assertion.
