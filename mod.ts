@@ -106,3 +106,35 @@ export type {
   AgentStdioMode,
   AgentSymlinkOptions,
 } from "./src/agent/mod.ts";
+
+// studiobox-rootd supervisor wire plane: the capnp `supervisor.capnp`
+// adapter over `SupervisorApi` plus the UDS server assembly, surfaced
+// for hostd embedders (M6/M7).
+export {
+  attachSupervisorCapability,
+  buildSupervisorContractIdentity,
+  contractIdentityFromWire,
+  contractIdentityToWire,
+  createSupervisorWireConnection,
+  protocolOfferToWire,
+  SUPERVISOR_FEATURE_BITS,
+  SUPERVISOR_ROOT_CAPABILITY_INDEX,
+  supervisorFaultToWire,
+  transportLimitsFromWire,
+  transportLimitsToWire,
+} from "./src/rootd/service.ts";
+export type {
+  SupervisorCompatIdentitySource,
+  SupervisorIdentityOptions,
+  SupervisorWireConnection,
+  SupervisorWireOptions,
+} from "./src/rootd/service.ts";
+export {
+  startSupervisorServer,
+  UdsSupervisorAcceptSource,
+} from "./src/rootd/main.ts";
+export type {
+  SupervisorServerHandle,
+  SupervisorServerOptions,
+  SupervisorServerStats,
+} from "./src/rootd/main.ts";

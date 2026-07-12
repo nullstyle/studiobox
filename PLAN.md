@@ -37,24 +37,24 @@ Mechanical rename throughout: `limabox→studiobox`, `lbx→sbx`, `LBX→SBX`,
 `fchostd→studiobox-hostd`, `fclauncherd→studiobox-rootd`, `sandboxd→studioboxd`,
 `/run/limabox→/run/studiobox`.
 
-| limabox source                                                                                    | destination              | disposition                                                                                                                                |
-| ------------------------------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/state/` (model, CAS store)                                                                   | `src/state/`             | **carry** — the create-only CAS journal, already tested                                                                                    |
-| `src/fclauncher/firecracker/` (adapter, CreateOnlyVmRegistry, error normalization, execution IDs) | `src/rootd/firecracker/` | **carry** — battle-tested against the real package; re-pin imports to `jsr:@nullstyle/firecracker@^0.2`                                    |
-| `src/security/tickets.ts`                                                                         | `src/security/`          | **carry**                                                                                                                                  |
-| `src/transports/tunnel_preface.ts`                                                                | `src/transports/`        | **carry** (magics → `SBXTUN1`/`SBXACK1`)                                                                                                   |
-| `src/fchost/tunnel_authorizer.ts`                                                                 | `src/hostd/`             | **carry**                                                                                                                                  |
-| `src/wire/` (contract, bootstrap gate, supervisor validators)                                     | `src/wire/`              | **carry**                                                                                                                                  |
-| `src/api/command.ts`, `process.ts`, `errors.ts`                                                   | `src/api/`               | **carry** — real `sh` builder + KillController + taxonomy                                                                                  |
-| `src/api/` abstract façade (sandbox, fs, deno, env, types)                                        | `src/api/`               | **carry as scaffold** — compile-compat shell until M8 installs a provider                                                                  |
-| `schema/*.capnp` (5 canonical)                                                                    | `schema/`                | **carry** — keep file IDs & ordinals, rename identifiers, re-hash bundle                                                                   |
-| `parity/` (inventory, member audit)                                                               | `parity/`                | **carry** — expensive to reproduce                                                                                                         |
-| `compat/` + `tools/check_{compat,wire,publish}.ts`                                                | same                     | **carry** — provenance gates                                                                                                               |
-| `.github/workflows/ci.yml`                                                                        | same                     | **carry + extend**                                                                                                                         |
-| `vendor/capnp-deno` snapshot                                                                      | —                        | **drop** — replaced by `jsr:@nullstyle/capnp@^0.1` (published); `deno.local.json` maps to the `../capnp-deno` checkout for coordinated dev |
-| `src/wire/generated/` (codegen_probe only)                                                        | —                        | regenerated at M1 (byte-identical, toolchain `ad07911`); five-schema bindings blocked upstream — see `compat/wire.json`                    |
-| 4 design docs                                                                                     | —                        | superseded by DESIGN.md/PLAN.md; keep `FIRECRACKER_INTEGRATION.md`'s G1–G13 table as `docs/firecracker-contract.md`                        |
-| `@nullstyle/firecracker` raw-URL imports                                                          | —                        | **drop** — JSR pin + `deno.local.json` sibling override                                                                                    |
+| limabox source                                                                                    | destination              | disposition                                                                                                                                         |
+| ------------------------------------------------------------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/state/` (model, CAS store)                                                                   | `src/state/`             | **carry** — the create-only CAS journal, already tested                                                                                             |
+| `src/fclauncher/firecracker/` (adapter, CreateOnlyVmRegistry, error normalization, execution IDs) | `src/rootd/firecracker/` | **carry** — battle-tested against the real package; re-pin imports to `jsr:@nullstyle/firecracker@^0.2`                                             |
+| `src/security/tickets.ts`                                                                         | `src/security/`          | **carry**                                                                                                                                           |
+| `src/transports/tunnel_preface.ts`                                                                | `src/transports/`        | **carry** (magics → `SBXTUN1`/`SBXACK1`)                                                                                                            |
+| `src/fchost/tunnel_authorizer.ts`                                                                 | `src/hostd/`             | **carry**                                                                                                                                           |
+| `src/wire/` (contract, bootstrap gate, supervisor validators)                                     | `src/wire/`              | **carry**                                                                                                                                           |
+| `src/api/command.ts`, `process.ts`, `errors.ts`                                                   | `src/api/`               | **carry** — real `sh` builder + KillController + taxonomy                                                                                           |
+| `src/api/` abstract façade (sandbox, fs, deno, env, types)                                        | `src/api/`               | **carry as scaffold** — compile-compat shell until M8 installs a provider                                                                           |
+| `schema/*.capnp` (5 canonical)                                                                    | `schema/`                | **carry** — keep file IDs & ordinals, rename identifiers, re-hash bundle                                                                            |
+| `parity/` (inventory, member audit)                                                               | `parity/`                | **carry** — expensive to reproduce                                                                                                                  |
+| `compat/` + `tools/check_{compat,wire,publish}.ts`                                                | same                     | **carry** — provenance gates                                                                                                                        |
+| `.github/workflows/ci.yml`                                                                        | same                     | **carry + extend**                                                                                                                                  |
+| `vendor/capnp-deno` snapshot                                                                      | —                        | **drop** — replaced by `jsr:@nullstyle/capnp@^0.1` (published); `deno.local.json` maps to the `../capnp-deno` checkout for coordinated dev          |
+| `src/wire/generated/` (all six schemas)                                                           | —                        | committed five-schema bindings + codegen_probe at toolchain `f61257b` / capnp 0.2.0; ratchet enforces byte-identical regen — see `compat/wire.json` |
+| 4 design docs                                                                                     | —                        | superseded by DESIGN.md/PLAN.md; keep `FIRECRACKER_INTEGRATION.md`'s G1–G13 table as `docs/firecracker-contract.md`                                 |
+| `@nullstyle/firecracker` raw-URL imports                                                          | —                        | **drop** — JSR pin + `deno.local.json` sibling override                                                                                             |
 
 ## 3. Milestones
 
@@ -104,9 +104,10 @@ toolchain; compiled probe does RPC on both arches; streaming soak green.
 2–4.** Codegen at toolchain `ad07911` still lowers cross-file types to
 `AnyPointer` (83 fields), leaves 159 cross-file names unresolved, and collides
 101 barrel exports — `c7f33fb` fixed barrel _merging_, not cross-file resolution
-or namespacing; `compat/wire.json` `codegen.blockers` is the authoritative
-inventory and `wire:check` fails the moment upstream fixes land (probe-only
-bindings are committed meanwhile). The published _runtime_ is cleared: it
+or namespacing; `compat/wire.json` `codegen.blockers` is retained as historical
+provenance (capnp 0.2.0 resolved every entry) and `wire:check` now ratchets on
+the committed five-schema bindings, enforcing byte-identical regeneration and a
+strict typecheck of all six schemas. The published _runtime_ is cleared: it
 round-trips the cross-file wire shape given correct descriptors
 (`cross_file_roundtrip_test.ts`), the 1 GiB soak held window and memory bounds
 (window-atomic fix confirmed under burst sends), close/EOF conformance is pinned
@@ -115,9 +116,10 @@ teardown, out-of-band conn destruction leaves a half-open transport
 
 - global unhandledrejection, no UDS composition surface), and the compiled-WASM
   probe passed on macOS + real aarch64-linux (x86_64 compile-only until x86_64
-  CI; vsock verdict: Deno 2.9 needs `--unstable-vsock`). **M2's wire work is
-  blocked until the emitter is fixed upstream in capnp-deno or the single-file
-  schema-merge fallback is invoked.**
+  CI; vsock verdict: Deno 2.9 needs `--unstable-vsock`). **Resolved
+  (2026-07-11): the upstream emitter fix merged and shipped as capnp 0.2.0; the
+  five-schema bindings are committed under `src/wire/generated/` and M2-wire is
+  delivered — no schema-merge fallback needed.**
 
 ### M2 — Supervisor plane on fakes (6 pts)
 
@@ -134,7 +136,7 @@ the transport-free **`SupervisorApi` domain core** (`src/rootd/supervisor_core*`
   reaps everything, journal converges to `terminated(host-restart)`; stale
   execution CAS rejection; bridge refuses unauthorized logical IDs. **Demo:**
   scripted create→status→kill cycle on a Mac with no VM anywhere. _Status
-  2026-07-11: domain core delivered (M2-wire pending upstream)._
+  2026-07-11: domain core + M2-wire delivered._
 
 ### M3 — studioboxd v1 + agent plane on fakes (8 pts)
 
@@ -148,7 +150,9 @@ Start the **parity fixture suite** (same test file, upstream semantics
 assertions) running against the fake. **Exit:** parity fixtures for
 sh/spawn/fs/env/eval pass against FakeSandboxHost on macOS; `deno compile` of
 studioboxd (both arches) boots and serves the plane over UDS. **Demo:**
-`Sandbox`-shaped calls executing against an in-process guest.
+`Sandbox`-shaped calls executing against an in-process guest. _Status
+2026-07-11: the interim JSON scaffold protocol was replaced by the capnp
+`sandbox_agent.capnp` plane (M3-wire) over the domain core._
 
 ### M4 — Artifact pipeline (8 pts)
 

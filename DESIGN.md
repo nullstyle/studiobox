@@ -148,6 +148,16 @@ with explicit backpressure (`StreamSender`), bounded in-flight windows from
 `TransportLimits`, and a final commit carrying total bytes + SHA-256. No
 unbounded buffering anywhere on the path.
 
+**Upstream gap (capnp 0.2.0):** the published runtime cannot deliver a
+FRESHLY-exported capability in a method return — the WASM session core rejects a
+return frame that references an export id it never emitted, so the call hangs.
+Until upstream fixes the fresh-export return path, capability handout serves the
+gated interface as a **facet of the bootstrap/root capability** (already in the
+export table) rather than exporting a new pointer per call; the root dispatch
+accepts both interface ids and routes by the call's interface id. Relevant to M7
+(the `Supervisor`/agent capability handout splits back into its own capability
+once the return path is fixed).
+
 ## 5. Public API: fidelity to @deno/sandbox
 
 Fidelity target: **`jsr:@deno/sandbox@0.13.2`** (parity inventory: 129 root
