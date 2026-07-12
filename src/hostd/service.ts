@@ -430,23 +430,31 @@ function createSandboxCapability(
         >,
       );
     },
-    openTunnel: (): Promise<WireTunnelGrantResult> => {
+    openTunnel: async (): Promise<WireTunnelGrantResult> => {
       try {
         gate.assertAuthorized();
-        // The unprivileged ticket half + the rootd bridge (agentCredential)
-        // land with M7; the vsock splice is out of M6 scope. Fail typed.
-        return Promise.resolve({
-          which: "error",
-          error: wireError(
-            "unsupportedFeature",
-            "openTunnel is not yet wired (M7 tunnel path)",
-          ),
-        });
+        // Issue a single-use ticket + a per-tunnel endpoint, burning the ticket
+        // before rootd's bridge is opened (M7; see control_core.openTunnel).
+        // Without a wired bridge factory the core fails typed-unimplemented,
+        // which maps to `unsupportedFeature` — the M6 behaviour is preserved.
+        const grant = await core.openTunnel(sandboxId);
+        // The loopback endpoint is not a wire field: the client dials the
+        // statically forwarded tunnel port (the endpoint travels the E2E path).
+        return {
+          which: "grant",
+          grant: {
+            ticket: grant.ticket.slice(),
+            expiresAtUnixMs: BigInt(grant.expiresAtUnixMs),
+            sandboxId: grant.sandboxId,
+            bootNonce: grant.bootNonce.slice(),
+            leaseId: grant.leaseId,
+            leaseGeneration: BigInt(grant.leaseGeneration),
+            tunnelNonce: new Uint8Array(0),
+            agentCredential: new Uint8Array(0),
+          },
+        };
       } catch (error) {
-        return Promise.resolve({
-          which: "error",
-          error: hostFaultToWire(error),
-        });
+        return { which: "error", error: hostFaultToWire(error) };
       }
     },
     extendTimeout: (milliseconds): Promise<WireDeadlineResult> => {

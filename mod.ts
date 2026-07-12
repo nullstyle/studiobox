@@ -20,6 +20,19 @@ export type {
   PrivilegedBridgeFactory,
   PrivilegedBridgeRequest,
 } from "./src/hostd/tunnel_authorizer.ts";
+// The domain grant shape `HostSandbox.openTunnel` returns and the E2E/SDK
+// client consumes (ticket + loopback endpoint + agent binding).
+export type { TunnelGrant } from "./src/hostd/control_core.ts";
+
+// Client tunnel dial (the external leg of the ticketed tunnel): present the
+// `SBXTUN1` preface carrying a single-use ticket and, on `SBXACK1(Ok)`, get
+// back the raw duplex to the guest agent's capnp `SandboxAgent` plane.
+export {
+  DEFAULT_TUNNEL_DIAL_TIMEOUT_MS,
+  dialTunnel,
+  TunnelDialError,
+} from "./src/transports/tunnel_client.ts";
+export type { TunnelEndpoint } from "./src/transports/tunnel_client.ts";
 
 // studiobox-rootd seam: Firecracker adapter surface (root-side daemon
 // boundary; not part of the upstream-parity SDK surface).

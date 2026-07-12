@@ -387,6 +387,40 @@ export class SupervisorCore implements SupervisorApi {
   }
 
   /**
+   * Dial the guest agent's vsock for a ready, live execution and hand back the
+   * raw duplex the tunnel splice pumps bytes across (PLAN.md §M7; DESIGN.md §4:
+   * rootd `vm.vsock.connect(AGENT_PORT)`). This is the privileged half of the
+   * bridge — the ticket has already been burned by unprivileged hostd before
+   * rootd is reached (the {@linkcode TunnelAuthorizer} ordering).
+   *
+   * Bounded like {@linkcode SupervisorCore.connectAgent} / the agent dialer: a
+   * refused or absent guest listener surfaces the adapter's typed error rather
+   * than hanging, via the vsock dial's own `retryTimeoutMs` + `signal`.
+   */
+  async connectBridge(
+    request: { readonly executionId: string; readonly guestPort: number },
+    options?: VsockDialOptions,
+  ): Promise<VsockConn> {
+    this.#rejectDuringReconcile("connectBridge");
+    const executionId = request.executionId;
+    try {
+      assertExecutionId(executionId);
+    } catch (error) {
+      throw new SupervisorError(
+        "SBX_SUP_VALIDATION",
+        "the execution id is not a valid logical identifier",
+        error,
+      );
+    }
+    const record = await this.#byExecution(executionId);
+    this.#requireReadyAndLive(record, executionId, "connectBridge");
+    return await this.#machines.get(executionId)!.connectVsock(
+      request.guestPort,
+      options,
+    );
+  }
+
+  /**
    * Consume a one-shot bridge grant. The M7 vsock splice calls this exactly
    * once per grant; a second take, an unknown id, or an expired grant fails
    * closed. Not part of the capnp surface — hostd only ever sees the grant.

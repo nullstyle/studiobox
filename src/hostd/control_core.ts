@@ -44,6 +44,16 @@ import {
 import { SingleUseTicketStore } from "../security/tickets.ts";
 import type { RootdGateway } from "./supervisor_client.ts";
 import type { SupervisorMachineUsage } from "../rootd/supervisor_core_api.ts";
+import {
+  type PrivilegedBridgeFactory,
+  TunnelAuthorizer,
+} from "./tunnel_authorizer.ts";
+import {
+  DEFAULT_TUNNEL_DIAL_BUDGET_MS,
+  TunnelServer,
+} from "./tunnel_server.ts";
+import type { TunnelEndpoint } from "../transports/tunnel_client.ts";
+import { DEFAULT_AGENT_VSOCK_PORT } from "../rootd/launch_planner.ts";
 
 /** Studiobox-widened region set: the wire `"ord"`/`"ams"` plus local `"loc"`. */
 export type HostRegion = "ord" | "ams" | "loc";
@@ -128,6 +138,32 @@ export interface AttachSandboxResult {
   readonly lease: LeaseSnapshot;
 }
 
+/**
+ * Result of {@linkcode HostControlCore.openTunnel}: the single-use ticket, the
+ * loopback endpoint it is spent against, and the binding the client echoes
+ * back to the guest agent. The client dials `endpoint`, sends the `SBXTUN1`
+ * preface carrying `ticket`, and — on `SBXACK1(Ok)` — speaks the capnp
+ * `SandboxAgent` plane over the spliced connection (DESIGN.md §4).
+ */
+export interface TunnelGrant {
+  /** The per-tunnel loopback endpoint the client presents its preface to. */
+  readonly endpoint: TunnelEndpoint;
+  /** The 32-byte single-use ticket (15s TTL, 10s dial budget). */
+  readonly ticket: Uint8Array;
+  /** Guest AF_VSOCK port the bridge dials (studioboxd's listener). */
+  readonly guestPort: number;
+  /** Absolute ticket expiry (unix ms). */
+  readonly expiresAtUnixMs: number;
+  /** The sandbox the tunnel reaches (public `sbx_loc_…` id). */
+  readonly sandboxId: string;
+  /** Per-boot nonce, echoed to the guest agent's authenticate. */
+  readonly bootNonce: Uint8Array;
+  /** The lease the tunnel is bound to (revoked with it). */
+  readonly leaseId: string;
+  /** The lease generation at issue (the ticket binding). */
+  readonly leaseGeneration: number;
+}
+
 /** The wire `SandboxState` mirror (upstream lifecycle). */
 export type SandboxState =
   | "creating"
@@ -176,6 +212,21 @@ export interface HostControlCoreOptions {
   readonly bootNonceFactory?: () => Uint8Array;
   /** Per-sandbox overlay-disk reservation (default {@link DEFAULT_OVERLAY_DISK_BYTES}). */
   readonly overlayDiskBytes?: number;
+  /**
+   * Dials the guest-agent bridge for a burned ticket (studiobox-rootd's
+   * `openBridge` splice, or a fake UDS conn in tests). When absent,
+   * {@linkcode HostControlCore.openTunnel} fails typed-unimplemented.
+   */
+  readonly bridgeFactory?: PrivilegedBridgeFactory<Deno.Conn>;
+  /**
+   * Directory the per-tunnel UDS endpoints are bound under. A fresh temp dir
+   * is created lazily when omitted; keep it short (`sun_path` ~104B).
+   */
+  readonly tunnelSocketDir?: string;
+  /** Dial budget for a valid preface. @default {@link DEFAULT_TUNNEL_DIAL_BUDGET_MS} */
+  readonly tunnelDialBudgetMs?: number;
+  /** Guest AF_VSOCK port the bridge dials. @default {@link DEFAULT_AGENT_VSOCK_PORT} */
+  readonly agentVsockPort?: number;
 }
 
 interface SandboxEntry {
@@ -212,6 +263,13 @@ export class HostControlCore {
   readonly #secretFactory: () => Uint8Array;
   readonly #bootNonceFactory: () => Uint8Array;
   readonly #overlayDiskBytes: number;
+  readonly #bridgeFactory: PrivilegedBridgeFactory<Deno.Conn> | undefined;
+  readonly #tunnelDialBudgetMs: number;
+  readonly #agentVsockPort: number;
+  #tunnelSocketDir: string | undefined;
+  #tunnelSocketDirOwned = false;
+  /** Live per-tunnel endpoints per sandbox id, closed on lease expiry / restart. */
+  readonly #tunnels = new Map<string, Set<TunnelServer>>();
   readonly #sandboxes = new Map<string, SandboxEntry>();
   /** Lease id -> sandbox id, so a Lease capability resolves its sandbox. */
   readonly #leaseToSandbox = new Map<string, string>();
@@ -237,6 +295,11 @@ export class HostControlCore {
       (() => crypto.getRandomValues(new Uint8Array(BOOT_NONCE_BYTES)));
     this.#overlayDiskBytes = options.overlayDiskBytes ??
       DEFAULT_OVERLAY_DISK_BYTES;
+    this.#bridgeFactory = options.bridgeFactory;
+    this.#tunnelSocketDir = options.tunnelSocketDir;
+    this.#tunnelDialBudgetMs = options.tunnelDialBudgetMs ??
+      DEFAULT_TUNNEL_DIAL_BUDGET_MS;
+    this.#agentVsockPort = options.agentVsockPort ?? DEFAULT_AGENT_VSOCK_PORT;
     this.#leases = new LeaseManager({
       clock: this.#clock,
       onExpire: (sandboxId) => this.#onLeaseExpire(sandboxId),
@@ -449,6 +512,89 @@ export class HostControlCore {
   }
 
   /**
+   * Open a ticketed tunnel to the sandbox's guest agent (DESIGN.md §4; PLAN.md
+   * §M7). Issues a single-use ticket bound to the sandbox + current lease,
+   * stands up a per-tunnel loopback endpoint, and returns the {@link TunnelGrant}
+   * the client dials. The ticket is BURNED by the endpoint's authorizer BEFORE
+   * rootd's bridge is ever opened; the endpoint is freed when the authorized
+   * splice ends, when the 10s dial budget lapses unused, or when the lease is
+   * revoked (which also revokes the ticket).
+   *
+   * Rejects a sandbox with no live lease (`SBX_HOST_STATE`) and, until a bridge
+   * factory is wired, fails typed-unimplemented (`SBX_HOST_UNIMPLEMENTED`).
+   */
+  async openTunnel(id: string): Promise<TunnelGrant> {
+    const entry = this.#requireEntry(id);
+    if (this.#bridgeFactory === undefined) {
+      throw new HostControlError(
+        "SBX_HOST_UNIMPLEMENTED",
+        "openTunnel requires a rootd bridge factory",
+      );
+    }
+    if (isTerminal(entry.state)) {
+      throw new HostControlError(
+        "SBX_HOST_STATE",
+        `sandbox ${id} is terminated`,
+      );
+    }
+    const lease = this.#leases.get(entry.currentLeaseId);
+    if (lease === undefined) {
+      throw new HostControlError(
+        "SBX_HOST_STATE",
+        `sandbox ${id} has no live lease to bind a tunnel to`,
+      );
+    }
+
+    // The ticket binding and the bridge request both carry the PUBLIC id: the
+    // authorizer requires request.sandboxId === binding.sandboxId, and the same
+    // id keys ticket revocation (#onLeaseExpire / revokeAll). rootd resolves the
+    // guest by executionId, so the public id never has to reach the wire.
+    const binding = {
+      sessionId: entry.currentLeaseId,
+      sandboxId: entry.id,
+      bootNonce: toHex(entry.bootNonce),
+      leaseGeneration: lease.generation,
+    };
+    const issued = await this.#tickets.issue(binding);
+
+    const authorizer = new TunnelAuthorizer(this.#tickets, this.#bridgeFactory);
+    let server: TunnelServer;
+    try {
+      server = TunnelServer.open({
+        authorizer,
+        binding,
+        bridgeRequest: {
+          sandboxId: entry.id,
+          executionId: entry.executionId,
+          guestPort: this.#agentVsockPort,
+        },
+        listen: {
+          transport: "unix",
+          path: await this.#allocTunnelSocketPath(),
+        },
+        ttlMs: this.#tunnelDialBudgetMs,
+      });
+    } catch (error) {
+      // Could not stand up the endpoint: revoke the just-issued ticket so it
+      // cannot be spent against a bridge with no server in front of it.
+      this.#tickets.revokeSandbox(entry.id);
+      throw error;
+    }
+    this.#trackTunnel(entry.id, server);
+
+    return {
+      endpoint: server.endpoint,
+      ticket: issued.ticket,
+      guestPort: this.#agentVsockPort,
+      expiresAtUnixMs: issued.expiresAt,
+      sandboxId: entry.id,
+      bootNonce: entry.bootNonce.slice(),
+      leaseId: entry.currentLeaseId,
+      leaseGeneration: lease.generation,
+    };
+  }
+
+  /**
    * Extend a sandbox's duration deadline by up to the lease manager's per-call
    * cap, returning the actual new absolute deadline and the (unchanged) lease
    * generation. Rejects a session sandbox with `SBX_HOST_STATE`.
@@ -523,6 +669,7 @@ export class HostControlCore {
     this.#leases.revokeAll();
     for (const entry of this.#sandboxes.values()) {
       this.#tickets.revokeSandbox(entry.id);
+      this.#closeTunnels(entry.id);
     }
     this.#leaseToSandbox.clear();
   }
@@ -549,6 +696,9 @@ export class HostControlCore {
     }
     this.#leaseToSandbox.delete(entry.currentLeaseId);
     this.#tickets.revokeSandbox(entry.id);
+    // Free every live tunnel endpoint: the ticket is gone, so an in-flight
+    // splice is now unbound and must be torn down with the sandbox.
+    this.#closeTunnels(entry.id);
     const reclaim = (async () => {
       await this.#capacity.release(entry.reservation).catch(() => {});
       await this.#gateway.kill(entry.executionId).catch(() => {});
@@ -564,6 +714,70 @@ export class HostControlCore {
     }
     return entry;
   }
+
+  /** Track a live tunnel endpoint; self-prune when its splice / ttl frees it. */
+  #trackTunnel(sandboxId: string, server: TunnelServer): void {
+    let set = this.#tunnels.get(sandboxId);
+    if (set === undefined) {
+      set = new Set();
+      this.#tunnels.set(sandboxId, set);
+    }
+    set.add(server);
+    const forget = (): void => {
+      const current = this.#tunnels.get(sandboxId);
+      if (current === undefined) return;
+      current.delete(server);
+      if (current.size === 0) this.#tunnels.delete(sandboxId);
+    };
+    // Both edges converge on forget(): finished resolves on natural teardown
+    // (splice EOF / ttl lapse), and the reclaim path calls close() directly.
+    void server.finished.then(forget);
+  }
+
+  /** Close (and free) every endpoint of one sandbox — a reclaim-path step. */
+  #closeTunnels(sandboxId: string): void {
+    const set = this.#tunnels.get(sandboxId);
+    if (set === undefined) return;
+    this.#tunnels.delete(sandboxId);
+    for (const server of set) void server.close();
+  }
+
+  /** Allocate a short per-tunnel UDS path under the (lazily created) socket dir. */
+  async #allocTunnelSocketPath(): Promise<string> {
+    if (this.#tunnelSocketDir === undefined) {
+      this.#tunnelSocketDir = await Deno.makeTempDir({ prefix: "sbx-tun-" });
+      this.#tunnelSocketDirOwned = true;
+    }
+    const name = `t-${crypto.randomUUID().slice(0, 8)}.sock`;
+    return `${this.#tunnelSocketDir}/${name}`;
+  }
+
+  /**
+   * Close every live tunnel endpoint (hostd shutdown / test teardown) and
+   * remove the owned socket directory. Idempotent; leaves no listener or
+   * socket file behind.
+   */
+  async closeAllTunnels(): Promise<void> {
+    const pending: Promise<void>[] = [];
+    for (const set of this.#tunnels.values()) {
+      for (const server of set) pending.push(server.close());
+    }
+    this.#tunnels.clear();
+    await Promise.allSettled(pending);
+    if (this.#tunnelSocketDirOwned && this.#tunnelSocketDir !== undefined) {
+      await Deno.remove(this.#tunnelSocketDir, { recursive: true }).catch(
+        () => {},
+      );
+      this.#tunnelSocketDir = undefined;
+      this.#tunnelSocketDirOwned = false;
+    }
+  }
+}
+
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const byte of bytes) out += byte.toString(16).padStart(2, "0");
+  return out;
 }
 
 /** Per-call renew grant (matches the lease manager's default cap). */
