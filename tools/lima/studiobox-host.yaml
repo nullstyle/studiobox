@@ -1,0 +1,52 @@
+# studiobox-host — committed Lima template (macOS host).
+#
+# Source of truth: src/cli/lima_template.ts renderLimaTemplate(). Do NOT edit by
+# hand — regenerate from the generator (see tools/lima_template_write.ts). A unit
+# test pins this file byte-for-byte to renderLimaTemplate() so it cannot drift.
+#
+# The Lima instance name is supplied by `limactl start --name studiobox-host-<arch>`
+# (aarch64 / x86_64), so this single config serves both architectures.
+#
+# Linux hosts do NOT use this file: `studiobox host up --no-lima` provisions the
+# machine directly. A Linux developer who wants a Lima VM would set vmType: qemu
+# (KVM-accelerated) instead of vz.
+
+# Compose Lima's builtin Ubuntu 24.04 base for the arch-appropriate cloud image.
+base: template://ubuntu-24.04
+
+# Apple Virtualization.framework + nested virtualization: the microVMs studiobox
+# launches run inside this VM, so /dev/kvm must be present (Apple Silicon M3+,
+# macOS 15+).
+vmType: vz
+nestedVirtualization: true
+rosetta:
+  enabled: false
+
+cpus: 4
+memory: "6GiB"
+disk: "40GiB"
+
+# No host mounts. A sandbox workload is hostile (DESIGN.md §8); the VM must never
+# have a path back to the developer's filesystem.
+mounts: []
+
+# studiobox launches Firecracker microVMs, not containers.
+containerd:
+  system: false
+  user: false
+
+# Static loopback forwards (DESIGN.md §3/§11). Each binds the HOST side to
+# 127.0.0.1 only — the control token rides this loopback, never a public iface.
+portForwards:
+  # HostControl plane (client -> studiobox-hostd).
+  - guestPort: 40000
+    hostIP: "127.0.0.1"
+    hostPort: 40000
+  # Ticketed agent tunnel (client -> studioboxd, spliced by studiobox-rootd).
+  - guestPort: 40001
+    hostIP: "127.0.0.1"
+    hostPort: 40001
+  # exposeHttp reserved range (Tier B).
+  - guestPortRange: [40100, 40199]
+    hostIP: "127.0.0.1"
+    hostPortRange: [40100, 40199]
