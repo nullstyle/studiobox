@@ -62,9 +62,17 @@
     "verbatimModuleSyntax": true
   },
   "lint": {
-    "exclude": ["src/wire/generated/**"]
+    "exclude": [
+      "src/wire/generated/**",
+      ".claude/**",
+      ".build/**"
+    ]
   },
   "fmt": {
-    "exclude": ["src/wire/generated/**"]
+    "exclude": [
+      "src/wire/generated/**",
+      ".claude/**",
+      ".build/**"
+    ]
   }
 }
