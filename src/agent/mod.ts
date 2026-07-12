@@ -72,3 +72,25 @@ export type {
 export { AgentDeno } from "./deno_runtime.ts";
 export type { AgentDenoOptions } from "./deno_runtime.ts";
 export { AgentFs } from "./fs.ts";
+
+// Wire plane: the capnp `sandbox_agent.capnp` adapter over `AgentApi`
+// (M3 agent core). Server-side transport wiring plus the wire-facing
+// identity/limits vocabulary.
+export {
+  AGENT_PLANE_FEATURES,
+  createAgentWireConnection,
+  DEFAULT_OUTPUT_CALL_TIMEOUT_MS,
+  DEFAULT_SESSION_TTL_MS,
+  identityToWire,
+  limitsToWire,
+  m3AgentContractIdentity,
+  serveAgentWireTransport,
+} from "./service.ts";
+export type {
+  AgentWireConnection,
+  AgentWireOptions,
+  AgentWireServer,
+} from "./service.ts";
+
+// Streaming SHA-256 (TransferCommit verification).
+export { Sha256, sha256 } from "./sha256.ts";
