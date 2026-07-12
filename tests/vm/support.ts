@@ -24,23 +24,17 @@
 
 import { join } from "@std/path";
 import { assertEquals, assertExists } from "@std/assert";
-import { type RpcStub, RpcWireClient, TcpTransport } from "@nullstyle/capnp";
+import type { RpcStub, RpcWireClient } from "@nullstyle/capnp";
 import type { VsockConn } from "@nullstyle/firecracker";
 
 import {
   GoldenArtifactLaunchPlanner,
   type GoldenArtifactLaunchPlannerOptions,
 } from "../../src/rootd/launch_planner.ts";
+import { openAgentSession as dialAgentSession } from "../../src/rootd/agent_dialer.ts";
 import { ArtifactCache } from "../../images/cache.ts";
-import {
-  AGENT_PLANE_FEATURES,
-  identityToWire,
-  limitsToWire,
-  m3AgentContractIdentity,
-} from "../../src/agent/service.ts";
 import { Sha256 } from "../../src/agent/sha256.ts";
-import { DEFAULT_TRANSPORT_LIMITS } from "../../src/wire/contract.ts";
-import * as wire from "../../src/wire/generated/sandbox_agent_types.ts";
+import type * as wire from "../../src/wire/generated/sandbox_agent_types.ts";
 import type * as wireCommon from "../../src/wire/generated/common_types.ts";
 import * as wireStreams from "../../src/wire/generated/streams_types.ts";
 
@@ -146,53 +140,26 @@ export const CAP_CALL = {
  * Wrap an established guest vsock connection in the `sandbox_agent.capnp`
  * client and run the fail-closed negotiate → authenticate → agent()
  * bootstrap with the launch's minted credential.
+ *
+ * Delegates to the production host dialer
+ * (`src/rootd/agent_dialer.ts`), so the real-vsock in-VM suite exercises
+ * the same bounded dial+handshake path the supervisor's host peer uses
+ * (DEFECT A, dial side): a stalling / garbage-spewing guest surfaces a
+ * typed `SupervisorError` within the timeout instead of hanging.
  */
-export async function openAgentSession(
+export function openAgentSession(
   conn: VsockConn,
   credential: Uint8Array,
   sandboxId: string,
   bootNonce: Uint8Array,
 ): Promise<AgentSession> {
-  let wireClient: RpcWireClient | null = null;
-  const transport = new TcpTransport(conn, {
-    closeTimeoutMs: CALL_TIMEOUT_MS,
-    onClose: () => void wireClient?.close().catch(() => {}),
-    onError: () => {},
+  return dialAgentSession(conn, {
+    credential,
+    sandboxId,
+    bootNonce,
+    callerBuildId: "studiobox/m5-vm",
+    timeoutMs: CALL_TIMEOUT_MS,
   });
-  wireClient = new RpcWireClient(transport, {
-    defaultTimeoutMs: CALL_TIMEOUT_MS,
-  });
-  const client = wireClient;
-  try {
-    const bootstrap = await wire.AgentBootstrap.bootstrapClient(client, {
-      timeoutMs: CALL_TIMEOUT_MS,
-    });
-    const handshake = await bootstrap.negotiate({
-      identity: identityToWire(m3AgentContractIdentity("studiobox/m5-vm")),
-      limits: limitsToWire(DEFAULT_TRANSPORT_LIMITS),
-      requiredFeatureBits: AGENT_PLANE_FEATURES,
-    }, { timeoutMs: CALL_TIMEOUT_MS });
-    assertEquals(handshake.which, "accepted", handshake.error?.message);
-    const auth = await bootstrap.authenticate({
-      credential,
-      sandboxId,
-      bootNonce,
-    }, { timeoutMs: CALL_TIMEOUT_MS });
-    assertEquals(auth.which, "accepted", auth.error?.message);
-    const agent = await bootstrap.agent(CAP_CALL);
-    return {
-      agent,
-      wireClient: client,
-      async [Symbol.asyncDispose]() {
-        await client.close().catch(() => {});
-        await transport.close().catch(() => {});
-      },
-    };
-  } catch (error) {
-    await client.close().catch(() => {});
-    await transport.close().catch(() => {});
-    throw error;
-  }
 }
 
 // ---------------------------------------------------------------------------

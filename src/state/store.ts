@@ -1,7 +1,17 @@
 /** Transactional storage for authoritative sandbox records. */
 
-import { dirname } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import { type SandboxRecord, validateSandboxRecord } from "./model.ts";
+
+/**
+ * Sibling `<state>.<uuid>.tmp` files older than this are treated as
+ * abandoned — a process crashed (e.g. `kill -9`) between {@link
+ * JsonFileSandboxStore#write}'s temp write and its atomic rename — and are
+ * swept before the next write. The age gate keeps the sweep from deleting a
+ * temp file a concurrent in-flight writer is still filling (mirrors the
+ * `ABANDONED_TEMP_MAX_AGE_MS` guard in `images/cache.ts`).
+ */
+export const ABANDONED_TEMP_MAX_AGE_MS = 60 * 60 * 1000;
 
 interface StateFile {
   schemaVersion: 1;
@@ -193,6 +203,7 @@ export class JsonFileSandboxStore implements SandboxStateStore {
   async #write(state: StateFile): Promise<void> {
     const directory = dirname(this.path);
     await Deno.mkdir(directory, { recursive: true, mode: 0o700 });
+    await this.#sweepAbandonedTempFiles(directory);
     const temporary = `${this.path}.${crypto.randomUUID()}.tmp`;
     const bytes = new TextEncoder().encode(
       `${JSON.stringify(state, null, 2)}\n`,
@@ -221,6 +232,53 @@ export class JsonFileSandboxStore implements SandboxStateStore {
         if (!(cleanupError instanceof Deno.errors.NotFound)) throw cleanupError;
       }
       throw error;
+    }
+  }
+
+  /**
+   * Remove orphaned `<state>.<uuid>.tmp` siblings left by a writer that
+   * crashed between the temp write and the atomic rename. Only files older
+   * than {@link ABANDONED_TEMP_MAX_AGE_MS} are removed so a concurrent
+   * in-flight writer's fresh temp is never destroyed; a temp with no mtime
+   * is kept (fail closed). Runs inside the write critical section, so it
+   * never races another temp from this same process.
+   */
+  async #sweepAbandonedTempFiles(directory: string): Promise<void> {
+    const prefix = `${basename(this.path)}.`;
+    const suffix = ".tmp";
+    const candidates: string[] = [];
+    try {
+      for await (const entry of Deno.readDir(directory)) {
+        if (
+          entry.isFile && entry.name.startsWith(prefix) &&
+          entry.name.endsWith(suffix)
+        ) {
+          candidates.push(entry.name);
+        }
+      }
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) return;
+      throw error;
+    }
+    const now = Date.now();
+    for (const name of candidates) {
+      const path = join(directory, name);
+      let info: Deno.FileInfo;
+      try {
+        info = await Deno.stat(path);
+      } catch (error) {
+        if (error instanceof Deno.errors.NotFound) continue;
+        throw error;
+      }
+      const mtime = info.mtime?.getTime();
+      if (mtime === undefined || now - mtime < ABANDONED_TEMP_MAX_AGE_MS) {
+        continue;
+      }
+      try {
+        await Deno.remove(path);
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) throw error;
+      }
     }
   }
 }

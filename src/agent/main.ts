@@ -55,9 +55,19 @@ import {
   m3AgentContractIdentity,
   serveAgentWireTransport,
 } from "./service.ts";
+import { DEFAULT_TRANSPORT_LIMITS } from "../wire/contract.ts";
 
 const BUILD_ID = "studioboxd/m3-wire";
 const TRANSPORT_CLOSE_TIMEOUT_MS = 2_000;
+/**
+ * DEFECT A (guest availability): a connection that never completes the
+ * fail-closed `negotiate -> authenticate -> agent()` bootstrap must not
+ * pin a per-connection session forever. A peer that connects and stalls
+ * (silent, or after a garbage / truncated frame) is dropped once this
+ * deadline elapses without the bootstrap gate reaching `authenticated`.
+ * Overridable (tests) via `SBX_AGENT_HANDSHAKE_DEADLINE_MS`.
+ */
+const DEFAULT_HANDSHAKE_DEADLINE_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // Agent assembly (domain plane)
@@ -248,14 +258,29 @@ function listenVsock(port: number): Deno.Listener {
 // Serve loop
 // ---------------------------------------------------------------------------
 
-interface ActiveConnection {
+export interface ActiveConnection {
   teardown(): Promise<void>;
 }
 
-function serveWireConnection(
+/**
+ * Resolve the per-connection handshake deadline, honouring the
+ * `SBX_AGENT_HANDSHAKE_DEADLINE_MS` override (tests drive a short one).
+ */
+export function handshakeDeadlineMsFromEnv(): number {
+  const raw = Deno.env.get("SBX_AGENT_HANDSHAKE_DEADLINE_MS");
+  if (raw === undefined || raw === "") return DEFAULT_HANDSHAKE_DEADLINE_MS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_HANDSHAKE_DEADLINE_MS;
+  }
+  return value;
+}
+
+export function serveWireConnection(
   conn: Deno.Conn,
   wireOptions: AgentWireOptions,
   active: Set<ActiveConnection>,
+  handshakeDeadlineMs: number,
 ): void {
   let server: AgentWireServer | null = null;
   let closed = false;
@@ -263,6 +288,7 @@ function serveWireConnection(
     async teardown(): Promise<void> {
       if (closed) return;
       closed = true;
+      clearTimeout(handshakeTimer);
       active.delete(entry);
       try {
         await server?.close();
@@ -277,14 +303,32 @@ function serveWireConnection(
     },
   };
   // Ownership contract: the transport observes EOF; the owner (this
-  // entry) closes the session. onError is always wired so out-of-band
-  // conn destruction cannot escape as a global unhandled rejection.
+  // entry) closes the session. onError is wired to teardown (DEFECT A):
+  // a frame that can't be parsed, an over-limit frame, or an out-of-band
+  // conn destruction closes THIS connection (and tears down its session)
+  // without escaping as a global unhandled rejection or affecting the
+  // accept loop or any other connection. `frameLimits` caps a single
+  // inbound frame at the plane's ceiling so a garbage/oversized
+  // length-prefix is rejected with bounded buffering rather than read
+  // until memory is exhausted.
   const transport = new TcpTransport(conn, {
     closeTimeoutMs: TRANSPORT_CLOSE_TIMEOUT_MS,
+    frameLimits: { maxFrameBytes: DEFAULT_TRANSPORT_LIMITS.maxFrameBytes },
     onClose: () => void entry.teardown(),
-    onError: () => {},
+    onError: () => void entry.teardown(),
   });
   active.add(entry);
+  // DEFECT A: bound the handshake. A peer that stalls (silently, or after
+  // a garbage/truncated frame the framer keeps waiting to complete) never
+  // trips onClose/onError, so without this deadline its session would leak
+  // for the life of the agent. When the deadline elapses and the gate has
+  // not reached `authenticated`, drop the connection. A completed
+  // handshake leaves the (single-shot) timer to expire harmlessly, so an
+  // authenticated session may then sit idle indefinitely.
+  const handshakeTimer = setTimeout(() => {
+    if (closed) return;
+    if (server?.connection.phase !== "authenticated") void entry.teardown();
+  }, handshakeDeadlineMs);
   void (async () => {
     try {
       server = await serveAgentWireTransport(transport, wireOptions);
@@ -328,6 +372,7 @@ async function main(): Promise<void> {
   }
 
   const active = new Set<ActiveConnection>();
+  const handshakeDeadlineMs = handshakeDeadlineMsFromEnv();
   let shuttingDown = false;
   const shutdown = async (code: number) => {
     if (shuttingDown) return;
@@ -397,7 +442,7 @@ async function main(): Promise<void> {
       continue;
     }
     try {
-      serveWireConnection(conn, wireOptions, active);
+      serveWireConnection(conn, wireOptions, active, handshakeDeadlineMs);
     } catch (error) {
       // serveWireConnection never throws (it hands serving to a background
       // task), but guard so a future refactor cannot take the loop down.
