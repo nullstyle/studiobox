@@ -76,3 +76,33 @@ export type {
   SupervisorReconcileFailure,
   SupervisorReconcileSummary,
 } from "./src/rootd/supervisor_core_api.ts";
+
+// studioboxd guest-agent domain core: the transport-free `AgentApi`
+// contract mirroring `schema/sandbox_agent.capnp` (the capnp wire
+// adapter attaches on top in a later milestone). Only the Agent*
+// vocabulary is surfaced here — the agent barrel's carried convenience
+// re-exports (`Signal`, `SeekMode`, `FileInfo`, ...) already reach the
+// package root through the upstream-parity SDK barrel above.
+export { AgentError } from "./src/agent/mod.ts";
+export type {
+  AgentApi,
+  AgentDenoRepl,
+  AgentDenoReplOptions,
+  AgentDenoRunSpec,
+  AgentDenoRuntime,
+  AgentEnvironment,
+  AgentErrorCode,
+  AgentFileSystem,
+  AgentFsFile,
+  AgentInfo,
+  AgentKillSignal,
+  AgentMakeTempOptions,
+  AgentOomAnnotator,
+  AgentProcess,
+  AgentProcessSpawner,
+  AgentProcessStatus,
+  AgentRootConfig,
+  AgentSpawnSpec,
+  AgentStdioMode,
+  AgentSymlinkOptions,
+} from "./src/agent/mod.ts";

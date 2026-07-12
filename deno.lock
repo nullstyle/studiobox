@@ -87,6 +87,7 @@
       "jsr:@nullstyle/capnp@0.1",
       "jsr:@nullstyle/firecracker@0.2",
       "jsr:@std/assert@1",
+      "jsr:@std/fs@^1.0.19",
       "jsr:@std/path@1"
     ]
   }

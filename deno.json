@@ -4,7 +4,8 @@
   "license": "Apache-2.0",
   "exports": {
     ".": "./mod.ts",
-    "./images": "./images/mod.ts"
+    "./images": "./images/mod.ts",
+    "./testing": "./testing/mod.ts"
   },
   "imports": {
     "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.1",
@@ -17,15 +18,18 @@
     "@nullstyle/firecracker/types": "jsr:@nullstyle/firecracker@^0.2/types",
     "@nullstyle/firecracker/vsock": "jsr:@nullstyle/firecracker@^0.2/vsock",
     "@std/assert": "jsr:@std/assert@^1",
+    "@std/fs": "jsr:@std/fs@^1.0.19",
     "@std/path": "jsr:@std/path@^1"
   },
   "tasks": {
     "fmt": "deno fmt",
     "lint": "deno lint",
     "check": "deno fmt --check && deno lint && deno check .",
-    "test": "deno task test:unit && deno task test:fake",
+    "test": "deno task test:unit && deno task test:fake && deno task test:parity",
     "test:unit": "deno test --allow-read --allow-write --allow-net=127.0.0.1,unix:/tmp/studiobox-unit-uds.sock tests/unit/",
     "test:fake": "deno test --allow-read --allow-write --allow-net --allow-run --allow-env --allow-sys=uid,gid tests/fake/",
+    "test:parity": "deno test --allow-read --allow-write --allow-net --allow-run --allow-env --allow-sys=uid,gid tests/parity/",
+    "agent:compile": "deno compile -A --output .build/studioboxd src/agent/main.ts && deno compile -A --target aarch64-unknown-linux-gnu --output .build/studioboxd-aarch64-unknown-linux-gnu src/agent/main.ts && deno compile -A --target x86_64-unknown-linux-gnu --output .build/studioboxd-x86_64-unknown-linux-gnu src/agent/main.ts",
     "compat:check": "deno run --allow-read tools/check_compat.ts",
     "images:fetch-kernel": "deno run --allow-read=images --allow-write=images/dist --allow-net=s3.amazonaws.com tools/images_fetch_kernel.ts",
     "qualify:images": "SBX_QUALIFY=1 deno test --allow-read --allow-write --allow-net=s3.amazonaws.com --allow-env=SBX_QUALIFY tests/qualification/kernel_fetch_test.ts",
@@ -38,6 +42,7 @@
     "include": [
       "mod.ts",
       "src/**",
+      "testing/**",
       "images/**",
       "schema/**",
       "compat/**",
