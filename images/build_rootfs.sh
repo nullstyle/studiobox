@@ -122,6 +122,12 @@ echo "== agent + overlay-init"
 install -m 0755 -o root -g root "$AGENT" "$ROOT/usr/local/bin/studioboxd"
 install -m 0755 -o root -g root "$OVERLAY_INIT" "$ROOT/sbin/overlay-init"
 
+# overlay-init mount points. The kernel mounts the golden root READ-ONLY
+# (`root=/dev/vda ro`), so pid-1 overlay-init cannot mkdir these itself —
+# they must exist in the baked image: `/overlay` (where the writable overlay
+# device is mounted) and `/mnt/root` (where the overlayfs is assembled).
+mkdir -p "$ROOT/overlay" "$ROOT/mnt/root"
+
 echo "== normalize for reproducibility"
 rm -rf "$ROOT"/var/cache/apt "$ROOT"/var/lib/apt/lists
 mkdir -p "$ROOT/var/cache/apt" "$ROOT/var/lib/apt/lists/partial"

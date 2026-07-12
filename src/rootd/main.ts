@@ -48,10 +48,14 @@
  * bootstrap credential), `--build-id <id>` (default `dev`), `--compat
  * <path>` (default: the repo's `compat/wire.json` next to this module).
  *
- * Launch planning (resolving artifact/allocation ids to jailer plans) lands
- * with M5's artifact-staging integration; until then this entrypoint's
- * planner refuses with `SBX_SUP_UNAVAILABLE` while every other supervisor
- * method (status/usage/kill/reconcile/health/ping/openBridge) is live.
+ * Launch planning (resolving artifact/allocation ids to jailer plans) is
+ * the {@linkcode GoldenArtifactLaunchPlanner}, configured via
+ * `--launch-config <path>` (the JSON mirrors its options: artifact cache
+ * root, golden manifest hash, jailer/firecracker bins, uid/gid, chroot
+ * base, overlay dir, guest resources, vsock port). Without the flag the
+ * entrypoint keeps the pre-M5 behavior — `launch` refuses with
+ * `SBX_SUP_UNAVAILABLE` while every other supervisor method
+ * (status/usage/kill/reconcile/health/ping/openBridge) stays live.
  *
  * @module
  */
@@ -69,10 +73,16 @@ import {
   type SupervisorWireOptions,
 } from "./service.ts";
 import {
+  type ReclaimHook,
   SupervisorCore,
   type SupervisorLaunchPlanner,
 } from "./supervisor_core.ts";
 import { SupervisorError } from "./supervisor_core_api.ts";
+import {
+  GoldenArtifactLaunchPlanner,
+  type GoldenArtifactLaunchPlannerOptions,
+} from "./launch_planner.ts";
+import { ArtifactCache } from "../../images/cache.ts";
 import { JsonFileSandboxStore } from "../state/store.ts";
 
 const BUILD_ID_DEFAULT = "dev";
@@ -347,6 +357,22 @@ interface RootdFlags {
   tokenFile: string;
   buildId: string;
   compat: string;
+  /** Optional path to the JSON launch-planner config (see below). */
+  launchConfig?: string;
+}
+
+/**
+ * JSON shape of `--launch-config`: everything the real
+ * {@linkcode GoldenArtifactLaunchPlanner} needs to stage + boot the golden
+ * artifact set. `artifactCache` is the cache root; the rest mirror
+ * {@linkcode GoldenArtifactLaunchPlannerOptions} minus the `cache` handle.
+ */
+interface LaunchPlannerConfig extends
+  Omit<
+    GoldenArtifactLaunchPlannerOptions,
+    "cache" | "resolveManifestHash" | "mintCredential"
+  > {
+  readonly artifactCache: string;
 }
 
 /** Parse studiobox-rootd CLI flags (exported for unit coverage). */
@@ -373,6 +399,10 @@ export function parseRootdFlags(args: readonly string[]): RootdFlags {
       flags.buildId = take("build-id");
     } else if (arg === "--compat" || arg.startsWith("--compat=")) {
       flags.compat = take("compat");
+    } else if (
+      arg === "--launch-config" || arg.startsWith("--launch-config=")
+    ) {
+      flags.launchConfig = take("launch-config");
     } else {
       throw new WireValidationError(`unknown flag: ${arg}`);
     }
@@ -393,6 +423,9 @@ export function parseRootdFlags(args: readonly string[]): RootdFlags {
     buildId: flags.buildId ?? BUILD_ID_DEFAULT,
     compat: flags.compat ??
       fromFileUrl(import.meta.resolve("../../compat/wire.json")),
+    ...(flags.launchConfig === undefined
+      ? {}
+      : { launchConfig: flags.launchConfig }),
   };
 }
 
@@ -414,16 +447,40 @@ export function parseSupervisorToken(text: string): Uint8Array {
   return bytes;
 }
 
-/** M5 seam: artifact/allocation resolution is not wired in this build. */
-const LAUNCH_PLANNING_PENDING: SupervisorLaunchPlanner = {
+/**
+ * Fallback planner when `--launch-config` is omitted: `launch` fails fast
+ * (as before M5) while every other supervisor method — status / usage /
+ * kill / reconcile / health / ping / openBridge — stays live. Configure a
+ * launch config to enable real jailed launches.
+ */
+const LAUNCH_PLANNING_UNCONFIGURED: SupervisorLaunchPlanner = {
   resolve: () =>
     Promise.reject(
       new SupervisorError(
         "SBX_SUP_UNAVAILABLE",
-        "launch planning is not available in this build; artifact staging lands with M5",
+        "launch planning is not configured; pass --launch-config <path>",
       ),
     ),
 };
+
+/**
+ * Build the real launch planner + its reclaim hook from the JSON config.
+ * The reclaim hook releases the artifact refcount and deletes the per-boot
+ * overlay when a record reaches a terminal phase.
+ */
+async function loadLaunchPlanner(
+  path: string,
+): Promise<{ planner: GoldenArtifactLaunchPlanner; reclaimHook: ReclaimHook }> {
+  const config = JSON.parse(
+    await Deno.readTextFile(path),
+  ) as LaunchPlannerConfig;
+  const { artifactCache, ...rest } = config;
+  const planner = new GoldenArtifactLaunchPlanner({
+    ...rest,
+    cache: new ArtifactCache({ root: artifactCache }),
+  });
+  return { planner, reclaimHook: planner.reclaimHook };
+}
 
 async function main(): Promise<void> {
   let flags: RootdFlags;
@@ -447,9 +504,18 @@ async function main(): Promise<void> {
     await Deno.readTextFile(flags.tokenFile),
   );
 
+  const launch: {
+    planner: SupervisorLaunchPlanner;
+    reclaimHook?: ReclaimHook;
+  } = flags.launchConfig === undefined
+    ? { planner: LAUNCH_PLANNING_UNCONFIGURED }
+    : await loadLaunchPlanner(flags.launchConfig);
   const core = new SupervisorCore({
     store: new JsonFileSandboxStore(flags.state),
-    planner: LAUNCH_PLANNING_PENDING,
+    planner: launch.planner,
+    ...(launch.reclaimHook === undefined
+      ? {}
+      : { reclaimHooks: [launch.reclaimHook] }),
     buildId: flags.buildId,
   });
 

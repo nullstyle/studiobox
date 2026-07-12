@@ -14,7 +14,11 @@
  * @module
  */
 
-import type { VmConfig } from "@nullstyle/firecracker";
+import type {
+  VmConfig,
+  VsockConn,
+  VsockDialOptions,
+} from "@nullstyle/firecracker";
 import {
   type ArtifactReference,
   assertSandboxId,
@@ -64,6 +68,15 @@ export interface SupervisorLaunchPlan {
   readonly stage: JailedLaunchRequest["stage"];
   readonly config: VmConfig;
   readonly readinessTimeoutMs?: number;
+  /**
+   * Guest AF_VSOCK port studioboxd listens on. When present the launch is
+   * not `ready` until the supervisor has DIALED it (real vsock, not just
+   * journal + VMM liveness): the boot recipe's `studiobox.vsock_port`
+   * cmdline and this port must agree. The port is remembered for
+   * {@linkcode SupervisorApi.probeAgent} and the {@linkcode SupervisorCore}
+   * agent-connection seam. Omitted for fake launches (no real vsock).
+   */
+  readonly agentVsockPort?: number;
   /**
    * Identity of the artifact set the plan stages from. When present it is
    * journaled onto the sandbox record BEFORE any spawn, so artifact GC
@@ -148,6 +161,8 @@ export class SupervisorCore implements SupervisorApi {
   readonly #now: () => number;
   readonly #startedAtUnixMs: number;
   readonly #machines = new Map<string, FirecrackerMachine>();
+  /** Guest vsock port per live execution, when the plan configured one. */
+  readonly #agentPorts = new Map<string, number>();
   readonly #exits = new Map<string, ObservedExit>();
   readonly #bridges = new Map<string, BridgeGrantEntry>();
   readonly #inflight = new Set<InflightOperation>();
@@ -238,6 +253,14 @@ export class SupervisorCore implements SupervisorApi {
           : { readinessTimeoutMs: plan.readinessTimeoutMs }),
       });
       try {
+        // Readiness is real when configured: dial studioboxd over vsock so
+        // "ready" means the guest agent answered, not just that the VMM is
+        // journaled and live (M5). The dial retries across the guest's boot
+        // + studioboxd startup window.
+        if (plan.agentVsockPort !== undefined) {
+          const probe = await machine.connectVsock(plan.agentVsockPort);
+          probe.close();
+        }
         await this.#ownedTransition(
           validated.sandboxId,
           validated.executionId,
@@ -245,14 +268,18 @@ export class SupervisorCore implements SupervisorApi {
           "ready",
         );
       } catch (error) {
-        // The journal refused the move (typically SBX_SUP_STALE: a sweep
-        // or a newer execution owns the record now). Put the fresh VMM
-        // down instead of tracking a phantom machine.
+        // The agent never answered, or the journal refused the move
+        // (typically SBX_SUP_STALE: a sweep or a newer execution owns the
+        // record now). Put the fresh VMM down instead of tracking a phantom
+        // machine.
         await machine.kill().catch(() => {});
         await machine[Symbol.asyncDispose]().catch(() => {});
         throw error;
       }
       this.#track(machine);
+      if (plan.agentVsockPort !== undefined) {
+        this.#agentPorts.set(validated.executionId, plan.agentVsockPort);
+      }
       return {
         sandboxId: validated.sandboxId,
         executionId: validated.executionId,
@@ -292,8 +319,36 @@ export class SupervisorCore implements SupervisorApi {
   async probeAgent(executionId: string): Promise<void> {
     const record = await this.#byExecution(executionId);
     this.#requireReadyAndLive(record, executionId, "probeAgent");
-    // The vsock dial to studioboxd rides in with the wire layer (M5/M7);
-    // the domain core asserts journal phase + VMM liveness.
+    const port = this.#agentPorts.get(executionId);
+    if (port === undefined) return;
+    // Real reachability check (M5): dial studioboxd over vsock and hang up.
+    // A refused/absent guest listener surfaces as the adapter's typed error.
+    const machine = this.#machines.get(executionId)!;
+    const conn = await machine.connectVsock(port, { retryTimeoutMs: 5_000 });
+    conn.close();
+  }
+
+  /**
+   * Host/test seam (not part of {@linkcode SupervisorApi}): dial the guest
+   * agent's vsock for a ready, live execution and return the raw byte
+   * stream. The M5 in-VM suite wraps it in the `sandbox_agent.capnp` client
+   * to drive exec/fs/eval directly (the M7 tunnel supersedes this with the
+   * bridge splice). Requires a plan that configured `agentVsockPort`.
+   */
+  async connectAgent(
+    executionId: string,
+    options?: VsockDialOptions,
+  ): Promise<VsockConn> {
+    const record = await this.#byExecution(executionId);
+    this.#requireReadyAndLive(record, executionId, "connectAgent");
+    const port = this.#agentPorts.get(executionId);
+    if (port === undefined) {
+      throw new SupervisorError(
+        "SBX_SUP_STATE",
+        `execution ${executionId} has no agent vsock port; the plan configured none`,
+      );
+    }
+    return await this.#machines.get(executionId)!.connectVsock(port, options);
   }
 
   async openBridge(
@@ -491,6 +546,7 @@ export class SupervisorCore implements SupervisorApi {
       machine.closeOutboundConnections();
     }
     this.#machines.clear();
+    this.#agentPorts.clear();
     this.#exits.clear();
     this.#bridges.clear();
 
@@ -574,6 +630,7 @@ export class SupervisorCore implements SupervisorApi {
       };
     });
     this.#machines.delete(executionId);
+    this.#agentPorts.delete(executionId);
     this.#exits.delete(executionId);
     this.#revokeBridges(executionId);
   }

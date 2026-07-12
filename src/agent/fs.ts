@@ -293,6 +293,11 @@ export class AgentFs implements AgentFileSystem {
   }
 
   #contained(resolvedHostPath: string, realRoot: string): boolean {
+    // When the sandbox root IS the filesystem root ("/"), the containment
+    // prefix is "/" (every absolute path is inside it) — NOT "//", which
+    // would reject everything. This is the chroot/pivot_root case where
+    // studioboxd runs rooted at the writable overlay (DESIGN.md §7/§10).
+    if (realRoot === "/") return resolvedHostPath.startsWith("/");
     return resolvedHostPath === realRoot ||
       resolvedHostPath.startsWith(realRoot + "/");
   }
@@ -373,6 +378,9 @@ export class AgentFs implements AgentFileSystem {
   /** Rule 5: map a resolved host path back to an in-sandbox path. */
   #hostToSandbox(resolvedHostPath: string, realRoot: string): string {
     if (resolvedHostPath === realRoot) return "/";
+    // Root "/" is the identity map: the in-sandbox path IS the host path
+    // (slicing realRoot.length=1 would wrongly drop the leading "/").
+    if (realRoot === "/") return resolvedHostPath;
     if (resolvedHostPath.startsWith(realRoot + "/")) {
       return resolvedHostPath.slice(realRoot.length);
     }

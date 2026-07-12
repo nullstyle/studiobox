@@ -780,3 +780,24 @@ Deno.test("agent fs: AgentError carries typed codes and name", async () => {
     }
   });
 });
+
+Deno.test('agent fs: root "/" reads and writes an existing path (M5 regression)', async () => {
+  // studioboxd runs with root="/" in the chroot/pivot_root guest. The prior
+  // containment prefix `realRoot + "/"` = "//" rejected every existing path
+  // — the M5 cycle's file upload caught it. Exercise a real write+read+stat
+  // through the filesystem plane with root="/".
+  const dir = await Deno.makeTempDir({ prefix: "sbx-fs-root-slash-" });
+  const fs = new AgentFs({ root: "/" });
+  const path = `${dir}/greeting.txt`;
+  try {
+    await fs.writeTextFile(path, "hello from root slash\n");
+    assertEquals(await fs.readTextFile(path), "hello from root slash\n");
+    const info = await fs.stat(path);
+    assertEquals(info.isFile, true);
+    // realPath (rule 5) maps the host path back as an in-sandbox path — the
+    // identity map under root "/".
+    assertEquals(await fs.realPath(path), await Deno.realPath(path));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

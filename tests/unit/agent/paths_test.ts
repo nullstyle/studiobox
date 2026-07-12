@@ -119,3 +119,24 @@ Deno.test('root "/" makes containment vacuous (the real guest)', async () => {
   assertEquals(resolved.hostPath, "/definitely/not/here");
   assertEquals(resolved.realHostPath, "/definitely/not/here");
 });
+
+Deno.test('root "/" resolves an EXISTING absolute path (M5 regression)', async () => {
+  // The chroot/pivot_root guest runs studioboxd with root="/". The prior
+  // containment prefix was `realRoot + "/"` = "//", so an existing path
+  // resolved to `realpath !== "/"` and was wrongly rejected — the M5 cycle
+  // caught it. A non-existent path (above) dodged the bug because its
+  // deepest existing ancestor is "/" itself (real === realRoot).
+  const dir = await Deno.makeTempDir({ prefix: "sbx-root-slash-" });
+  try {
+    const resolved = await resolveSandboxPath(
+      { root: "/", home: "/home/app" },
+      dir,
+    );
+    // root "/" is the identity map: no containment stripping, path preserved
+    // (modulo the OS realpath of any symlinked temp root).
+    assertEquals(resolved.sandboxPath, dir);
+    assertEquals(resolved.realHostPath, await Deno.realPath(dir));
+  } finally {
+    await Deno.remove(dir);
+  }
+});

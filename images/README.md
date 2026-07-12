@@ -43,6 +43,16 @@ and set `agentBinary: { placeholder: false }` with the binary's sha256 — the
 manifest hash rolls automatically because the agent sha is an input pin. Nothing
 else changes.
 
+## The one-command real bake (`images:build`)
+
+`deno task images:build` (`tools/build_golden_set.ts`) does the whole real M5
+bake in one step on a Linux+root host: `deno compile`s the real `studioboxd`,
+fetches the pinned kernel, runs `build_rootfs.sh` with the compiled agent
+(`placeholder: false`), assembles the manifest, and `store()`s the set into the
+artifact cache — printing the manifest hash as a final JSON line. The `test:vm`
+driver invokes it inside the `fc-smoke` Lima VM; it also runs directly on a KVM
+CI runner.
+
 ## Building a golden rootfs
 
 Linux + root required (the Lima VM works; no loop devices needed — `mke2fs -d`
@@ -70,3 +80,8 @@ Staging creates each sandbox's overlay as a _sparse, unformatted_ file (mkfs is
 not portable to the macOS host). The in-guest `overlay-init` stub formats
 `/dev/vdb` as ext4 on first boot, mounts a writable overlayfs over the read-only
 golden root, and execs the agent.
+
+Because the kernel mounts the golden root **read-only** (`root=/dev/vda ro`),
+`overlay-init` (pid 1) cannot create its own mount points — so `build_rootfs.sh`
+bakes `/overlay` (where the overlay device mounts) and `/mnt/root` (where the
+overlayfs is assembled) into the image.

@@ -162,7 +162,13 @@ export async function resolveSandboxPath(
     }
   }
 
-  if (real !== realRoot && !real.startsWith(realRoot + "/")) {
+  // When the sandbox root is the filesystem root, its realpath is "/" and
+  // the containment prefix is "/" itself (every absolute path is inside it)
+  // — NOT "//", which would reject every path. This is the pivot_root/chroot
+  // case: overlay-init roots studioboxd at the writable overlay so the guest
+  // sees `/home/app` as an absolute in-sandbox path.
+  const realRootPrefix = realRoot === "/" ? "/" : realRoot + "/";
+  if (real !== realRoot && !real.startsWith(realRootPrefix)) {
     throw new AgentError(
       "SBX_AGENT_PATH_ESCAPE",
       `path resolves outside the sandbox root: ${sandboxPath}`,
