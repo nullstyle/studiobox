@@ -79,9 +79,13 @@ import {
 } from "./supervisor_core.ts";
 import { SupervisorError } from "./supervisor_core_api.ts";
 import {
+  DEFAULT_AGENT_VSOCK_PORT,
   GoldenArtifactLaunchPlanner,
   type GoldenArtifactLaunchPlannerOptions,
 } from "./launch_planner.ts";
+import { BridgeServer } from "./bridge_server.ts";
+import { DEFAULT_BRIDGE_DIAL_TIMEOUT_MS } from "./bridge.ts";
+import { BRIDGE_SOCKET_ROOT } from "../wire/supervisor.ts";
 import { ArtifactCache } from "../../images/cache.ts";
 import { JsonFileSandboxStore } from "../state/store.ts";
 
@@ -519,11 +523,45 @@ async function main(): Promise<void> {
     buildId: flags.buildId,
   });
 
+  // The bridge splice tier (PLAN.md §M8): rootd binds each minted grant's
+  // loopback UDS under the root-owned bridge root and splices it to the guest
+  // agent vsock. hostd dials that UDS (credential-authenticated) to reach the
+  // guest. Ensure the root exists (0700: only root + the bridge peer reach it).
+  await Deno.mkdir(BRIDGE_SOCKET_ROOT, { recursive: true, mode: 0o700 }).catch(
+    (error) => {
+      if (!(error instanceof Deno.errors.AlreadyExists)) throw error;
+    },
+  );
+  const bridgeServers = new Set<BridgeServer>();
+  const onBridgeGranted = (
+    grant: { socketPath: string; bridgeCredential: Uint8Array },
+    request: { executionId: string },
+  ): void => {
+    const server = BridgeServer.open({
+      socketPath: grant.socketPath,
+      credential: grant.bridgeCredential,
+      dialGuest: (signal) =>
+        core.connectBridge(
+          {
+            executionId: request.executionId,
+            guestPort: DEFAULT_AGENT_VSOCK_PORT,
+          },
+          {
+            retryTimeoutMs: DEFAULT_BRIDGE_DIAL_TIMEOUT_MS,
+            ...(signal === undefined ? {} : { signal }),
+          },
+        ),
+    });
+    bridgeServers.add(server);
+    void server.finished.then(() => bridgeServers.delete(server));
+  };
+
   const server = await startSupervisorServer({
     socketPath: flags.socket,
     api: core,
     identity,
     credential,
+    onBridgeGranted,
     onConnectionError: (error) => {
       console.error(
         `rootd connection error: ${
@@ -542,6 +580,8 @@ async function main(): Promise<void> {
     // operations still in flight the sweep refuses and the next start's
     // destructive reconcile converges the journal instead.
     await server.close();
+    // Tear down every live bridge splice (frees its UDS + cuts the guest dial).
+    await Promise.allSettled([...bridgeServers].map((b) => b.close()));
     try {
       const summary = await core.reconcile();
       console.error(

@@ -598,6 +598,20 @@ export interface SupervisorWireOptions {
   readonly knownRuntimePairs?: readonly KnownRuntimePair[];
   /** Auth failure budget before the gate closes (default 3). */
   readonly maxAuthenticationFailures?: number;
+  /**
+   * Stand up the bridge splice behind a just-minted grant (PLAN.md §M8). rootd
+   * mints the one-shot grant via `api.openBridge`, then this hook binds the
+   * grant's loopback UDS and splices it to the guest vsock (a {@link BridgeServer}
+   * whose guest dial is `SupervisorCore.connectBridge`). If it throws, the grant
+   * is not handed to hostd — the whole `openBridge` returns a typed error arm so
+   * hostd never receives a socket path with no server behind it. Absent (M6/the
+   * host-safe supervisor-core tests) `openBridge` still mints the grant record
+   * only, exactly as before.
+   */
+  readonly onBridgeGranted?: (
+    grant: SupervisorBridgeGrant,
+    request: SupervisorBridgeRequest,
+  ) => Promise<void> | void;
 }
 
 /**
@@ -608,6 +622,10 @@ export interface SupervisorWireOptions {
 export function createSupervisorWireAdapter(
   api: SupervisorApi,
   gate: BootstrapGate,
+  onBridgeGranted?: (
+    grant: SupervisorBridgeGrant,
+    request: SupervisorBridgeRequest,
+  ) => Promise<void> | void,
 ): Supervisor {
   return {
     launch: async (request): Promise<LaunchResults["result"]> => {
@@ -654,6 +672,12 @@ export function createSupervisorWireAdapter(
         gate.assertAuthorized();
         const validated = validateBridgeRequest(bridgeRequestFromWire(request));
         const grant = await api.openBridge(validated);
+        // Stand up the splice behind the grant BEFORE handing hostd a socket
+        // path: a hook failure means no server would be listening, so surface it
+        // as the error arm rather than a dead grant.
+        if (onBridgeGranted !== undefined) {
+          await onBridgeGranted(grant, validated);
+        }
         return { which: "grant", grant: bridgeGrantToWire(grant) };
       } catch (error) {
         return { which: "error", error: supervisorFaultToWire(error) };
@@ -732,7 +756,11 @@ export function createSupervisorWireConnection(
 ): SupervisorWireConnection {
   validateSupervisorCredential(options.credential);
   const expectedCredential = options.credential.slice();
-  const supervisor = createSupervisorWireAdapter(options.api, gate);
+  const supervisor = createSupervisorWireAdapter(
+    options.api,
+    gate,
+    options.onBridgeGranted,
+  );
 
   const bootstrap: SupervisorBootstrap = {
     negotiate: (offer): Promise<WireHandshakeResult> => {

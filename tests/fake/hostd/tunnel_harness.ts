@@ -26,6 +26,7 @@ import type {
 import type { Clock, ClockTimer } from "../../../src/hostd/leases.ts";
 import type { RootdGateway } from "../../../src/hostd/supervisor_client.ts";
 import type {
+  SupervisorBridgeGrant,
   SupervisorLaunchRequest,
   SupervisorMachineStatus,
   SupervisorMachineUsage,
@@ -120,6 +121,14 @@ export class FakeGateway implements RootdGateway {
   kill(executionId: string): Promise<void> {
     this.killed.push(executionId);
     return Promise.resolve();
+  }
+
+  // The M7 fake tunnel tests inject the guest dial through the `bridgeFactory`
+  // seam directly, not the wire `openBridge` grant path. The two-daemon M8 test
+  // subclasses this and overrides `openBridge` to stand up a real BridgeServer,
+  // so the return type is the real grant even though the base rejects.
+  openBridge(): Promise<SupervisorBridgeGrant> {
+    return Promise.reject(new Error("fake gateway does not open bridges"));
   }
 
   reconcile(): Promise<SupervisorReconcileSummary> {

@@ -150,6 +150,10 @@ class FakeGateway implements RootdGateway {
     return Promise.resolve();
   }
 
+  openBridge(): Promise<never> {
+    return Promise.reject(new Error("fake gateway does not open bridges"));
+  }
+
   reconcile(): Promise<SupervisorReconcileSummary> {
     return Promise.resolve({
       examined: 0,

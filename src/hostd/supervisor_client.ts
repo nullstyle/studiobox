@@ -36,6 +36,8 @@
 
 import { type RpcStub, RpcWireClient, TcpTransport } from "@nullstyle/capnp";
 import {
+  type BridgeGrant as WireBridgeGrant,
+  type BridgeRequest as WireBridgeRequest,
   type MachineStatus as WireMachineStatus,
   type MachineUsage as WireMachineUsage,
   type ReconcileSummary as WireReconcileSummary,
@@ -53,6 +55,8 @@ import {
   SUPERVISOR_FEATURE_BITS,
 } from "../rootd/service.ts";
 import {
+  type SupervisorBridgeGrant,
+  type SupervisorBridgeRequest,
   SupervisorError,
   type SupervisorErrorCode,
   type SupervisorLaunchRequest,
@@ -82,6 +86,14 @@ export interface RootdGateway {
   usage(executionId: string): Promise<SupervisorMachineUsage>;
   /** Immediate SIGKILL + full reclaim of one execution. */
   kill(executionId: string): Promise<void>;
+  /**
+   * Authorize one guest-agent bridge for a live execution: rootd mints a
+   * one-shot grant naming a per-bridge loopback UDS + a 32-byte
+   * `bridgeCredential`, and stands up the bridge splice server behind it (the
+   * M8 assembly). hostd's bridge factory then dials that UDS, presents the
+   * credential, and receives a verbatim byte pipe to the guest vsock.
+   */
+  openBridge(request: SupervisorBridgeRequest): Promise<SupervisorBridgeGrant>;
   /** Destructive reconciliation sweep. */
   reconcile(): Promise<SupervisorReconcileSummary>;
   /** Liveness echo (full-width UInt64 nonce). */
@@ -253,6 +265,14 @@ function buildSession(
       const result = await supervisor.kill(executionId, { timeoutMs });
       if (result.which === "error") throw wireErrorToSupervisor(result.error);
     },
+    openBridge: async (request) => {
+      const result = await supervisor.openBridge(
+        bridgeRequestToWire(request),
+        { timeoutMs },
+      );
+      if (result.which === "error") throw wireErrorToSupervisor(result.error);
+      return bridgeGrantFromWire(requireField(result.grant, "grant"));
+    },
     reconcile: async () => {
       const result = await supervisor.reconcile({ timeoutMs });
       if (result.which === "error") throw wireErrorToSupervisor(result.error);
@@ -270,6 +290,29 @@ function requireField<T>(value: T | undefined, field: string): T {
     );
   }
   return value;
+}
+
+function bridgeRequestToWire(
+  request: SupervisorBridgeRequest,
+): WireBridgeRequest {
+  return {
+    sandboxId: request.sandboxId,
+    executionId: request.executionId,
+    leaseId: request.leaseId,
+    leaseGeneration: BigInt(request.leaseGeneration),
+    tunnelNonce: request.tunnelNonce.slice(),
+    expiresAtUnixMs: BigInt(request.expiresAtUnixMs),
+  };
+}
+
+function bridgeGrantFromWire(grant: WireBridgeGrant): SupervisorBridgeGrant {
+  return {
+    bridgeId: grant.bridgeId,
+    socketPath: grant.socketPath,
+    bridgeCredential: grant.bridgeCredential.slice(),
+    agentCredential: grant.agentCredential.slice(),
+    expiresAtUnixMs: Number(grant.expiresAtUnixMs),
+  };
 }
 
 function machineStatusFromWire(

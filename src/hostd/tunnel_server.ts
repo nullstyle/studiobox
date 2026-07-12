@@ -15,9 +15,11 @@
  *   - a malformed / truncated / silent preface is dropped with NO ack and NO
  *     bridge (the accept loop keeps serving);
  *   - a rejected ticket (unknown, expired, replayed, wrong binding) closes the
- *     connection BEFORE any ack and WITHOUT opening a bridge — the burn is
- *     indistinguishable from the outside (`SingleUseTicketStore` burns before
- *     it decides), so a probe learns nothing;
+ *     connection BEFORE any ack and WITHOUT opening a bridge — every rejection
+ *     is byte-for-byte identical from the outside (silent close, no ack), so a
+ *     probe learns nothing. A ticket bound to a DIFFERENT endpoint is rejected
+ *     WITHOUT being burned (`SingleUseTicketStore` gates the burn on the
+ *     binding), so replaying it here cannot deny its legitimate holder;
  *   - a valid ticket whose bridge dial then fails gets a typed error ack, then
  *     the connection is closed (the ticket is already spent — single use).
  *

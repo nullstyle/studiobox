@@ -41,6 +41,7 @@ import {
   type HostControlWireOptions,
 } from "./service.ts";
 import { HostControlCore } from "./control_core.ts";
+import { WireBridgeFactory } from "./wire_bridge.ts";
 import {
   connectSupervisorSession,
   DEFAULT_HOST_BUILD_ID,
@@ -481,7 +482,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  const core = new HostControlCore({ gateway: session });
+  // The tunnel bridge factory (PLAN.md §M8): every burned ticket asks rootd to
+  // `openBridge` over this same session and dials the credential-authenticated
+  // bridge UDS, so `HostSandbox.openTunnel` now reaches the guest agent instead
+  // of failing typed-unimplemented.
+  const core = new HostControlCore({
+    gateway: session,
+    bridgeFactory: new WireBridgeFactory(session),
+  });
   const server = await startHostControlServer({
     listen: flags.listen,
     core,

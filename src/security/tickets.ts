@@ -100,11 +100,23 @@ export class SingleUseTicketStore {
     }
     const verifier = await ticketVerifier(ticket);
     const stored = this.#tickets.get(verifier);
-    // A known ticket is burned before any externally distinguishable result.
-    this.#tickets.delete(verifier);
+    // Burn a ticket ONLY when its stored binding matches the endpoint that is
+    // presenting it. The store is shared across every sandbox in a
+    // HostControlCore, so burning on mere possession would let a valid ticket
+    // for sandbox A, replayed at sandbox B's tunnel endpoint, be consumed even
+    // though it does not authorize B — a cross-endpoint griefing/denial vector.
+    // Gating the burn on the binding closes that: a wrong-endpoint (or unknown)
+    // ticket is rejected without being spent, so its legitimate holder can
+    // still redeem it. The remaining timing distinction is non-exploitable —
+    // reaching the burn path requires presenting a ticket whose binding the
+    // caller already possesses, so it leaks nothing an attacker did not have.
+    const matchesEndpoint = stored !== undefined &&
+      sameBinding(stored.binding, binding);
+    if (matchesEndpoint) {
+      this.#tickets.delete(verifier);
+    }
     if (
-      stored === undefined || stored.expiresAt < this.#now() ||
-      !sameBinding(stored.binding, binding)
+      stored === undefined || stored.expiresAt < this.#now() || !matchesEndpoint
     ) {
       throw new TicketRejectedError();
     }
