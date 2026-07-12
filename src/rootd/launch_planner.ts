@@ -292,6 +292,11 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
         config,
         readinessTimeoutMs: this.#readinessTimeoutMs,
         agentVsockPort: this.#agentVsockPort,
+        // The guest bakes exactly this credential (studiobox.token) at boot;
+        // surfacing it on the plan lets the supervisor return it in every
+        // openBridge grant so the tunnel client can authenticate to studioboxd
+        // (PLAN.md §M8).
+        agentCredential: credential.slice(),
         artifact: { manifestHash, arch: this.#arch },
       };
     } catch (error) {

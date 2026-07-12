@@ -20,6 +20,40 @@ export interface PrivilegedBridgeFactory<Bridge> {
 }
 
 /**
+ * A reserved-but-not-yet-dialed guest bridge (PLAN.md §M8). The rootd grant —
+ * and with it the launch-scoped `agentCredential` the client presents to the
+ * guest agent's `authenticate` — is already minted, but the guest vsock is NOT
+ * dialed until {@linkcode BridgeReservation.connect} runs. `HostSandbox.openTunnel`
+ * reserves the bridge up front so it can return `agentCredential` to the client;
+ * the tunnel only calls `connect` AFTER the single-use ticket is burned, which
+ * preserves the load-bearing invariant that the guest vsock is never reached
+ * without a burned ticket (DESIGN.md §4) — reserving merely mints the grant and
+ * binds rootd's per-bridge UDS; the credential preface that triggers the guest
+ * dial rides in only post-burn.
+ */
+export interface BridgeReservation<Bridge> {
+  /** The launch-scoped guest-agent credential (32..512 bytes). */
+  readonly agentCredential: Uint8Array;
+  /** Dial the guest bridge and present the credential preface. One-shot. */
+  connect(signal?: AbortSignal): Promise<Bridge>;
+  /** Release the reservation if the tunnel is torn down before it is dialed. */
+  close(): Promise<void>;
+}
+
+/**
+ * Reserves a guest bridge WITHOUT reaching the guest: mints the rootd grant
+ * (yielding the `agentCredential`) and hands back a {@linkcode BridgeReservation}
+ * whose `connect` performs the credential-authenticated dial that reaches the
+ * guest. {@linkcode WireBridgeFactory} implements it over the supervisor wire.
+ */
+export interface PrivilegedBridgeReserver<Bridge> {
+  reserveBridge(
+    request: PrivilegedBridgeRequest,
+    signal?: AbortSignal,
+  ): Promise<BridgeReservation<Bridge>>;
+}
+
+/**
  * Enforces the key trust-boundary ordering: external tickets are validated and
  * irreversibly burned by unprivileged studiobox-hostd before studiobox-rootd
  * is contacted.

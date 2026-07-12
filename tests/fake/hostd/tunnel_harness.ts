@@ -20,8 +20,9 @@ import {
 } from "../../../src/hostd/control_core.ts";
 import { SingleUseTicketStore } from "../../../src/security/tickets.ts";
 import type {
-  PrivilegedBridgeFactory,
+  BridgeReservation,
   PrivilegedBridgeRequest,
+  PrivilegedBridgeReserver,
 } from "../../../src/hostd/tunnel_authorizer.ts";
 import type { Clock, ClockTimer } from "../../../src/hostd/leases.ts";
 import type { RootdGateway } from "../../../src/hostd/supervisor_client.ts";
@@ -150,19 +151,43 @@ export class FakeGateway implements RootdGateway {
 // Bridge factories (the guest-dial seam)
 // ---------------------------------------------------------------------------
 
-/** Records every bridge request so a test can assert "no bridge opened". */
+/**
+ * Records every GUEST DIAL (`connect`) so a test can assert "no bridge opened"
+ * for a rejected ticket. Reservations are recorded separately: `openTunnel`
+ * reserves eagerly (surfacing `agentCredential`), but the guest is dialed only
+ * after the ticket is burned.
+ */
 export class RecordingBridgeFactory
-  implements PrivilegedBridgeFactory<Deno.Conn> {
+  implements PrivilegedBridgeReserver<Deno.Conn> {
+  /** One entry per GUEST DIAL (a burned-ticket `connect`). */
   readonly requests: PrivilegedBridgeRequest[] = [];
+  /** One entry per RESERVE (an `openTunnel`). */
+  readonly reservations: PrivilegedBridgeRequest[] = [];
   readonly #dial: (request: PrivilegedBridgeRequest) => Promise<Deno.Conn>;
+  readonly #agentCredential: Uint8Array;
 
-  constructor(dial: (request: PrivilegedBridgeRequest) => Promise<Deno.Conn>) {
+  constructor(
+    dial: (request: PrivilegedBridgeRequest) => Promise<Deno.Conn>,
+    agentCredential: Uint8Array = new Uint8Array(32),
+  ) {
     this.#dial = dial;
+    this.#agentCredential = agentCredential;
   }
 
-  openBridge(request: PrivilegedBridgeRequest): Promise<Deno.Conn> {
-    this.requests.push({ ...request });
-    return this.#dial(request);
+  reserveBridge(
+    request: PrivilegedBridgeRequest,
+  ): Promise<BridgeReservation<Deno.Conn>> {
+    this.reservations.push({ ...request });
+    const dial = this.#dial;
+    const requests = this.requests;
+    return Promise.resolve({
+      agentCredential: this.#agentCredential.slice(),
+      connect: (_signal?: AbortSignal): Promise<Deno.Conn> => {
+        requests.push({ ...request });
+        return dial(request);
+      },
+      close: (): Promise<void> => Promise.resolve(),
+    });
   }
 }
 
@@ -309,8 +334,9 @@ export async function startFakeAgent(): Promise<FakeAgent> {
     socket,
     credential,
     bridgeFactory: () =>
-      new RecordingBridgeFactory(() =>
-        Deno.connect({ transport: "unix", path: socket })
+      new RecordingBridgeFactory(
+        () => Deno.connect({ transport: "unix", path: socket }),
+        credential,
       ),
     async [Symbol.asyncDispose]() {
       try {
@@ -331,7 +357,7 @@ export async function startFakeAgent(): Promise<FakeAgent> {
 // ---------------------------------------------------------------------------
 
 export interface TunnelCoreOptions {
-  readonly bridgeFactory: PrivilegedBridgeFactory<Deno.Conn>;
+  readonly bridgeFactory: PrivilegedBridgeReserver<Deno.Conn>;
   readonly clock?: Clock;
   readonly tickets?: SingleUseTicketStore;
   readonly tunnelDialBudgetMs?: number;

@@ -380,6 +380,45 @@ Deno.test("openBridge issues a validated one-shot grant, no dialing", async () =
   });
 });
 
+Deno.test("openBridge returns the launch-scoped agentCredential the guest baked", async () => {
+  await withDir(async (dir) => {
+    // A planner that bakes a KNOWN per-launch credential (the studiobox.token
+    // bytes) — the guest expects exactly these, so openBridge must return them
+    // (not a fresh random) for the client to authenticate to studioboxd.
+    const baked = new Uint8Array(32).fill(0xa7);
+    const planner: SupervisorLaunchPlanner = {
+      resolve: async (request) => ({
+        ...(await PLANNER.resolve(request)),
+        agentCredential: baked.slice(),
+      }),
+    };
+    const harness = makeHarness(dir, { planner });
+    await harness.core.launch(launchRequest("sbx-cred", "exec-cred"));
+
+    const first = await harness.core.openBridge(
+      bridgeRequest("sbx-cred", "exec-cred", Date.now() + 10_000),
+    );
+    assertEquals(first.agentCredential, baked, "grant returns the baked token");
+    // Launch-scoped + stable: a second bridge for the same execution returns the
+    // SAME credential (so hostd's eager reserve and the client's dial agree).
+    const second = await harness.core.openBridge(
+      bridgeRequest("sbx-cred", "exec-cred", Date.now() + 10_000),
+    );
+    assertEquals(
+      second.agentCredential,
+      baked,
+      "credential is stable per launch",
+    );
+
+    // On terminate the credential is forgotten with the execution.
+    await harness.core.kill("exec-cred");
+    assertEquals(
+      (await harness.core.status("exec-cred")).state,
+      "exited",
+    );
+  });
+});
+
 Deno.test("kill escalates via the adapter and reclaims the journal", async () => {
   await withDir(async (dir) => {
     const harness = makeHarness(dir);

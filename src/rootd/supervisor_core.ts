@@ -85,6 +85,16 @@ export interface SupervisorLaunchPlan {
    * across a supervisor crash.
    */
   readonly artifact?: ArtifactReference;
+  /**
+   * The per-launch guest-agent credential (the `studiobox.token` bytes the boot
+   * recipe bakes onto the kernel cmdline; PLAN.md §M8). studioboxd expects
+   * exactly these bytes at `AgentBootstrap.authenticate`. When present it is
+   * remembered per execution and returned by every {@linkcode SupervisorApi.openBridge}
+   * grant so the client can present it to the guest agent. Omitted for fake
+   * launches (no baked token): {@linkcode SupervisorCore.openBridge} then falls
+   * back to a fresh random credential (host-safe supervisor-core tests).
+   */
+  readonly agentCredential?: Uint8Array;
 }
 
 /** Resolves logical artifact/allocation ids to a concrete launch plan. */
@@ -163,6 +173,12 @@ export class SupervisorCore implements SupervisorApi {
   readonly #machines = new Map<string, FirecrackerMachine>();
   /** Guest vsock port per live execution, when the plan configured one. */
   readonly #agentPorts = new Map<string, number>();
+  /**
+   * Per-launch guest-agent credential per live execution (the baked
+   * `studiobox.token` bytes), when the plan minted one. openBridge returns it so
+   * the tunnel client can authenticate to studioboxd (PLAN.md §M8).
+   */
+  readonly #agentCredentials = new Map<string, Uint8Array>();
   readonly #exits = new Map<string, ObservedExit>();
   readonly #bridges = new Map<string, BridgeGrantEntry>();
   readonly #inflight = new Set<InflightOperation>();
@@ -280,6 +296,12 @@ export class SupervisorCore implements SupervisorApi {
       if (plan.agentVsockPort !== undefined) {
         this.#agentPorts.set(validated.executionId, plan.agentVsockPort);
       }
+      if (plan.agentCredential !== undefined) {
+        this.#agentCredentials.set(
+          validated.executionId,
+          plan.agentCredential.slice(),
+        );
+      }
       return {
         sandboxId: validated.sandboxId,
         executionId: validated.executionId,
@@ -369,11 +391,18 @@ export class SupervisorCore implements SupervisorApi {
     const bridgeId = `b-${crypto.randomUUID().replaceAll("-", "")}`;
     const socketPath = `${BRIDGE_SOCKET_ROOT}${bridgeId}`;
     validateBridgeSocketPath(socketPath);
+    // The guest baked the launch-scoped credential at boot; return exactly
+    // those bytes so the client can authenticate to studioboxd (PLAN.md §M8). A
+    // launch with no baked token (fake launches) falls back to a fresh random
+    // credential — the grant stays well-formed, but no real guest verifies it.
+    const agentCredential =
+      this.#agentCredentials.get(validated.executionId)?.slice() ??
+        crypto.getRandomValues(new Uint8Array(32));
     const grant = validateBridgeGrant({
       bridgeId,
       socketPath,
       bridgeCredential: crypto.getRandomValues(new Uint8Array(32)),
-      agentCredential: crypto.getRandomValues(new Uint8Array(32)),
+      agentCredential,
       expiresAtUnixMs: validated.expiresAtUnixMs,
     }, now);
     this.#purgeExpiredBridges();
@@ -581,6 +610,7 @@ export class SupervisorCore implements SupervisorApi {
     }
     this.#machines.clear();
     this.#agentPorts.clear();
+    this.#agentCredentials.clear();
     this.#exits.clear();
     this.#bridges.clear();
 
@@ -665,6 +695,7 @@ export class SupervisorCore implements SupervisorApi {
     });
     this.#machines.delete(executionId);
     this.#agentPorts.delete(executionId);
+    this.#agentCredentials.delete(executionId);
     this.#exits.delete(executionId);
     this.#revokeBridges(executionId);
   }

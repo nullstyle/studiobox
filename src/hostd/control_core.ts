@@ -46,6 +46,7 @@ import type { RootdGateway } from "./supervisor_client.ts";
 import type { SupervisorMachineUsage } from "../rootd/supervisor_core_api.ts";
 import {
   type PrivilegedBridgeFactory,
+  type PrivilegedBridgeReserver,
   TunnelAuthorizer,
 } from "./tunnel_authorizer.ts";
 import {
@@ -162,6 +163,13 @@ export interface TunnelGrant {
   readonly leaseId: string;
   /** The lease generation at issue (the ticket binding). */
   readonly leaseGeneration: number;
+  /**
+   * The launch-scoped guest-agent credential (32..512 bytes) the client presents
+   * to `AgentBootstrap.authenticate` over the spliced tunnel. Empty when no
+   * bridge reserver surfaces one (the endpoint still works for byte splicing,
+   * but the guest agent will reject an empty credential).
+   */
+  readonly agentCredential: Uint8Array;
 }
 
 /** The wire `SandboxState` mirror (upstream lifecycle). */
@@ -213,11 +221,13 @@ export interface HostControlCoreOptions {
   /** Per-sandbox overlay-disk reservation (default {@link DEFAULT_OVERLAY_DISK_BYTES}). */
   readonly overlayDiskBytes?: number;
   /**
-   * Dials the guest-agent bridge for a burned ticket (studiobox-rootd's
-   * `openBridge` splice, or a fake UDS conn in tests). When absent,
+   * Reserves the guest-agent bridge for a tunnel (studiobox-rootd's `openBridge`
+   * grant + splice, or a fake in tests). `openTunnel` reserves eagerly to
+   * surface the `agentCredential`; the reservation's `connect` (the guest dial)
+   * runs only after the ticket is burned. When absent,
    * {@linkcode HostControlCore.openTunnel} fails typed-unimplemented.
    */
-  readonly bridgeFactory?: PrivilegedBridgeFactory<Deno.Conn>;
+  readonly bridgeFactory?: PrivilegedBridgeReserver<Deno.Conn>;
   /**
    * Directory the per-tunnel UDS endpoints are bound under. A fresh temp dir
    * is created lazily when omitted; keep it short (`sun_path` ~104B).
@@ -263,7 +273,7 @@ export class HostControlCore {
   readonly #secretFactory: () => Uint8Array;
   readonly #bootNonceFactory: () => Uint8Array;
   readonly #overlayDiskBytes: number;
-  readonly #bridgeFactory: PrivilegedBridgeFactory<Deno.Conn> | undefined;
+  readonly #bridgeFactory: PrivilegedBridgeReserver<Deno.Conn> | undefined;
   readonly #tunnelDialBudgetMs: number;
   readonly #agentVsockPort: number;
   #tunnelSocketDir: string | undefined;
@@ -545,6 +555,20 @@ export class HostControlCore {
       );
     }
 
+    const bridgeRequest = {
+      sandboxId: entry.id,
+      executionId: entry.executionId,
+      guestPort: this.#agentVsockPort,
+    };
+
+    // Reserve the bridge BEFORE minting a ticket (PLAN.md §M8): rootd mints the
+    // grant — yielding the launch-scoped `agentCredential` the client must
+    // present to the guest agent — and binds its per-bridge UDS, but does NOT
+    // dial the guest. A rootd-unavailable failure here fails the whole
+    // openTunnel with nothing minted to clean up. The guest is reached only by
+    // the reservation's `connect`, which the tunnel runs post-burn.
+    const reservation = await this.#bridgeFactory.reserveBridge(bridgeRequest);
+
     // The ticket binding and the bridge request both carry the PUBLIC id: the
     // authorizer requires request.sandboxId === binding.sandboxId, and the same
     // id keys ticket revocation (#onLeaseExpire / revokeAll). rootd resolves the
@@ -555,19 +579,27 @@ export class HostControlCore {
       bootNonce: toHex(entry.bootNonce),
       leaseGeneration: lease.generation,
     };
-    const issued = await this.#tickets.issue(binding);
+    let issued;
+    try {
+      issued = await this.#tickets.issue(binding);
+    } catch (error) {
+      await reservation.close().catch(() => {});
+      throw error;
+    }
 
-    const authorizer = new TunnelAuthorizer(this.#tickets, this.#bridgeFactory);
+    // Adapt the reservation onto the PrivilegedBridgeFactory the tunnel server
+    // consumes: the authorizer burns the ticket, then `openBridge` here is the
+    // post-burn guest dial (`reservation.connect`).
+    const connectFactory: PrivilegedBridgeFactory<Deno.Conn> = {
+      openBridge: (_request, signal) => reservation.connect(signal),
+    };
+    const authorizer = new TunnelAuthorizer(this.#tickets, connectFactory);
     let server: TunnelServer;
     try {
       server = TunnelServer.open({
         authorizer,
         binding,
-        bridgeRequest: {
-          sandboxId: entry.id,
-          executionId: entry.executionId,
-          guestPort: this.#agentVsockPort,
-        },
+        bridgeRequest,
         listen: {
           transport: "unix",
           path: await this.#allocTunnelSocketPath(),
@@ -576,11 +608,17 @@ export class HostControlCore {
       });
     } catch (error) {
       // Could not stand up the endpoint: revoke the just-issued ticket so it
-      // cannot be spent against a bridge with no server in front of it.
+      // cannot be spent against a bridge with no server in front of it, and free
+      // the reservation.
       this.#tickets.revokeSandbox(entry.id);
+      await reservation.close().catch(() => {});
       throw error;
     }
     this.#trackTunnel(entry.id, server);
+    // Free the reservation when the endpoint is freed (splice ended, ttl lapsed,
+    // or closed) — best effort, since a claimed reservation's conn owns its own
+    // teardown and an un-dialed one self-frees on rootd's dial-budget TTL.
+    void server.finished.then(() => void reservation.close().catch(() => {}));
 
     return {
       endpoint: server.endpoint,
@@ -591,6 +629,7 @@ export class HostControlCore {
       bootNonce: entry.bootNonce.slice(),
       leaseId: entry.currentLeaseId,
       leaseGeneration: lease.generation,
+      agentCredential: reservation.agentCredential.slice(),
     };
   }
 

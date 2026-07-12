@@ -440,6 +440,10 @@ function createSandboxCapability(
         const grant = await core.openTunnel(sandboxId);
         // The loopback endpoint is not a wire field: the client dials the
         // statically forwarded tunnel port (the endpoint travels the E2E path).
+        // `agentCredential` is the launch-scoped guest token the client presents
+        // to `AgentBootstrap.authenticate` (PLAN.md §M8): rootd minted it at
+        // launch, baked it into the guest, and surfaced it via the openBridge
+        // grant that `openTunnel` reserved.
         return {
           which: "grant",
           grant: {
@@ -450,7 +454,7 @@ function createSandboxCapability(
             leaseId: grant.leaseId,
             leaseGeneration: BigInt(grant.leaseGeneration),
             tunnelNonce: new Uint8Array(0),
-            agentCredential: new Uint8Array(0),
+            agentCredential: grant.agentCredential.slice(),
           },
         };
       } catch (error) {

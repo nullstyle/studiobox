@@ -23,7 +23,7 @@
  *     with no bridge claimed and no global unhandled rejection.
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { type RpcStub, RpcWireClient, TcpTransport } from "@nullstyle/capnp";
 
 import {
@@ -154,6 +154,18 @@ async function writeAll(conn: Deno.Conn, bytes: Uint8Array): Promise<void> {
   }
 }
 
+/** Whether a filesystem path exists (the tunnel UDS is unlinked on free). */
+async function pathExists(path: string): Promise<boolean> {
+  if (path.length === 0) return false;
+  try {
+    await Deno.lstat(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return false;
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Agent-plane session over an already-connected two-hop tunnel conn
 // ---------------------------------------------------------------------------
@@ -220,13 +232,34 @@ Deno.test("tunnel(M8): openTunnel -> wire openBridge -> BridgeServer -> two-hop 
     const grant = await core.openTunnel(id);
     assertEquals(grant.sandboxId, id);
 
+    // openTunnel reserved the bridge eagerly and surfaced the launch-scoped
+    // guest-agent credential (PLAN.md §M8): the grant carries EXACTLY the bytes
+    // the guest baked, so the client authenticates with grant.agentCredential —
+    // never with a value it learned out of band.
+    assertEquals(
+      grant.agentCredential.byteLength,
+      32,
+      "the grant carries the guest-agent credential",
+    );
+    assertEquals(
+      grant.agentCredential,
+      agent.credential,
+      "the grant credential matches the guest's baked token",
+    );
+    // Reserving happened at openTunnel — before the client dials — so the wire
+    // openBridge already fired once.
+    assertEquals(gateway.openedBridges.length, 1, "one wire openBridge");
+
     const conn = await dialTunnel(grant.endpoint, grant.ticket, {
       timeoutMs: DIAL_BUDGET_MS,
     });
-    // Exactly one bridge was opened over the wire and its splice claimed.
-    assertEquals(gateway.openedBridges.length, 1, "one wire openBridge");
+    // Still exactly one bridge: the reservation's connect reused that grant.
+    assertEquals(gateway.openedBridges.length, 1, "no second wire openBridge");
 
-    await using session = await agentSessionOverTunnel(conn, agent.credential);
+    await using session = await agentSessionOverTunnel(
+      conn,
+      grant.agentCredential,
+    );
     const sandbox = session.agent;
 
     // ping echoes the full UInt64 range through the two-hop splice.
@@ -249,6 +282,151 @@ Deno.test("tunnel(M8): openTunnel -> wire openBridge -> BridgeServer -> two-hop 
     assertEquals(got.value, "assembled");
     await env.close();
     await sandbox.close();
+  } finally {
+    await core.closeAllTunnels();
+    await core.drain();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 1b) The guest agent verifies grant.agentCredential: a WRONG or ABSENT
+//     credential is rejected by studioboxd; the ticket is single-use; teardown
+//     leaves nothing behind.
+// ---------------------------------------------------------------------------
+
+/**
+ * Negotiate then authenticate over an already-connected tunnel conn with the
+ * given credential, WITHOUT asserting success — returns the `authenticate`
+ * result arm so a test can assert the guest rejected a wrong/absent credential.
+ * Always closes the wire client + transport.
+ */
+async function attemptAgentAuth(
+  conn: Deno.Conn,
+  credential: Uint8Array,
+): Promise<"accepted" | "error"> {
+  let wireClient: RpcWireClient | null = null;
+  const transport = new TcpTransport(conn, {
+    closeTimeoutMs: CALL_TIMEOUT_MS,
+    onClose: () => void wireClient?.close().catch(() => {}),
+    onError: () => {},
+  });
+  wireClient = new RpcWireClient(transport, {
+    defaultTimeoutMs: CALL_TIMEOUT_MS,
+  });
+  const client = wireClient;
+  try {
+    const bootstrap = await wire.AgentBootstrap.bootstrapClient(client, {
+      timeoutMs: CALL_TIMEOUT_MS,
+    });
+    const handshake = await bootstrap.negotiate({
+      identity: identityToWire(m3AgentContractIdentity("studiobox/m8-auth")),
+      limits: limitsToWire(DEFAULT_TRANSPORT_LIMITS),
+      requiredFeatureBits: AGENT_PLANE_FEATURES,
+    }, { timeoutMs: CALL_TIMEOUT_MS });
+    assertEquals(handshake.which, "accepted", handshake.error?.message);
+    const auth = await bootstrap.authenticate({
+      credential,
+      sandboxId: "sbx-m8-auth",
+      bootNonce: new Uint8Array(32),
+    }, { timeoutMs: CALL_TIMEOUT_MS });
+    return auth.which === "accepted" ? "accepted" : "error";
+  } finally {
+    await client.close().catch(() => {});
+    await transport.close().catch(() => {});
+  }
+}
+
+Deno.test("tunnel(M8): studioboxd rejects a wrong/absent agentCredential over the assembled tunnel", async () => {
+  await using agent = await startFakeAgent();
+  await using gateway = await BridgeWireGateway.start(agent);
+  const core = makeCore(gateway);
+  // One sandbox, three fresh tunnels (each openTunnel mints its own ticket +
+  // endpoint + bridge reservation) — the guest agent credential is launch-scoped
+  // and identical across all three.
+  const id = await createSandbox(core);
+  const freshTunnelConn = async (): Promise<
+    { conn: Deno.Conn; credential: Uint8Array }
+  > => {
+    const grant = await core.openTunnel(id);
+    const conn = await dialTunnel(grant.endpoint, grant.ticket, {
+      timeoutMs: DIAL_BUDGET_MS,
+    });
+    return { conn, credential: grant.agentCredential };
+  };
+  try {
+    // A WRONG credential: the two-hop splice reaches the guest, but studioboxd's
+    // constant-time authenticate refuses it.
+    {
+      const { conn, credential } = await freshTunnelConn();
+      const wrong = new Uint8Array(32);
+      wrong.set(credential);
+      wrong[0] ^= 0xff; // flip a byte: a valid-length but wrong credential
+      assertEquals(
+        await attemptAgentAuth(conn, wrong),
+        "error",
+        "the guest rejects a wrong agentCredential",
+      );
+    }
+    // An ABSENT (all-zero) credential is likewise refused.
+    {
+      const { conn } = await freshTunnelConn();
+      assertEquals(
+        await attemptAgentAuth(conn, new Uint8Array(32)),
+        "error",
+        "the guest rejects an absent agentCredential",
+      );
+    }
+    // The RIGHT credential still authenticates — the endpoint was not poisoned.
+    {
+      const { conn, credential } = await freshTunnelConn();
+      assertEquals(
+        await attemptAgentAuth(conn, credential),
+        "accepted",
+        "the guest accepts the grant's agentCredential",
+      );
+    }
+  } finally {
+    await core.closeAllTunnels();
+    await core.drain();
+  }
+});
+
+Deno.test("tunnel(M8): the tunnel ticket is single-use and the endpoint frees on teardown", async () => {
+  await using agent = await startFakeAgent();
+  await using gateway = await BridgeWireGateway.start(agent);
+  const core = makeCore(gateway);
+  try {
+    const id = await createSandbox(core);
+    const grant = await core.openTunnel(id);
+    const endpointPath = grant.endpoint.transport === "unix"
+      ? grant.endpoint.path
+      : "";
+
+    // First dial burns the ticket and claims the tunnel.
+    const conn = await dialTunnel(grant.endpoint, grant.ticket, {
+      timeoutMs: DIAL_BUDGET_MS,
+    });
+    assertEquals(
+      await attemptAgentAuth(conn, grant.agentCredential),
+      "accepted",
+    );
+
+    // A REPLAY of the same ticket is rejected (single-use). The claimed tunnel's
+    // endpoint frees after the first splice, so the replay may hit either a
+    // burned ticket (dial error) or a freed endpoint (connection refused) —
+    // either way it never yields a second agent session.
+    await assertRejects(
+      () => dialTunnel(grant.endpoint, grant.ticket, { timeoutMs: 2_000 }),
+    );
+
+    // Tearing the core down frees every endpoint + unlinks its socket file.
+    await core.closeAllTunnels();
+    await core.drain();
+    assertEquals(
+      await pathExists(endpointPath),
+      false,
+      "the tunnel endpoint socket is unlinked on teardown",
+    );
   } finally {
     await core.closeAllTunnels();
     await core.drain();

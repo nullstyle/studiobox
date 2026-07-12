@@ -1,19 +1,22 @@
 /**
  * The hostd -> rootd bridge factory over the supervisor wire (PLAN.md §M8).
  *
- * This is the real two-daemon half of the ticketed tunnel. When hostd's
- * {@link TunnelServer} has burned the single-use ticket it asks its
- * {@linkcode PrivilegedBridgeFactory} to open the guest bridge; this
- * implementation:
+ * This is the real two-daemon half of the ticketed tunnel, in TWO phases so the
+ * launch-scoped `agentCredential` can reach the client at `openTunnel` time
+ * (PLAN.md §M8) while the guest is still never dialed before the ticket burns:
  *
- *   1. asks rootd (over the `schema/supervisor.capnp` plane, via the
- *      {@linkcode RootdGateway}) to `openBridge` — rootd mints a one-shot grant
- *      naming a per-bridge loopback UDS + a 32-byte `bridgeCredential`, and
- *      stands up the {@link BridgeServer} splice behind it;
- *   2. dials that UDS and presents the `bridgeCredential` in the fixed
- *      `SBXBRG1` preface (`bridge_preface`);
- *   3. on `SBXBRA1(Ok)` returns the raw duplex — now a verbatim byte pipe to the
- *      guest agent's vsock, which the outer {@link TunnelServer} splices onto the
+ *   1. RESERVE (at `openTunnel`, before any ticket exists): ask rootd (over the
+ *      `schema/supervisor.capnp` plane, via the {@linkcode RootdGateway}) to
+ *      `openBridge` — rootd mints a one-shot grant naming a per-bridge loopback
+ *      UDS + a 32-byte `bridgeCredential` PLUS the launch-scoped `agentCredential`,
+ *      and stands up the {@link BridgeServer} splice behind it (which binds the
+ *      UDS but does NOT dial the guest yet). The reservation surfaces the
+ *      `agentCredential` so `HostSandbox.openTunnel` returns it to the client.
+ *   2. CONNECT (after the {@link TunnelServer} has burned the single-use ticket):
+ *      dial that UDS and present the `bridgeCredential` in the fixed `SBXBRG1`
+ *      preface (`bridge_preface`); rootd verifies it and only THEN dials the
+ *      guest vsock. On `SBXBRA1(Ok)` the raw duplex is a verbatim byte pipe to
+ *      the guest agent, which the outer {@link TunnelServer} splices onto the
  *      external tunnel connection.
  *
  * So the assembled tunnel is two spliced hops:
@@ -32,8 +35,9 @@
  */
 
 import type {
-  PrivilegedBridgeFactory,
+  BridgeReservation,
   PrivilegedBridgeRequest,
+  PrivilegedBridgeReserver,
 } from "./tunnel_authorizer.ts";
 import type { RootdGateway } from "./supervisor_client.ts";
 import type { SupervisorBridgeRequest } from "../rootd/supervisor_core_api.ts";
@@ -57,11 +61,12 @@ export interface WireBridgeFactoryOptions {
 }
 
 /**
- * Adapts a {@linkcode RootdGateway} into the {@linkcode PrivilegedBridgeFactory}
- * the tunnel path consumes. Every open is a fresh rootd `openBridge` grant + a
- * fresh credential-authenticated UDS dial; nothing is reused across tunnels.
+ * Adapts a {@linkcode RootdGateway} into the {@linkcode PrivilegedBridgeReserver}
+ * the tunnel path consumes. Every reservation is a fresh rootd `openBridge`
+ * grant; its `connect` is a fresh credential-authenticated UDS dial. Nothing is
+ * reused across tunnels.
  */
-export class WireBridgeFactory implements PrivilegedBridgeFactory<Deno.Conn> {
+export class WireBridgeFactory implements PrivilegedBridgeReserver<Deno.Conn> {
   readonly #gateway: RootdGateway;
   readonly #openTimeoutMs: number;
   readonly #now: () => number;
@@ -73,48 +78,37 @@ export class WireBridgeFactory implements PrivilegedBridgeFactory<Deno.Conn> {
     this.#now = options.now ?? Date.now;
   }
 
-  async openBridge(
+  /**
+   * Reserve the bridge: ask rootd to `openBridge` — minting the grant (the
+   * launch-scoped `agentCredential`, the per-bridge UDS + `bridgeCredential`)
+   * and standing up rootd's per-bridge splice server — WITHOUT dialing the
+   * guest. The returned reservation's {@linkcode BridgeReservation.connect}
+   * performs the credential-authenticated UDS dial that reaches the guest, and
+   * the tunnel calls it only after burning the single-use ticket.
+   */
+  async reserveBridge(
     request: PrivilegedBridgeRequest,
     signal?: AbortSignal,
-  ): Promise<Deno.Conn> {
+  ): Promise<BridgeReservation<Deno.Conn>> {
     signal?.throwIfAborted();
-    const grant = await this.#gateway.openBridge(
-      this.#wireRequest(request),
-    );
-
-    let conn: Deno.Conn;
-    try {
-      conn = await Deno.connect({ transport: "unix", path: grant.socketPath });
-    } catch (error) {
-      throw new SupervisorError(
-        "SBX_SUP_UNAVAILABLE",
-        `bridge socket ${grant.socketPath} is unreachable: ${errorText(error)}`,
-        error,
-      );
-    }
-
-    try {
-      await writeAll(conn, encodeBridgeRequest(grant.bridgeCredential));
-      const response = await readBridgeResponse(asPrefaceReader(conn), {
-        timeoutMs: this.#openTimeoutMs,
-        ...(signal === undefined ? {} : { signal }),
-      });
-      if (response.status !== BridgeStatus.Ok) {
-        throw new SupervisorError(
-          "SBX_SUP_UNAVAILABLE",
-          `rootd bridge refused the credential (status ${response.status})`,
-        );
-      }
-      return conn;
-    } catch (error) {
-      safeClose(conn);
-      if (error instanceof SupervisorError) throw error;
-      throw new SupervisorError(
-        "SBX_SUP_UNAVAILABLE",
-        `bridge handshake failed: ${errorText(error)}`,
-        error,
-      );
-    }
+    const grant = await this.#gateway.openBridge(this.#wireRequest(request));
+    const socketPath = grant.socketPath;
+    const bridgeCredential = grant.bridgeCredential.slice();
+    const openTimeoutMs = this.#openTimeoutMs;
+    return {
+      agentCredential: grant.agentCredential.slice(),
+      connect: (connectSignal?: AbortSignal): Promise<Deno.Conn> =>
+        connectGrantedBridge(
+          socketPath,
+          bridgeCredential,
+          openTimeoutMs,
+          connectSignal,
+        ),
+      // rootd's per-bridge server self-frees on its dial-budget TTL when no
+      // credential preface arrives, so an un-dialed reservation needs no RPC to
+      // reclaim; close() is a best-effort marker (there is no un-openBridge).
+      close: (): Promise<void> => Promise.resolve(),
+    };
   }
 
   /**
@@ -137,6 +131,55 @@ export class WireBridgeFactory implements PrivilegedBridgeFactory<Deno.Conn> {
       tunnelNonce: crypto.getRandomValues(new Uint8Array(32)),
       expiresAtUnixMs: this.#now() + BRIDGE_REQUEST_TTL_MS,
     };
+  }
+}
+
+/**
+ * Dial a reserved bridge's UDS and present the `bridgeCredential` in the fixed
+ * `SBXBRG1` preface; on `SBXBRA1(Ok)` return the raw duplex (now a verbatim byte
+ * pipe to the guest agent's vsock). Any failure closes the conn before throwing,
+ * tagged `SBX_SUP_UNAVAILABLE` so the outer tunnel server maps it onto the
+ * `SupervisorUnavailable` ACK status.
+ */
+async function connectGrantedBridge(
+  socketPath: string,
+  bridgeCredential: Uint8Array,
+  openTimeoutMs: number,
+  signal?: AbortSignal,
+): Promise<Deno.Conn> {
+  signal?.throwIfAborted();
+  let conn: Deno.Conn;
+  try {
+    conn = await Deno.connect({ transport: "unix", path: socketPath });
+  } catch (error) {
+    throw new SupervisorError(
+      "SBX_SUP_UNAVAILABLE",
+      `bridge socket ${socketPath} is unreachable: ${errorText(error)}`,
+      error,
+    );
+  }
+
+  try {
+    await writeAll(conn, encodeBridgeRequest(bridgeCredential));
+    const response = await readBridgeResponse(asPrefaceReader(conn), {
+      timeoutMs: openTimeoutMs,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (response.status !== BridgeStatus.Ok) {
+      throw new SupervisorError(
+        "SBX_SUP_UNAVAILABLE",
+        `rootd bridge refused the credential (status ${response.status})`,
+      );
+    }
+    return conn;
+  } catch (error) {
+    safeClose(conn);
+    if (error instanceof SupervisorError) throw error;
+    throw new SupervisorError(
+      "SBX_SUP_UNAVAILABLE",
+      `bridge handshake failed: ${errorText(error)}`,
+      error,
+    );
   }
 }
 
