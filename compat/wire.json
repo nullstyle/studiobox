@@ -17,12 +17,12 @@
   "capnpCompiler": "Cap'n Proto version 1.4.0",
   "codegen": {
     "package": "@nullstyle/capnp",
-    "version": "0.3.0",
-    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.3",
+    "version": "0.4.0",
+    "releaseSpecifier": "jsr:@nullstyle/capnp@^0.4",
     "toolchain": {
       "checkout": "../capnp-deno",
-      "commit": "0d053a20b1d42da218464a018e34f8274d959f6f",
-      "commitNote": "the 0.3.0 release commit; capnpc-deno is not shipped in the JSR package, so the sibling checkout is the codegen toolchain of record",
+      "commit": "84fb3f09ebe14bf0a4b8b836cd1472db3e2c42b0",
+      "commitNote": "the 0.4.0 release commit (runtime-only vs 0.3.0: capability-retention/refcount fix, emitter unchanged so bindings are byte-identical); capnpc-deno is not shipped in the JSR package, so the sibling checkout is the codegen toolchain of record",
       "invocation": "deno task wire:generate"
     },
     "committedSchemas": [

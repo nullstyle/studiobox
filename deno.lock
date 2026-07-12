@@ -2,7 +2,7 @@
   "version": "5",
   "specifiers": {
     "jsr:@deno/sandbox@0.13.2": "0.13.2",
-    "jsr:@nullstyle/capnp@0.3": "0.3.0",
+    "jsr:@nullstyle/capnp@0.4": "0.4.0",
     "jsr:@nullstyle/firecracker@*": "0.2.0",
     "jsr:@nullstyle/firecracker@0.2": "0.2.0",
     "jsr:@std/assert@1": "1.0.19",
@@ -27,8 +27,8 @@
         "npm:zod"
       ]
     },
-    "@nullstyle/capnp@0.3.0": {
-      "integrity": "d05bd06ec8586d47e967c052fe07f7b0e62e5fa5df1428b9b4357a139d4c1a2f"
+    "@nullstyle/capnp@0.4.0": {
+      "integrity": "4086df041ac13371669c24634e2ed5691b3c96292af206305b713857dead5c44"
     },
     "@nullstyle/firecracker@0.2.0": {
       "integrity": "df49c8664e391a87635eca4da6dac0ea27a86d040c104708a3791e28a6cc7a69",
@@ -84,7 +84,7 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@nullstyle/capnp@0.3",
+      "jsr:@nullstyle/capnp@0.4",
       "jsr:@nullstyle/firecracker@0.2",
       "jsr:@std/assert@1",
       "jsr:@std/fs@^1.0.19",

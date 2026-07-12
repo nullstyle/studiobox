@@ -8,9 +8,9 @@
     "./testing": "./testing/mod.ts"
   },
   "imports": {
-    "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.3",
-    "@nullstyle/capnp/encoding": "jsr:@nullstyle/capnp@^0.3/encoding",
-    "@nullstyle/capnp/rpc": "jsr:@nullstyle/capnp@^0.3/rpc",
+    "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.4",
+    "@nullstyle/capnp/encoding": "jsr:@nullstyle/capnp@^0.4/encoding",
+    "@nullstyle/capnp/rpc": "jsr:@nullstyle/capnp@^0.4/rpc",
     "@nullstyle/firecracker": "jsr:@nullstyle/firecracker@^0.2",
     "@nullstyle/firecracker/client": "jsr:@nullstyle/firecracker@^0.2/client",
     "@nullstyle/firecracker/jailer": "jsr:@nullstyle/firecracker@^0.2/jailer",
