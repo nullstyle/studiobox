@@ -22,6 +22,7 @@ export {
   type RemoveOptions,
   type SandboxFs,
   SeekMode,
+  type TempOptions,
   type WalkEntry,
   type WalkOptions,
   type WriteFileOptions,

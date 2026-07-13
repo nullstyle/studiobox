@@ -1009,6 +1009,7 @@ export class FakeSandboxHost implements SandboxProvider, AsyncDisposable {
   readonly #records = new Map<string, SandboxRecord>();
   #restore: (() => void) | undefined;
 
+  /** Construct a fake host. Use {@linkcode FakeSandboxHost.install} to also install it. */
   constructor(options: FakeSandboxHostOptions = {}) {
     this.#options = options;
   }
@@ -1035,6 +1036,7 @@ export class FakeSandboxHost implements SandboxProvider, AsyncDisposable {
     this.#restore = undefined;
   }
 
+  /** Create an in-process fake sandbox rooted at a fresh temp dir; Tier-C options are rejected. */
   async create(options: SandboxOptions = {}): Promise<Sandbox> {
     for (const key of TIER_C_CREATE_OPTIONS) {
       if (options[key] !== undefined) {
@@ -1107,6 +1109,7 @@ export class FakeSandboxHost implements SandboxProvider, AsyncDisposable {
     return sandbox;
   }
 
+  /** Connect to a still-live fake sandbox by id; rejects if it is gone. */
   connect(id: string, _options?: ConnectOptions): Promise<Sandbox> {
     const sandbox = this.#live.get(id);
     if (sandbox === undefined) {
@@ -1121,6 +1124,7 @@ export class FakeSandboxHost implements SandboxProvider, AsyncDisposable {
     return Promise.resolve(sandbox);
   }
 
+  /** List created sandboxes (running + stopped), filtered by label selectors. */
   list(options?: SandboxesListOptions): Promise<SandboxMetadata[]> {
     const wanted = Object.entries(options?.labels ?? {});
     const result: SandboxMetadata[] = [];
@@ -1150,6 +1154,7 @@ export class FakeSandboxHost implements SandboxProvider, AsyncDisposable {
     this.uninstall();
   }
 
+  /** Dispose === {@linkcode FakeSandboxHost.close}: close every live sandbox + uninstall. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
   }

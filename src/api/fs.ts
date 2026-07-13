@@ -287,8 +287,12 @@ export interface SandboxFs {
   download(sandboxPath: string | URL, localPath: string | URL): Promise<void>;
 }
 
-interface TempOptions {
+/** Options for {@linkcode SandboxFs.makeTempDir} / {@linkcode SandboxFs.makeTempFile}. */
+export interface TempOptions {
+  /** Parent directory to create the temp entry in (default: the sandbox's temp dir). */
   dir?: string;
+  /** Prefix for the generated name. */
   prefix?: string;
+  /** Suffix for the generated name. */
   suffix?: string;
 }
