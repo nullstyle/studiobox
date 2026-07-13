@@ -94,6 +94,17 @@ Deno.test("supervisor launch validates the optional network policy bounds", () =
     () => validateLaunchRequest({ ...base, vcpus: 1_000 }),
     WireValidationError,
   );
+  // Firecracker requires 1 or an even count, capped at 32.
+  assertEquals(validateLaunchRequest({ ...base, vcpus: 1 }).vcpus, 1);
+  assertEquals(validateLaunchRequest({ ...base, vcpus: 32 }).vcpus, 32);
+  assertThrows(
+    () => validateLaunchRequest({ ...base, vcpus: 3 }), // odd > 1
+    WireValidationError,
+  );
+  assertThrows(
+    () => validateLaunchRequest({ ...base, vcpus: 34 }), // over the 32 cap
+    WireValidationError,
+  );
   assertThrows(
     () =>
       validateLaunchRequest({

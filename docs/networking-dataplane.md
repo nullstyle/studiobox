@@ -726,11 +726,20 @@ launch→assert→reclaim:
   address → INPUT hook, so it bypasses both the `studiobox_isolation`
   forward-drop (§3) and the per-sandbox forward filter. That is intentional and
   safe: dnsmasq is bound to that IP/interface only, and its **upstream** queries
-  originate from the host (unfiltered by the guest's table). A hardening
-  follow-up (not M10-blocking) is an INPUT-hook rule permitting only
-  `<hostIp>:53` and dropping other guest→host traffic, to close host
-  reachability under unrestricted mode
-  ([`docs/networking.md:245-249`](./networking.md) already flags this).
+  originate from the host (unfiltered by the guest's table).
+- **Guest→host INPUT guard is ENFORCED (both modes).** Because all per-sandbox
+  filtering is FORWARD-hook only, guest→host traffic (a guest to its gateway IP,
+  to a `0.0.0.0` host listener, or to any host LAN IP) would otherwise be
+  unfiltered — letting a RESTRICTED guest reach host services not in its
+  `allowNet`. The shared `studiobox_hostguard` INPUT table
+  (`NetworkController.ensureGlobal`,
+  [`dataplane.ts`](../src/rootd/network/dataplane.ts)) closes this for BOTH
+  restricted and unrestricted sandboxes: for `iifname "sbxtap*"` it ACCEPTs only
+  udp/tcp `:53` (DNS to the per-sandbox dnsmasq on the gateway) and ICMP/ICMPv6
+  echo, and DROPs everything else. It never blocks forwarded egress (that stays
+  the per-sandbox forward filter's job) and never touches exposeHttp's
+  output/postrouting DNAT/SNAT (which is not `sbxtap*`-input). This supersedes
+  the earlier "deferred INPUT-hardening" note.
 - **NAT hairpinning.** The single `studiobox_nat` masquerades `10.201.0.0/16`
   only on `oifname != "sbxtap*"` (§3), so guest→guest is never masqueraded (and
   is anyway dropped by isolation); exposeHttp's own SNAT-to-`hostIp` handles the
@@ -807,5 +816,7 @@ journaling but shares `service.ts`/`control_core.ts`/`supervisor_core.ts` with
    overlay-init `ip addr add` fallback (already scoped in §4/W5).
 7. **netns** — **host namespace, no netns** (`SandboxNetworkHandle.netns` left
    undefined); `resources.netnsPath` stays unused for M10. (§3/§7)
-8. **Host-reachability hardening** (INPUT-hook allow-only-`:53`) — **deferred**
-   past M10 as a follow-up, not blocking. (§12)
+8. **Host-reachability hardening** (INPUT-hook allow-only-`:53`) — **ENFORCED**
+   for both restricted and unrestricted sandboxes via the shared
+   `studiobox_hostguard` INPUT table (`NetworkController.ensureGlobal`); no
+   longer deferred. (§12)

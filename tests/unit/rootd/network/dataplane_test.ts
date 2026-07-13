@@ -57,12 +57,29 @@ const ISOLATION_SCRIPT = [
   "",
 ].join("\n");
 
-Deno.test("ensureGlobal enables forwarding then installs the two shared nft tables", async () => {
+const HOSTGUARD_SCRIPT = [
+  "add table inet studiobox_hostguard",
+  "delete table inet studiobox_hostguard",
+  "table inet studiobox_hostguard {",
+  "\tchain input {",
+  "\t\ttype filter hook input priority -10; policy accept;",
+  '\t\tiifname "sbxtap*" ct state established,related accept',
+  '\t\tiifname "sbxtap*" ip daddr 10.201.0.0/16 udp dport 53 accept',
+  '\t\tiifname "sbxtap*" ip daddr 10.201.0.0/16 tcp dport 53 accept',
+  '\t\tiifname "sbxtap*" icmp type echo-request accept',
+  '\t\tiifname "sbxtap*" icmpv6 type echo-request accept',
+  '\t\tiifname "sbxtap*" drop',
+  "\t}",
+  "}",
+  "",
+].join("\n");
+
+Deno.test("ensureGlobal enables forwarding then installs the three shared nft tables", async () => {
   const runner = new FakeRunner();
   const controller = new NetworkController({ runner });
   await controller.ensureGlobal();
 
-  assertEquals(runner.calls.length, 3);
+  assertEquals(runner.calls.length, 4);
   // 1. Enable IPv4 forwarding.
   assertEquals(runner.calls[0], {
     bin: "sysctl",
@@ -77,6 +94,11 @@ Deno.test("ensureGlobal enables forwarding then installs the two shared nft tabl
   assertEquals(runner.calls[2].bin, "nft");
   assertEquals(runner.calls[2].args, ["-f", "-"]);
   assertEquals(runner.calls[2].stdin, ISOLATION_SCRIPT);
+  // 4. Shared guest→host INPUT guard table (byte-exact): only DNS + ICMP echo
+  //    from `sbxtap*` are accepted, everything else guest→host is dropped.
+  assertEquals(runner.calls[3].bin, "nft");
+  assertEquals(runner.calls[3].args, ["-f", "-"]);
+  assertEquals(runner.calls[3].stdin, HOSTGUARD_SCRIPT);
 });
 
 Deno.test("ensureGlobal honours an overridden pool CIDR in both shared scripts", async () => {
@@ -212,5 +234,28 @@ Deno.test("teardown surfaces a genuinely unexpected failure", async () => {
   await assertRejects(
     () => controller.teardown(subnetForSlot(0)),
     NetworkControllerError,
+  );
+});
+
+Deno.test("reapTable deletes a table by exact family + name via an idempotent add;delete", async () => {
+  const runner = new FakeRunner();
+  const controller = new NetworkController({ runner });
+  await controller.reapTable("inet", "sbx_eg_orphan");
+  assertEquals(runner.calls, [
+    {
+      bin: "nft",
+      args: ["-f", "-"],
+      stdin: "add table inet sbx_eg_orphan\ndelete table inet sbx_eg_orphan\n",
+    },
+  ]);
+
+  const ipRunner = new FakeRunner();
+  await new NetworkController({ runner: ipRunner }).reapTable(
+    "ip",
+    "sbx_pf_orphan",
+  );
+  assertEquals(
+    ipRunner.calls[0].stdin,
+    "add table ip sbx_pf_orphan\ndelete table ip sbx_pf_orphan\n",
   );
 });

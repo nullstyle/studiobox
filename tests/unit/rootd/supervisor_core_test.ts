@@ -29,8 +29,39 @@ import {
 import type {
   ArtifactReference,
   SandboxRecord,
+  SandboxResources,
 } from "../../../src/state/model.ts";
 import { JsonFileSandboxStore } from "../../../src/state/store.ts";
+import {
+  BitmapSubnetAllocator,
+  DnsmasqController,
+  EgressController,
+  NetworkController,
+  NetworkReclaimHook,
+} from "../../../src/rootd/network/mod.ts";
+import type {
+  CommandRunner,
+  EgressCommandResult,
+} from "../../../src/rootd/network/apply.ts";
+
+interface RecordedCommand {
+  readonly bin: string;
+  readonly args: readonly string[];
+  readonly stdin: string;
+}
+
+/** Records every host command and always succeeds (the reclaim path never fails). */
+class FakeRunner implements CommandRunner {
+  readonly calls: RecordedCommand[] = [];
+  run(
+    bin: string,
+    args: readonly string[],
+    stdin: string,
+  ): Promise<EgressCommandResult> {
+    this.calls.push({ bin, args: [...args], stdin });
+    return Promise.resolve({ success: true, code: 0, stderr: "" });
+  }
+}
 
 const EXIT: VmmExit = {
   code: 0,
@@ -790,6 +821,138 @@ Deno.test("launch journals the plan's artifact reference before any spawn", asyn
     const terminated = await harness.store.get("sbx-art");
     assertEquals(terminated?.phase, "terminated");
     assertEquals(terminated?.artifact, PLAN_ARTIFACT);
+  });
+});
+
+const PLAN_RESOURCES: Partial<SandboxResources> = {
+  tapName: "sbxtap7",
+  hostIp: "10.201.0.29",
+  guestIp: "10.201.0.30",
+  subnet: "10.201.0.28/30",
+  dnsmasqPidfile: "/run/studiobox/dns/7.pid",
+};
+
+const RESOURCES_PLANNER: SupervisorLaunchPlanner = {
+  resolve: async (request) => ({
+    ...(await PLANNER.resolve(request)),
+    resources: PLAN_RESOURCES,
+  }),
+};
+
+Deno.test("launch merges the plan's network resources onto the record before spawn", async () => {
+  await withDir(async (dir) => {
+    const atSpawn: Array<
+      { phase?: string; resources?: SandboxResources }
+    > = [];
+    const harness: Harness = makeHarness(dir, {
+      planner: RESOURCES_PLANNER,
+      launch: async (options) => {
+        const record = await harness.store.get("sbx-res");
+        atSpawn.push({
+          ...(record?.phase === undefined ? {} : { phase: record.phase }),
+          ...(record?.resources === undefined
+            ? {}
+            : { resources: record.resources }),
+        });
+        const vmId = options.jailer!.id;
+        const registry = options.registry!;
+        await registry.put(jailRecord(vmId, options.metadata));
+        await registry.update(vmId, { pid: 4242 });
+        const machine = new FakeMachine(vmId);
+        machine.registry = registry;
+        harness.machines.set(vmId, machine);
+        return machine;
+      },
+    });
+
+    await harness.core.launch(launchRequest("sbx-res", "exec-res"));
+
+    // The network resources were durable at booting, BEFORE the spawn — and the
+    // default exposedPorts: [] survived the partial (network-only) merge.
+    const expected = { ...PLAN_RESOURCES, exposedPorts: [] };
+    assertEquals(atSpawn, [{ phase: "booting", resources: expected }]);
+    const record = await harness.store.get("sbx-res");
+    assertEquals(record?.resources, expected);
+
+    // The journaled resources survive termination (reclaim keys off them).
+    await harness.core.shutdown("exec-res");
+    assertEquals((await harness.store.get("sbx-res"))?.resources, expected);
+  });
+});
+
+Deno.test("a failed launch reclaims the journaled dataplane before parking terminal", async () => {
+  await withDir(async (dir) => {
+    // The plan journals slot-7 network resources in the staging→booting commit;
+    // the spawn then dies. A TERMINAL record is excluded from #reconcileSweep, so
+    // the record must NOT go terminal until the NetworkReclaimHook has reaped the
+    // TAP + released the slot — otherwise the whole dataplane leaks forever.
+    const networkRunner = new FakeRunner();
+    const egressRunner = new FakeRunner();
+    const allocator = new BitmapSubnetAllocator();
+    allocator.reserve(7); // the slot the plan journaled (sbxtap7)
+    const networkReclaimHook = new NetworkReclaimHook({
+      allocator,
+      network: new NetworkController({ runner: networkRunner }),
+      dnsmasq: new DnsmasqController({
+        reader: { read: () => Promise.reject(new Error("pidfile gone")) },
+        remover: { remove: () => Promise.resolve() },
+        signaller: { signal: () => {} },
+      }),
+      egress: new EgressController({ runner: egressRunner }),
+    });
+
+    const harness = makeHarness(dir, {
+      planner: RESOURCES_PLANNER,
+      launch: () => Promise.reject({ code: "FC_JAILER" }),
+      reclaimHooks: [networkReclaimHook],
+    });
+
+    await assertRejects(
+      () => harness.core.launch(launchRequest("sbx-leak", "exec-leak")),
+      FirecrackerAdapterError,
+    );
+
+    // The record parked terminal — but ONLY after the dataplane was reclaimed.
+    const record = await harness.store.get("sbx-leak");
+    assertEquals(record?.phase, "terminated");
+    // TAP torn down (ip link del), slot released, egress table removed by name.
+    assertEquals(networkRunner.calls.at(-1)?.args, [
+      "link",
+      "del",
+      "dev",
+      "sbxtap7",
+    ]);
+    assertEquals(allocator.inUse, 0, "slot released — no leak");
+    assertEquals(
+      egressRunner.calls.length,
+      1,
+      "egress table reclaimed by name",
+    );
+  });
+});
+
+Deno.test("a failed launch whose reclaim hook throws quarantines instead of terminating", async () => {
+  await withDir(async (dir) => {
+    // The dataplane leak is real (the hook could not reap it), so the failure
+    // must be SURFACED as quarantined — not silently swallowed into terminated.
+    const harness = makeHarness(dir, {
+      planner: RESOURCES_PLANNER,
+      launch: () => Promise.reject({ code: "FC_JAILER" }),
+      reclaimHooks: [{
+        name: "tap-reclaimer",
+        reclaim: () => Promise.reject(new Error("sbxtap7 refuses to die")),
+      }],
+    });
+
+    await assertRejects(
+      () => harness.core.launch(launchRequest("sbx-stuck", "exec-stuck")),
+      FirecrackerAdapterError,
+    );
+
+    const record = await harness.store.get("sbx-stuck");
+    assertEquals(record?.phase, "quarantined");
+    assert(record?.terminationReason?.includes("tap-reclaimer"));
+    assert(record?.terminationReason?.includes("sbxtap7 refuses to die"));
   });
 });
 

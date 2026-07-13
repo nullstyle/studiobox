@@ -83,6 +83,19 @@ import {
   GoldenArtifactLaunchPlanner,
   type GoldenArtifactLaunchPlannerOptions,
 } from "./launch_planner.ts";
+import {
+  BitmapSubnetAllocator,
+  DenoCommandEnumerator,
+  DenoPidfileLister,
+  DnsmasqController,
+  EgressController,
+  NetworkController,
+  type NetworkOrphanSweepResult,
+  reserveLiveSlots,
+  type SubnetAllocator,
+  sweepNetworkOrphans,
+} from "./network/mod.ts";
+import type { SandboxRecord } from "../state/model.ts";
 import { BridgeServer } from "./bridge_server.ts";
 import { DEFAULT_BRIDGE_DIAL_TIMEOUT_MS } from "./bridge.ts";
 import { BRIDGE_SOCKET_ROOT } from "../wire/supervisor.ts";
@@ -369,14 +382,55 @@ interface RootdFlags {
  * JSON shape of `--launch-config`: everything the real
  * {@linkcode GoldenArtifactLaunchPlanner} needs to stage + boot the golden
  * artifact set. `artifactCache` is the cache root; the rest mirror
- * {@linkcode GoldenArtifactLaunchPlannerOptions} minus the `cache` handle.
+ * {@linkcode GoldenArtifactLaunchPlannerOptions} minus the `cache` handle and
+ * the live `dataplane` (which is built here from the network fields below).
+ *
+ * The Tier-B network dataplane (M10 §W4) is enabled when `upstreamDns` is set
+ * (JSON here or the `STUDIOBOX_UPSTREAM_DNS` env var) AND the deploy is not
+ * `netlessOnly`; otherwise the planner keeps the pre-M10 vsock-only behavior.
  */
 interface LaunchPlannerConfig extends
   Omit<
     GoldenArtifactLaunchPlannerOptions,
-    "cache" | "resolveManifestHash" | "mintCredential"
+    "cache" | "resolveManifestHash" | "mintCredential" | "dataplane"
   > {
   readonly artifactCache: string;
+  /** Enables the dataplane; the per-sandbox dnsmasq upstream resolver. */
+  readonly upstreamDns?: string;
+  /** Pool CIDR carved into `/30`s (default `10.201.0.0/16`); must not overlap host bridges. */
+  readonly poolCidr?: string;
+  /** Force the pre-M10 vsock-only path even when `upstreamDns` is configured. */
+  readonly netlessOnly?: boolean;
+}
+
+/** What {@linkcode loadLaunchPlanner} hands back to {@linkcode main}. */
+interface LoadedLaunchPlanner {
+  readonly planner: SupervisorLaunchPlanner;
+  /**
+   * Reclaim hooks in registration order — network FIRST (§8) when the dataplane
+   * is configured, then the artifact/overlay hook. Empty when launch planning
+   * is unconfigured.
+   */
+  readonly reclaimHooks: readonly ReclaimHook[];
+  /**
+   * The subnet allocator to rebuild from the journal on cold start (§8), or
+   * `undefined` when no dataplane is configured.
+   */
+  readonly allocator?: SubnetAllocator;
+  /**
+   * Installs the shared NAT / isolation / host-guard seal once before launches
+   * are accepted (§3, §12), or `undefined` when no dataplane is configured.
+   */
+  readonly ensureGlobal?: () => Promise<void>;
+  /**
+   * Reap host dataplane state (TAP / egress table / dnsmasq) orphaned by a crash
+   * between provisioning and the resource-journal CAS (§6, §8), or `undefined`
+   * when no dataplane is configured. Given the full cold-start journal so it can
+   * tell an orphan from a resource a surviving record still owns.
+   */
+  readonly sweepNetworkOrphans?: (
+    records: readonly SandboxRecord[],
+  ) => Promise<NetworkOrphanSweepResult>;
 }
 
 /** Parse studiobox-rootd CLI flags (exported for unit coverage). */
@@ -468,22 +522,68 @@ const LAUNCH_PLANNING_UNCONFIGURED: SupervisorLaunchPlanner = {
 };
 
 /**
- * Build the real launch planner + its reclaim hook from the JSON config.
- * The reclaim hook releases the artifact refcount and deletes the per-boot
- * overlay when a record reaches a terminal phase.
+ * Build the real launch planner + its reclaim hooks from the JSON config. When
+ * the Tier-B dataplane is configured (see {@linkcode LaunchPlannerConfig}) the
+ * planner is given the W1 controllers (real `Deno`-backed seams), the network
+ * reclaim hook is registered BEFORE the artifact hook (§8), and the allocator +
+ * `ensureGlobal` are surfaced for cold-start rebuild + the one-time seal. When
+ * it is not, the pre-M10 vsock-only planner is returned unchanged.
  */
-async function loadLaunchPlanner(
-  path: string,
-): Promise<{ planner: GoldenArtifactLaunchPlanner; reclaimHook: ReclaimHook }> {
+async function loadLaunchPlanner(path: string): Promise<LoadedLaunchPlanner> {
   const config = JSON.parse(
     await Deno.readTextFile(path),
   ) as LaunchPlannerConfig;
-  const { artifactCache, ...rest } = config;
+  const { artifactCache, upstreamDns, poolCidr, netlessOnly, ...rest } = config;
+  const cache = new ArtifactCache({ root: artifactCache });
+
+  const resolvedUpstream = upstreamDns ??
+    Deno.env.get("STUDIOBOX_UPSTREAM_DNS");
+  const resolvedPool = poolCidr ?? Deno.env.get("STUDIOBOX_POOL_CIDR");
+  // Netless-only, or no upstream resolver configured ⇒ dataplane off: today's
+  // behavior (vsock-only launches, artifact hook only).
+  if (netlessOnly === true || resolvedUpstream === undefined) {
+    const planner = new GoldenArtifactLaunchPlanner({ ...rest, cache });
+    return { planner, reclaimHooks: [planner.reclaimHook] };
+  }
+
+  const poolOptions = resolvedPool === undefined
+    ? {}
+    : { poolCidr: resolvedPool };
+  const allocator = new BitmapSubnetAllocator(poolOptions);
+  const network = new NetworkController(poolOptions);
+  const dnsmasq = new DnsmasqController();
+  const egress = new EgressController();
   const planner = new GoldenArtifactLaunchPlanner({
     ...rest,
-    cache: new ArtifactCache({ root: artifactCache }),
+    cache,
+    dataplane: {
+      allocator,
+      network,
+      dnsmasq,
+      egress,
+      upstreamDns: resolvedUpstream,
+    },
   });
-  return { planner, reclaimHook: planner.reclaimHook };
+  // Network hook FIRST (§8): reclaim the TAP / egress table / dnsmasq before the
+  // overlay + artifact refcount.
+  const networkReclaimHook = planner.networkReclaimHook;
+  const reclaimHooks = networkReclaimHook === undefined
+    ? [planner.reclaimHook]
+    : [networkReclaimHook, planner.reclaimHook];
+  return {
+    planner,
+    reclaimHooks,
+    allocator,
+    ensureGlobal: () => network.ensureGlobal(),
+    sweepNetworkOrphans: (records) =>
+      sweepNetworkOrphans({
+        records,
+        enumerator: new DenoCommandEnumerator(),
+        pidfiles: new DenoPidfileLister(),
+        network,
+        dnsmasq,
+      }),
+  };
 }
 
 async function main(): Promise<void> {
@@ -508,18 +608,49 @@ async function main(): Promise<void> {
     await Deno.readTextFile(flags.tokenFile),
   );
 
-  const launch: {
-    planner: SupervisorLaunchPlanner;
-    reclaimHook?: ReclaimHook;
-  } = flags.launchConfig === undefined
-    ? { planner: LAUNCH_PLANNING_UNCONFIGURED }
+  const store = new JsonFileSandboxStore(flags.state);
+  const launch: LoadedLaunchPlanner = flags.launchConfig === undefined
+    ? { planner: LAUNCH_PLANNING_UNCONFIGURED, reclaimHooks: [] }
     : await loadLaunchPlanner(flags.launchConfig);
+
+  // Cold-start allocator rebuild (§8): reserve every slot a SURVIVING record
+  // still owns — BEFORE the shared seal, before the core accepts any launch, and
+  // before any (destructive) reconcile — so the sweep's teardown and a fresh
+  // launch can never collide on the same slot. A QUARANTINED record's reclaim
+  // FAILED, so its TAP / dnsmasq are still live: reserveLiveSlots keeps its slot
+  // too (only `terminated` records — reclaimed — free their slot).
+  const journaledRecords = await store.list();
+  if (launch.allocator !== undefined) {
+    reserveLiveSlots(launch.allocator, journaledRecords);
+  }
+
+  // Install the shared NAT masquerade + inter-sandbox isolation + guest→host
+  // input guard + IPv4 forwarding once BEFORE the supervisor accepts launches
+  // (§3, §12).
+  if (launch.ensureGlobal !== undefined) {
+    await launch.ensureGlobal();
+  }
+
+  // Network ORPHAN SWEEP (§6, §8), part of the destructive restart reconcile:
+  // reap any live `sbxtap*` / `sbx_eg_*` / `sbx_pf_*` / dnsmasq state that no
+  // surviving record owns — a crash between provisioning and the resource-journal
+  // CAS leaves such state with nothing to reclaim it. Runs before the core
+  // accepts launches so a fresh launch never reuses a half-provisioned slot.
+  if (launch.sweepNetworkOrphans !== undefined) {
+    const swept = await launch.sweepNetworkOrphans(journaledRecords);
+    if (swept.taps.length + swept.tables.length + swept.pidfiles.length > 0) {
+      console.error(
+        `rootd network orphan sweep: taps=${swept.taps.length} tables=${swept.tables.length} dnsmasq=${swept.pidfiles.length}`,
+      );
+    }
+  }
+
   const core = new SupervisorCore({
-    store: new JsonFileSandboxStore(flags.state),
+    store,
     planner: launch.planner,
-    ...(launch.reclaimHook === undefined
+    ...(launch.reclaimHooks.length === 0
       ? {}
-      : { reclaimHooks: [launch.reclaimHook] }),
+      : { reclaimHooks: launch.reclaimHooks }),
     buildId: flags.buildId,
   });
 

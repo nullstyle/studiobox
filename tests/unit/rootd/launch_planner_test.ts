@@ -125,6 +125,21 @@ Deno.test("planner: resolve emits the boot recipe and acquires the refcount", as
   });
 });
 
+Deno.test("planner: request.vcpus overrides the static default in machine_config", async () => {
+  await withDirs(async (cacheRoot, workDir) => {
+    await seedCache(cacheRoot);
+    const planner = plannerFor(cacheRoot, workDir);
+
+    // The request's vcpus (validated 1..64 upstream) reaches the guest.
+    const plan = await planner.resolve(request({ vcpus: 4 }));
+    assertEquals(plan.config.machine_config?.vcpu_count, 4);
+
+    // Absent vcpus falls back to the planner's static default (1).
+    const dflt = await planner.resolve(request({ executionId: "e-plan-2" }));
+    assertEquals(dflt.config.machine_config?.vcpu_count, 1);
+  });
+});
+
 Deno.test("planner: reclaim hook releases the refcount and deletes the overlay", async () => {
   await withDirs(async (cacheRoot, workDir) => {
     await seedCache(cacheRoot);

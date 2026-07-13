@@ -29,6 +29,14 @@
 import type { SandboxRecord } from "../../state/model.ts";
 import type { ReclaimHook } from "../supervisor_core.ts";
 import type { EgressController } from "./apply.ts";
+import {
+  type SubnetAllocation,
+  type SubnetAllocator,
+  subnetForSlot,
+  TAP_NAME_PREFIX,
+} from "./allocator.ts";
+import type { NetworkController } from "./dataplane.ts";
+import type { DnsmasqController } from "./dnsmasq.ts";
 
 export interface EgressReclaimHookOptions {
   /**
@@ -67,5 +75,89 @@ export class EgressReclaimHook implements ReclaimHook {
       sandboxId: record.id,
       ...(netns === undefined ? {} : { netns }),
     });
+  }
+}
+
+/**
+ * Parse the allocation slot out of a `sbxtap<slot>` TAP device name (§2). The
+ * slot is the natural teardown / reuse key: it rebuilds the
+ * {@linkcode SubnetAllocation} handle {@linkcode NetworkController.teardown}
+ * needs and is the argument to {@linkcode SubnetAllocator.release}.
+ *
+ * @throws {RangeError} when `tapName` is not a well-formed `sbxtap<slot>` name.
+ */
+export function slotOfTapName(tapName: string): number {
+  if (!tapName.startsWith(TAP_NAME_PREFIX)) {
+    throw new RangeError(
+      `tap device ${tapName} is not a ${TAP_NAME_PREFIX}<slot>`,
+    );
+  }
+  const suffix = tapName.slice(TAP_NAME_PREFIX.length);
+  const slot = Number(suffix);
+  if (!/^[0-9]+$/.test(suffix) || !Number.isInteger(slot)) {
+    throw new RangeError(`tap device ${tapName} has no valid slot`);
+  }
+  return slot;
+}
+
+/** The controllers a {@linkcode NetworkReclaimHook} composes (§8). */
+export interface NetworkReclaimHookDeps {
+  /** Releases the freed slot back to the pool. */
+  readonly allocator: SubnetAllocator;
+  /** Tears the TAP down (removes addr + link atomically). */
+  readonly network: NetworkController;
+  /** Reaps the per-sandbox dnsmasq from its journaled pidfile. */
+  readonly dnsmasq: DnsmasqController;
+  /** Removes the per-sandbox nftables egress table by exact name. */
+  readonly egress: EgressController;
+}
+
+/**
+ * The composed Tier-B {@linkcode ReclaimHook} (§8). Keyed off the journaled
+ * `resources.tapName` (a no-op when unset — netless / never-provisioned), it
+ * reclaims the whole dataplane in order, each step gone-tolerant inside its
+ * controller:
+ *
+ * 1. reap the per-sandbox dnsmasq (`resources.dnsmasqPidfile`);
+ * 2. remove the nftables egress table (`sbx_eg_<id>`, derived from `record.id`);
+ * 3. tear the TAP down (slot parsed from `resources.tapName`);
+ * 4. release the allocation slot.
+ *
+ * It reclaims from the JOURNAL alone — no live in-memory map — so a cold
+ * reconcile after a supervisor crash reaps fully. A throw (a genuine, not
+ * "already gone", controller failure) parks the record `quarantined`, which is
+ * correct: a leaked TAP / table must surface, never be blind-swept.
+ */
+export class NetworkReclaimHook implements ReclaimHook {
+  readonly name = "network-dataplane";
+  readonly #allocator: SubnetAllocator;
+  readonly #network: NetworkController;
+  readonly #dnsmasq: DnsmasqController;
+  readonly #egress: EgressController;
+
+  constructor(deps: NetworkReclaimHookDeps) {
+    this.#allocator = deps.allocator;
+    this.#network = deps.network;
+    this.#dnsmasq = deps.dnsmasq;
+    this.#egress = deps.egress;
+  }
+
+  async reclaim(record: SandboxRecord): Promise<void> {
+    const tapName = record.resources.tapName;
+    // No TAP journaled ⇒ netless / never provisioned: a clean nothing-to-do.
+    if (tapName === undefined) return;
+    const slot = slotOfTapName(tapName);
+    const alloc: SubnetAllocation = subnetForSlot(slot);
+
+    // 1. dnsmasq: kill the pid from the journaled pidfile, unlink pid + conf.
+    if (record.resources.dnsmasqPidfile !== undefined) {
+      await this.#dnsmasq.reap(record.resources.dnsmasqPidfile);
+    }
+    // 2. egress table: delete `sbx_eg_<idtoken>` by exact name (id-derived).
+    await this.#egress.reclaim({ sandboxId: record.id });
+    // 3. TAP: `ip link del dev sbxtap<slot>` (removes addr + link).
+    await this.#network.teardown(alloc);
+    // 4. slot: return it to the pool for reuse (idempotent).
+    this.#allocator.release(slot);
   }
 }

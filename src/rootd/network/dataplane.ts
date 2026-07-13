@@ -30,6 +30,16 @@ import {
 export const STUDIOBOX_NAT_TABLE = "studiobox_nat";
 /** The shared inter-sandbox forward-drop table installed once at rootd start. */
 export const STUDIOBOX_ISOLATION_TABLE = "studiobox_isolation";
+/**
+ * The shared guest→host INPUT-hook guard installed once at rootd start (§12).
+ * All per-sandbox filtering is FORWARD-hook only, so without this a guest could
+ * reach host-local services (its own gateway, `0.0.0.0` listeners, any host LAN
+ * IP) — bypassing a RESTRICTED `allowNet`. The guard permits only DNS to the
+ * per-sandbox dnsmasq (on the gateway) plus ICMP echo, and DROPs every other
+ * `sbxtap*`-sourced input, closing host reachability for BOTH restricted and
+ * unrestricted sandboxes.
+ */
+export const STUDIOBOX_HOSTGUARD_TABLE = "studiobox_hostguard";
 
 /** `/30` — the fixed per-sandbox subnet width the host gateway address takes. */
 const SUBNET_PREFIX = 30;
@@ -108,15 +118,17 @@ export class NetworkController {
   }
 
   /**
-   * One-time, idempotent global setup (§3): enable IPv4 forwarding, then install
-   * the shared `studiobox_nat` masquerade and `studiobox_isolation` forward-drop
-   * as two atomic `add;delete;add` `nft` scripts (re-apply replaces, never
-   * appends). Safe to call on every rootd start.
+   * One-time, idempotent global setup (§3, §12): enable IPv4 forwarding, then
+   * install the shared `studiobox_nat` masquerade, the `studiobox_isolation`
+   * forward-drop, and the `studiobox_hostguard` guest→host INPUT guard as atomic
+   * `add;delete;add` `nft` scripts (re-apply replaces, never appends). Safe to
+   * call on every rootd start.
    */
   async ensureGlobal(): Promise<void> {
     await this.#sysctl("net.ipv4.ip_forward=1");
     await this.#nft(this.#natScript());
     await this.#nft(this.#isolationScript());
+    await this.#nft(this.#hostguardScript());
   }
 
   /**
@@ -198,6 +210,53 @@ export class NetworkController {
       "}",
       "",
     ].join("\n");
+  }
+
+  /**
+   * The shared guest→host INPUT guard (§12). Scoped to `iifname "sbxtap*"` so it
+   * only judges guest-sourced traffic. In order it: accepts established/related
+   * return traffic (the reply path of an `exposeHttp` host→guest forward, which
+   * lands here as locally-destined INPUT); permits DNS (udp/tcp `:53`) **only to
+   * a pool gateway address** (`ip daddr <poolCidr>` — the guest's own dnsmasq,
+   * never the host's own resolver); permits ICMP/ICMPv6 echo (PMTU +
+   * diagnostics); then DROPs every other guest→host packet. Host-originated and
+   * forwarded traffic never match the `sbxtap*` iifname, so this neither blocks
+   * forwarded egress (the per-sandbox forward filter's job) nor touches
+   * exposeHttp's output/postrouting DNAT/SNAT.
+   */
+  #hostguardScript(): string {
+    const tap = `${TAP_NAME_PREFIX}*`;
+    return [
+      `add table inet ${STUDIOBOX_HOSTGUARD_TABLE}`,
+      `delete table inet ${STUDIOBOX_HOSTGUARD_TABLE}`,
+      `table inet ${STUDIOBOX_HOSTGUARD_TABLE} {`,
+      "\tchain input {",
+      "\t\ttype filter hook input priority -10; policy accept;",
+      `\t\tiifname "${tap}" ct state established,related accept`,
+      `\t\tiifname "${tap}" ip daddr ${this.#poolCidr} udp dport 53 accept`,
+      `\t\tiifname "${tap}" ip daddr ${this.#poolCidr} tcp dport 53 accept`,
+      `\t\tiifname "${tap}" icmp type echo-request accept`,
+      `\t\tiifname "${tap}" icmpv6 type echo-request accept`,
+      `\t\tiifname "${tap}" drop`,
+      "\t}",
+      "}",
+      "",
+    ].join("\n");
+  }
+
+  /**
+   * Delete an nft table by exact family + name, idempotently — the `add;delete`
+   * pair is a clean no-op when the table is already gone. Used by the startup
+   * network-orphan sweep (`orphan_sweep.ts`) to reap a crashed launch's leaked
+   * `sbx_eg_<id>` / `sbx_pf_<id>` table for which no journaled record survives to
+   * key {@linkcode import("./apply.ts").EgressController.reclaim}. Conservative:
+   * the caller only ever passes a studiobox-prefixed name.
+   */
+  async reapTable(family: "ip" | "inet", name: string): Promise<void> {
+    await this.#nft(
+      [`add table ${family} ${name}`, `delete table ${family} ${name}`, ""]
+        .join("\n"),
+    );
   }
 
   /** Run one `ip …` command; tolerate the given stderr markers, else throw. */

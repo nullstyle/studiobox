@@ -25,6 +25,7 @@ import {
   newSandboxRecord,
   type SandboxPhase,
   type SandboxRecord,
+  type SandboxResources,
 } from "../state/model.ts";
 import { type SandboxStateStore, StateConflictError } from "../state/store.ts";
 import {
@@ -95,6 +96,15 @@ export interface SupervisorLaunchPlan {
    * back to a fresh random credential (host-safe supervisor-core tests).
    */
   readonly agentCredential?: Uint8Array;
+  /**
+   * Studiobox-owned resources the planner provisioned for this launch (the M10
+   * network dataplane: `tapName` / `hostIp` / `guestIp` / `subnet` /
+   * `dnsmasqPidfile`). When present these are MERGED onto the record's
+   * `resources` in the staging→booting commit — so they are durably journaled
+   * BEFORE any process spawns, which a cold-reconcile reclaim depends on (§8,
+   * §9). The default `exposedPorts: []` is preserved (a partial merge).
+   */
+  readonly resources?: Partial<SandboxResources>;
 }
 
 /** Resolves logical artifact/allocation ids to a concrete launch plan. */
@@ -247,8 +257,9 @@ export class SupervisorCore implements SupervisorApi {
         "staging",
       );
       const plan = await this.#planner.resolve(validated);
-      // The artifact reference rides the staging -> booting commit, so it
-      // is durable BEFORE any process spawns.
+      // The artifact reference AND the network resources ride the staging ->
+      // booting commit, so both are durable BEFORE any process spawns (the
+      // resources are what a cold-reconcile reclaim keys off, §8/§9).
       await this.#ownedTransition(
         validated.sandboxId,
         validated.executionId,
@@ -257,6 +268,9 @@ export class SupervisorCore implements SupervisorApi {
         plan.artifact === undefined
           ? undefined
           : { artifact: structuredClone(plan.artifact) },
+        plan.resources === undefined
+          ? undefined
+          : structuredClone(plan.resources),
       );
       const machine = await this.#adapter.launch({
         sandboxId: validated.sandboxId,
@@ -721,15 +735,29 @@ export class SupervisorCore implements SupervisorApi {
     error: unknown,
   ): Promise<void> {
     if (error instanceof SupervisorError && error.code === "SBX_SUP_STALE") {
-      // The launch already lost the record to a sweep or a newer
-      // execution; the loser must not write anything over the winner.
+      // The launch already lost the record to a sweep or a newer execution; the
+      // loser must not write anything over the winner — and must NOT reclaim,
+      // since the journaled resources now belong to whoever won the record.
       return;
     }
     const cleanupIncomplete = error instanceof FirecrackerAdapterError &&
       error.code === "SBX_FC_CLEANUP";
     const detail = `launch failed: ${boundedReason(error)}`;
     try {
-      if (cleanupIncomplete) {
+      // Reap any studiobox-owned resources the (post-resolve) failure may have
+      // journaled BEFORE driving the record terminal. The network dataplane
+      // (TAP / egress table / dnsmasq / allocator slot) rides the staging→booting
+      // commit, and a TERMINAL record is excluded from #reconcileSweep — so
+      // without this the whole dataplane leaks forever. The reclaim hooks are
+      // idempotent (NetworkReclaimHook no-ops on an unset `resources.tapName`),
+      // so this is a clean nothing-to-do when no network was ever provisioned.
+      const hookDetail = await this.#runReclaimHooks(sandboxId);
+      if (hookDetail !== undefined) {
+        // A reclaim hook FAILED: the leak is real, so surface it — quarantine
+        // (ownership-guarded) rather than silently terminating, mirroring the
+        // terminate path's semantics.
+        await this.#quarantine(sandboxId, hookDetail, executionId);
+      } else if (cleanupIncomplete) {
         await this.#quarantine(sandboxId, detail, executionId);
       } else {
         await this.#update(sandboxId, (current) => {
@@ -865,6 +893,7 @@ export class SupervisorCore implements SupervisorApi {
     allowedFrom: readonly SandboxPhase[],
     to: SandboxPhase,
     patch?: Partial<SandboxRecord>,
+    resourcesPatch?: Partial<SandboxResources>,
   ): Promise<void> {
     await this.#update(sandboxId, (current) => {
       this.#assertWriterOwns(current, executionId, `move to ${to}`);
@@ -874,7 +903,16 @@ export class SupervisorCore implements SupervisorApi {
           `sandbox ${sandboxId} cannot move ${current.phase} -> ${to}`,
         );
       }
-      return { ...current, ...patch, phase: to };
+      // `resources` is MERGED (not replaced) so the default `exposedPorts: []`
+      // and any prior fields survive a partial network-resource patch.
+      return {
+        ...current,
+        ...patch,
+        ...(resourcesPatch === undefined
+          ? {}
+          : { resources: { ...current.resources, ...resourcesPatch } }),
+        phase: to,
+      };
     });
   }
 

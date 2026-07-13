@@ -76,6 +76,9 @@ export {
 export {
   EgressReclaimHook,
   type EgressReclaimHookOptions,
+  NetworkReclaimHook,
+  type NetworkReclaimHookDeps,
+  slotOfTapName,
 } from "./reclaim_hook.ts";
 
 export {
@@ -94,6 +97,7 @@ export {
   NetworkControllerError,
   type NetworkControllerOptions,
   type NetworkProvisionOptions,
+  STUDIOBOX_HOSTGUARD_TABLE,
   STUDIOBOX_ISOLATION_TABLE,
   STUDIOBOX_NAT_TABLE,
 } from "./dataplane.ts";
@@ -123,3 +127,15 @@ export {
   type PortForwardRequest,
   portForwardTableName,
 } from "./port_forward.ts";
+
+export {
+  type CommandEnumerator,
+  DenoCommandEnumerator,
+  DenoPidfileLister,
+  type EnumerationResult,
+  type NetworkOrphanSweepDeps,
+  type NetworkOrphanSweepResult,
+  type PidfileLister,
+  reserveLiveSlots,
+  sweepNetworkOrphans,
+} from "./orphan_sweep.ts";

@@ -12,7 +12,8 @@ export const MAX_ALLOW_NET_ENTRIES = 1024;
 /** Widest single `allowNet` pattern (mirrors `network/spec.ts` MAX_ENTRY_BYTES). */
 export const MAX_ALLOW_NET_ENTRY_BYTES = 300;
 /** vCPU ceiling accepted at the boundary (defence against garbage; wire is UInt16). */
-export const MAX_LAUNCH_VCPUS = 64;
+/** Firecracker caps `vcpu_count` at 32 and requires 1 or an even number. */
+export const MAX_LAUNCH_VCPUS = 32;
 
 export interface SupervisorLaunchRequest {
   readonly sandboxId: string;
@@ -180,9 +181,17 @@ function validateNetless(netless: boolean | undefined): boolean | undefined {
 
 function validateVcpus(vcpus: number | undefined): number | undefined {
   if (vcpus === undefined) return undefined;
+  // Firecracker's machine config accepts only 1 or an even count, up to 32;
+  // an odd/over-cap value would pass a naive bound but fail at boot AFTER the
+  // dataplane is provisioned, so reject it at the wire boundary.
   if (!Number.isSafeInteger(vcpus) || vcpus < 1 || vcpus > MAX_LAUNCH_VCPUS) {
     throw new WireValidationError(
       `vcpus must be an integer in 1..${MAX_LAUNCH_VCPUS}`,
+    );
+  }
+  if (vcpus > 1 && vcpus % 2 !== 0) {
+    throw new WireValidationError(
+      "vcpus must be 1 or an even number (Firecracker constraint)",
     );
   }
   return vcpus;
