@@ -65,6 +65,7 @@ import {
   type SandboxFs,
   type SeekMode,
 } from "../src/api/fs.ts";
+import { downloadTree, uploadTree } from "../src/api/fs_transfer.ts";
 import type {
   DenoReplOptions,
   DenoRunOptions,
@@ -699,16 +700,15 @@ class FakeSandboxFs implements SandboxFs {
   ): Promise<void> {
     return await this.#fs.utime(this.#path(path), atime, mtime);
   }
-  /** SDK-side recursion, lands in M8. */
-  upload(_localPath: string | URL, _sandboxPath: string | URL): Promise<void> {
-    return Promise.reject(new ImplementationPendingError("fs.upload"));
+  /** Upload a host file/tree into the sandbox ({@linkcode uploadTree}). */
+  upload(localPath: string | URL, sandboxPath: string | URL): Promise<void> {
+    this.#state.assertOpen();
+    return uploadTree(this, localPath, sandboxPath);
   }
-  /** SDK-side recursion, lands in M8. */
-  download(
-    _sandboxPath: string | URL,
-    _localPath: string | URL,
-  ): Promise<void> {
-    return Promise.reject(new ImplementationPendingError("fs.download"));
+  /** Download a sandbox file/tree out to the host ({@linkcode downloadTree}). */
+  download(sandboxPath: string | URL, localPath: string | URL): Promise<void> {
+    this.#state.assertOpen();
+    return downloadTree(this, sandboxPath, localPath);
   }
 }
 

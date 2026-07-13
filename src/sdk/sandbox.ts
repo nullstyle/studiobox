@@ -35,6 +35,7 @@ import {
   type SandboxFs,
   type SeekMode,
 } from "../api/fs.ts";
+import { downloadTree, uploadTree } from "../api/fs_transfer.ts";
 import {
   DenoProcess,
   DenoRepl,
@@ -62,8 +63,11 @@ import type { SandboxBackend } from "./wire_agent.ts";
 
 /** Host-plane lifecycle a provider wires under one sandbox. */
 export interface SandboxLifecycle {
+  /** The sandbox id (`sbx_loc_…`). */
   readonly id: string;
+  /** Sandbox base URL, when the host plane advertises one. */
   readonly url?: string;
+  /** SSH endpoint, when advertised (unsupported locally — Tier C). */
   readonly ssh?: { username: string; hostname: string };
   /** Drop the connection (a session sandbox then dies). Idempotent. */
   teardown(): Promise<void>;
@@ -603,15 +607,21 @@ class FacadeSandboxFs implements SandboxFs {
   ): Promise<void> {
     return await this.#fs.utime(this.#path(path), atime, mtime);
   }
-  /** SDK-side recursion over the wire primitives (M8 not-yet). */
-  upload(_localPath: string | URL, _sandboxPath: string | URL): Promise<void> {
-    return Promise.reject(new ImplementationPendingError("fs.upload"));
+  /**
+   * Upload a host file/tree into the sandbox — SDK-side recursion over the
+   * wire primitives ({@linkcode uploadTree}).
+   */
+  upload(localPath: string | URL, sandboxPath: string | URL): Promise<void> {
+    this.#state.assertOpen();
+    return uploadTree(this, localPath, sandboxPath);
   }
-  download(
-    _sandboxPath: string | URL,
-    _localPath: string | URL,
-  ): Promise<void> {
-    return Promise.reject(new ImplementationPendingError("fs.download"));
+  /**
+   * Download a sandbox file/tree out to the host — SDK-side recursion over the
+   * wire primitives ({@linkcode downloadTree}).
+   */
+  download(sandboxPath: string | URL, localPath: string | URL): Promise<void> {
+    this.#state.assertOpen();
+    return downloadTree(this, sandboxPath, localPath);
   }
 }
 
@@ -724,6 +734,7 @@ export class AgentBackedSandbox extends Sandbox {
   #connTeardown: Promise<void> | undefined;
   #killIssued: Promise<void> | undefined;
 
+  /** Bind an agent-plane `backend` to a host-plane `lifecycle`. */
   constructor(backend: SandboxBackend, lifecycle: SandboxLifecycle) {
     super();
     this.#backend = backend;
@@ -736,28 +747,36 @@ export class AgentBackedSandbox extends Sandbox {
     });
   }
 
+  /** The sandbox id (`sbx_loc_…`). */
   get id(): string {
     return this.#lifecycle.id;
   }
+  /** Resolves when the sandbox connection tears down. */
   get closed(): Promise<void> {
     return this.#closed;
   }
+  /** The Deno-mirroring filesystem surface (`readFile`…`walk`). */
   get fs(): SandboxFs {
     return this.#fs;
   }
+  /** The `deno.eval` / `deno.repl` / `deno.run` surface. */
   get deno(): SandboxDeno {
     return this.#deno;
   }
+  /** The environment-variable surface (`get`/`set`/`toObject`/`delete`). */
   get env(): SandboxEnv {
     return this.#env;
   }
+  /** The SSH endpoint, if any (unsupported locally — Tier C). */
   get ssh(): { username: string; hostname: string } | undefined {
     return this.#lifecycle.ssh;
   }
+  /** The sandbox base URL, if advertised. */
   get url(): string | undefined {
     return this.#lifecycle.url;
   }
 
+  /** Spawn a child process in the guest (`ChildProcess`); upstream semantics. */
   async spawn(
     command: string | URL,
     options?: SpawnOptions,
@@ -802,6 +821,7 @@ export class AgentBackedSandbox extends Sandbox {
     }
   }
 
+  /** Extend the lease (≤ 30 min/call); resolves the actual new deadline. */
   async extendTimeout(timeout: `${number}s` | `${number}m`): Promise<Date> {
     this.#state.assertOpen();
     return await this.#lifecycle.extendTimeout(parseDurationMs(timeout));
@@ -826,13 +846,16 @@ export class AgentBackedSandbox extends Sandbox {
     }
     return this.#lifecycle.exposeHttp(target.port);
   }
+  /** Unsupported locally (no SSH ingress) — always throws (Tier C). */
   exposeSsh(): Promise<{ hostname: string; username: string }> {
     return Promise.reject(new UnsupportedFeatureError("Sandbox.exposeSsh"));
   }
+  /** Unsupported locally (no VS Code tunnel) — always throws (Tier C). */
   exposeVscode(): Promise<VsCode> {
     return Promise.reject(new UnsupportedFeatureError("Sandbox.exposeVscode"));
   }
 
+  /** `await using` disposal — equivalent to {@link close}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
   }
