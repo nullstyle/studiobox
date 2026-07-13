@@ -242,8 +242,7 @@ Deno.test("personalize: sets the credential + runs the exact ip/route argv + wri
   assertEquals(good.result.which, "accepted");
   assertEquals(client.phase, "authenticated");
 
-  // A wrong credential is refused (unauthenticated), and the bootNonce/sandboxId
-  // binding personalize set is enforced.
+  // A wrong credential is refused (unauthenticated) — the credential binding.
   const attacker = connectionFor(controller);
   const attackerCtx = fakeContext();
   await negotiateOk(attacker, attackerCtx);
@@ -261,6 +260,57 @@ Deno.test("personalize: sets the credential + runs the exact ip/route argv + wri
   await rootd.close();
   await client.close();
   await attacker.close();
+});
+
+Deno.test("personalize: binds bootNonce (enforced) but NOT sandboxId — the tunnel client presents the client-facing id, not rootd's", async () => {
+  // WI-8 (fc-smoke): rootd's launch sandboxId (`sbx-loc-…`) is NOT the
+  // client-facing id (`sbx_loc_…`) the tunnel client presents at authenticate,
+  // so a sandboxId binding would reject EVERY client (401). personalize binds
+  // credential + bootNonce (the bootNonce is minted once by hostd and handed to
+  // both rootd.launch and the client grant, so it matches); sandboxId is not.
+  const controller = pendingController(new FakeRunner(), new FakeWriter());
+  const rootd = connectionFor(controller);
+  const rootdCtx = fakeContext();
+  await negotiateOk(rootd, rootdCtx);
+  const personalized = await rootd.bootstrap.personalize(
+    { request: networkedRequest() },
+    rootdCtx,
+  );
+  assertEquals(personalized.result.which, "ok");
+
+  // A DIFFERENT sandboxId still authenticates (sandboxId is not bound) as long
+  // as the credential + bootNonce match.
+  const client = connectionFor(controller);
+  const clientCtx = fakeContext();
+  await negotiateOk(client, clientCtx);
+  const differentSandboxId = await client.bootstrap.authenticate(
+    {
+      credential: CREDENTIAL,
+      sandboxId: "sbx_loc_public",
+      bootNonce: BOOT_NONCE,
+    },
+    clientCtx,
+  );
+  assertEquals(differentSandboxId.result.which, "accepted");
+
+  // A WRONG bootNonce is refused (the bootNonce IS bound).
+  const badNonce = connectionFor(controller);
+  const badNonceCtx = fakeContext();
+  await negotiateOk(badNonce, badNonceCtx);
+  const wrongNonce = await badNonce.bootstrap.authenticate(
+    {
+      credential: CREDENTIAL,
+      sandboxId: "sbx_loc_public",
+      bootNonce: new Uint8Array(32).fill(0xee),
+    },
+    badNonceCtx,
+  );
+  assertEquals(wrongNonce.result.which, "error");
+  assertEquals(wrongNonce.result.error?.code, "unauthenticated");
+
+  await rootd.close();
+  await client.close();
+  await badNonce.close();
 });
 
 Deno.test("personalize: a second personalize returns already-personalized (one-shot)", async () => {

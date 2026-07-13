@@ -65,6 +65,9 @@ interface Daemon {
   readonly label: string;
   readonly child: Deno.ChildProcess;
   readonly drained: Promise<void>;
+  /** Every stderr line the daemon emitted (for asserting diagnostics, e.g. the
+   * snapshot-restore vs cold-fallback signal). */
+  readonly stderrLines: string[];
 }
 
 /** The live stack: a provider over the real daemons, torn down on dispose. */
@@ -74,6 +77,9 @@ export interface RealStack extends AsyncDisposable {
   readonly controlPort: number;
   /** Shared tunnel-router endpoint (`127.0.0.1:<tunnel>`). */
   readonly tunnelPort: number;
+  /** rootd's stderr lines so far (e.g. the "created via snapshot restore" /
+   * "snapshot strategy fell back to cold" signal). */
+  readonly rootdStderr: readonly string[];
 }
 
 /** Opt-in Tier-B networking for the real stack (M10 §W5 validation). */
@@ -92,6 +98,22 @@ export interface RealStackOptions {
    * (the M8 parity default), which needs no root network mutation.
    */
   readonly network?: RealStackNetwork;
+  /**
+   * Opt into snapshot-restore fast-create (snapshot-restore §5): rootd resolves
+   * `launchStrategy: "snapshot"`, restoring a warm template + personalizing it
+   * instead of cold-booting. Requires a baked template for the golden hash under
+   * {@linkcode templateCacheDir} (default `<cache>/templates`) AND a real fc
+   * `>= v1.16`; because netless always cold-boots (§9.5), pair it with
+   * {@linkcode network}. Absent ⇒ cold (the M8 default). A template problem
+   * transparently falls back to cold (§5.3), so a create never fails on it.
+   */
+  readonly snapshot?: boolean;
+  /**
+   * Override the warm-template directory (default `<artifactCache>/templates`).
+   * Point at an EMPTY dir to exercise the cold FALLBACK (§5.3) with the snapshot
+   * strategy still requested. Only consulted when {@linkcode snapshot} is set.
+   */
+  readonly templateCacheDir?: string;
 }
 
 /**
@@ -141,12 +163,17 @@ async function spawnDaemon(
     stderr: "piped",
   }).spawn();
 
-  // Drain stderr to the console for diagnosis; never blocks the ready gate.
+  // Drain stderr to the console for diagnosis (and remember the lines so tests
+  // can assert on a daemon's diagnostics); never blocks the ready gate.
   const decoder = new TextDecoder();
+  const stderrLines: string[] = [];
   const pumpStderr = (async () => {
     for await (const chunk of child.stderr) {
       const text = decoder.decode(chunk).trimEnd();
-      if (text.length > 0) console.error(`[${label} stderr] ${text}`);
+      if (text.length > 0) {
+        stderrLines.push(text);
+        console.error(`[${label} stderr] ${text}`);
+      }
     }
   })();
 
@@ -205,7 +232,7 @@ async function spawnDaemon(
   const drained = Promise.allSettled([pumpStdout, pumpStderr, exited]).then(
     () => {},
   );
-  return { label, child, drained };
+  return { label, child, drained, stderrLines };
 }
 
 /** Terminate a daemon and await its pumps so nothing leaks past dispose. */
@@ -285,6 +312,17 @@ export async function startRealStack(
         ? {}
         : { poolCidr: options.network.poolCidr }),
     }),
+    // Opt into snapshot-restore (§5): rootd probes the real fc version, resolves
+    // a valid warm template, and restores+personalizes instead of cold-booting;
+    // a template/version problem falls back to cold (§5.3).
+    ...(options.snapshot
+      ? {
+        launchStrategy: "snapshot",
+        ...(options.templateCacheDir === undefined
+          ? {}
+          : { templateCacheDir: options.templateCacheDir }),
+      }
+      : {}),
   };
   await Deno.writeTextFile(launchConfigPath, JSON.stringify(launchConfig));
 
@@ -368,6 +406,7 @@ export async function startRealStack(
     provider,
     controlPort: CONTROL_PORT,
     tunnelPort: TUNNEL_PORT,
+    rootdStderr: capturedRootd.stderrLines,
     async [Symbol.asyncDispose]() {
       // hostd first (it drives rootd); its SIGTERM revokes leases + tickets and
       // tears the tunnel router down. Then rootd, whose shutdown sweep reclaims

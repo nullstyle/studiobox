@@ -199,7 +199,10 @@ Deno.test("snapshot strategy + valid template: resolves a restore plan and pins 
       backend_path: "/mem",
     });
     assertEquals(plan.snapshot.resume_vm, true);
-    assertEquals(plan.snapshot.clock_realtime, true);
+    // `clock_realtime` is x86_64-only — Firecracker's aarch64 VMM REJECTS a
+    // snapshot load that sets it ("clock_realtime is not supported on
+    // aarch64"), so an aarch64 restore plan omits it (proven on fc-smoke, WI-8).
+    assertEquals(plan.snapshot.clock_realtime, undefined);
     assertEquals(plan.snapshot.network_overrides, [
       { iface_id: "eth0", host_dev_name: "sbxtap0" },
     ]);

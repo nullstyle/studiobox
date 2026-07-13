@@ -570,13 +570,23 @@ export class SupervisorCore implements SupervisorApi {
       // record with its machine/jailRecord binding intact, exactly as the cold
       // path quarantines an adapter cleanup-incomplete (§5.3). Only fall back
       // when the restore's jail is CONFIRMED reclaimed (no orphan).
+      console.error(
+        `[rootd] ${validated.executionId}: snapshot restore failed (Machine.restore), falling back to cold: ${
+          restoreFaultDetail(error)
+        }`,
+      );
       if (isCleanupIncomplete(error)) throw error;
       return await this.#fallbackToCold(validated, plan);
     }
 
     try {
       await this.#personalizeRestored(machine, plan);
-    } catch {
+    } catch (personalizeError) {
+      console.error(
+        `[rootd] ${validated.executionId}: snapshot restore failed (dial/personalize), falling back to cold: ${
+          restoreFaultDetail(personalizeError)
+        }`,
+      );
       // A restore-specific failure (dial refused, personalize rejected or timed
       // out): put the restored VMM DOWN before falling back. If kill/dispose
       // signals cleanup-incomplete (SBX_FC_CLEANUP), the VMM could NOT be
@@ -612,6 +622,9 @@ export class SupervisorCore implements SupervisorApi {
     this.#agentCredentials.set(
       validated.executionId,
       plan.agentCredential.slice(),
+    );
+    console.error(
+      `[rootd] ${validated.executionId} created via snapshot restore`,
     );
     return {
       sandboxId: validated.sandboxId,
@@ -1567,6 +1580,19 @@ function isCleanupIncomplete(
 ): error is FirecrackerAdapterError {
   return error instanceof FirecrackerAdapterError &&
     error.code === "SBX_FC_CLEANUP";
+}
+
+/**
+ * The most specific message for a failed restore, for the cold-fallback log
+ * line: the underlying Firecracker `faultMessage` (e.g. an incompatible
+ * snapshot) when present, else the cause/error message.
+ */
+function restoreFaultDetail(error: unknown): string {
+  const cause = (error as { cause?: unknown })?.cause;
+  const fault = (cause as { faultMessage?: unknown })?.faultMessage;
+  if (typeof fault === "string" && fault.length > 0) return fault;
+  if (cause instanceof Error && cause.message.length > 0) return cause.message;
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Swallow only the typed stale-writer signal; anything else propagates. */

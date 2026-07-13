@@ -444,6 +444,22 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
       hostFc === undefined ||
       !firecrackerSupportsSnapshotRestore(hostFc)
     ) {
+      // Only a "snapshot" deploy that DECLINES is worth a line; the default
+      // cold path stays silent (it would log on every create otherwise).
+      if (this.#launchStrategy === "snapshot") {
+        const reason = request.netless === true
+          ? "netless (always cold, §9.5)"
+          : network === undefined
+          ? "no dataplane"
+          : store === undefined
+          ? "no template store"
+          : schema === undefined
+          ? "no running schema"
+          : hostFc === undefined
+          ? "host firecracker version unknown"
+          : `host firecracker ${hostFc} < v1.16`;
+        console.error(`[rootd] snapshot strategy fell back to cold: ${reason}`);
+      }
       return false;
     }
     try {
@@ -453,15 +469,29 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
       // `resolve`) so the metadata read is a distinct step — the fc gate layers
       // on top of the existing validity contract.
       if (!(await store.isValid(manifestHash, { schemaSha256: schema }))) {
+        console.error(
+          `[rootd] snapshot strategy fell back to cold: template invalid or absent`,
+        );
         return false;
       }
       const metadata = await store.readMetadata(manifestHash);
-      return this.#templateFirecrackerCompatible(
+      const compatible = this.#templateFirecrackerCompatible(
         metadata.firecrackerVersion,
         hostFc,
       );
-    } catch {
+      if (!compatible) {
+        console.error(
+          `[rootd] snapshot strategy fell back to cold: template firecracker ${metadata.firecrackerVersion} incompatible with host ${hostFc}`,
+        );
+      }
+      return compatible;
+    } catch (error) {
       // A real I/O fault on the template dir: fail safe toward cold (§5.5).
+      console.error(
+        `[rootd] snapshot strategy fell back to cold: template read error: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
       return false;
     }
   }
@@ -651,7 +681,13 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
       snapshot_path: SNAPSHOT_JAIL_PATH,
       mem_backend: { backend_type: "File", backend_path: MEM_JAIL_PATH },
       resume_vm: true,
-      clock_realtime: true,
+      // `clock_realtime` re-seeds the guest wall-clock on resume so restores of
+      // one snapshot don't all share its frozen clock — but Firecracker only
+      // supports it on x86_64; the aarch64 VMM REJECTS the snapshot load with
+      // "clock_realtime is not supported on aarch64" (mirrors SendCtrlAltDel
+      // being x86_64-only). On aarch64 the restored guest inherits the captured
+      // clock until it re-syncs — acceptable for 1.0.
+      ...(this.#arch === "x86_64" ? { clock_realtime: true } : {}),
       network_overrides: [
         { iface_id: GUEST_IFACE, host_dev_name: network.alloc.tapName },
       ],

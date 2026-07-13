@@ -231,7 +231,15 @@ export class PersonalizationController {
       throw error;
     }
     this.#credential = input.credential;
-    this.#expectedSandboxId = input.sandboxId;
+    // Bind the bootNonce (anti-replay) but NOT the sandboxId: rootd's launch
+    // sandboxId (`sbx-loc-…`) is NOT the client-facing id (`sbx_loc_…`) the
+    // tunnel client presents at `authenticate` — hostd keeps the public id and
+    // "the public id never has to reach the wire" (hostd control_core), so a
+    // sandboxId binding here can NEVER match and would reject every client. The
+    // per-restore credential is already unique, and the bootNonce (minted once
+    // by hostd, handed to BOTH rootd.launch and the client grant) matches, so
+    // credential + bootNonce is the enforceable binding. The cold path binds
+    // neither (credential only); this is strictly stronger and still parity-safe.
     this.#expectedBootNonce = input.bootNonce;
     this.#state = "personalized";
     return { appliedCidr };
@@ -320,11 +328,23 @@ function validateInput(input: PersonalizeInput): void {
  * The real in-guest command runner: spawns `argv[0]` with the remaining argv,
  * inheriting stdio to the guest console, and throws on a non-zero exit.
  */
+/**
+ * Search path for the in-band personalize commands. Template-mode studioboxd is
+ * exec'd by `overlay-init` as a near-bare init with NO `PATH`, so a bare `ip`
+ * cannot be resolved by name (`Deno.Command` then throws "no path to search").
+ * The guest ships `ip` at `/bin/ip` (with `/sbin`, `/usr/sbin` symlinks), so
+ * supplying the standard sbin/bin search path lets the argv stay by-name.
+ */
+const PERSONALIZE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin";
+
 export const denoCommandRunner: PersonalizeCommandRunner = Object.freeze({
   async run(argv: readonly string[]): Promise<void> {
     const [command, ...args] = argv;
     const output = await new Deno.Command(command, {
       args,
+      // Merge a real PATH over the (possibly empty) inherited env so `ip`
+      // resolves even when studioboxd booted without one.
+      env: { PATH: PERSONALIZE_PATH },
       stdin: "null",
       stdout: "null",
       stderr: "piped",
