@@ -285,7 +285,12 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
         );
       }
       const bootArgs = [
+        // `quiet loglevel=1` suppresses the kernel's verbose boot printk. Each
+        // printk blocks on the ttyS0 UART, so a chatty boot is a well-known
+        // Firecracker slow-start cause; init's own echoes still reach ttyS0.
         "console=ttyS0",
+        "quiet",
+        "loglevel=1",
         "reboot=k",
         "panic=1",
         "pci=off",
