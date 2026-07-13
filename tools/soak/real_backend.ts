@@ -61,7 +61,7 @@ import {
   journalPhaseIdentity,
   type LeakAllowance,
   type LeakAudit,
-  processIdentity,
+  processExecIdentity,
 } from "./leak_audit.ts";
 import { buildInGuestAudit } from "./soak_vm_main.ts";
 import type { SoakBackend, SoakSandboxHandle } from "./soak_runner.ts";
@@ -135,7 +135,7 @@ export class RealMicrovmSoakBackend implements SoakBackend {
       // `sbx`, so an unrelated `sbx`-prefixed host iface is never flagged. The
       // M10 dataplane has no netns, so the netns prefix stays the default `sbx`.
       ownedTapPrefix: TAP_NAME_PREFIX,
-      identityTokens: () => this.#identityTokens(),
+      ownedBinaries: () => this.#ownedBinaries(),
     });
   }
 
@@ -324,10 +324,9 @@ export class RealMicrovmSoakBackend implements SoakBackend {
   #allowanceForLive(entries: readonly RealLive[]): LeakAllowance {
     const firecracker = basename(this.#config.firecrackerBin);
     return {
-      // The in-guest `process` enumerator is the /proc-cmdline scan, so a live
-      // VMM's pid is `pid=<n>`; it also matches the firecracker/jailer identity
-      // tokens, hence the allowance.
-      process: entries.map((entry) => processIdentity(entry.pid)),
+      // The in-guest `process` enumerator keys a VMM by its jail exec-id
+      // (`--id`), pid-namespace-independent, so a live VMM is `exec:<id>`.
+      process: entries.map((entry) => processExecIdentity(entry.executionId)),
       tap: entries.map((entry) => entry.tapName),
       // The seal egress table is `inet sbx_eg_<id>`, keyed by sandbox id. Soak
       // never exposeHttps, so there is no `ip sbx_pf_<id>` forward table.
@@ -344,17 +343,15 @@ export class RealMicrovmSoakBackend implements SoakBackend {
   }
 
   /**
-   * Cmdline identity tokens for the orphan-VMM scan: the exec-file basenames
-   * (which catch EVERY studiobox VMM, including an orphan with no journal
-   * record) plus each live execution id.
+   * argv0 basenames the orphan-VMM `/proc` scan owns: the firecracker + jailer
+   * exec-file basenames. Live executions are NOT tokens here — they are keyed
+   * by `--id` in the scan and excluded via the allowance (exec:<id>).
    */
-  #identityTokens(): string[] {
-    const tokens = [
+  #ownedBinaries(): string[] {
+    return [
       basename(this.#config.firecrackerBin),
       basename(this.#config.jailerBin),
     ];
-    for (const entry of this.#live.values()) tokens.push(entry.executionId);
-    return tokens;
   }
 }
 

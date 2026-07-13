@@ -70,8 +70,12 @@ export interface InGuestAuditOptions {
    * future netns model. @default "sbx"
    */
   readonly ownedNetnsPrefix?: string;
-  /** Cmdline identity tokens for the orphan-VMM scan (exec-file basenames + live `--id`s). */
-  readonly identityTokens: () => Iterable<string>;
+  /**
+   * argv0 basenames the orphan-VMM `/proc` scan owns (the firecracker + jailer
+   * exec-file basenames). Live executions are excluded via the allowance
+   * (`exec:<id>`), not listed here.
+   */
+  readonly ownedBinaries: () => Iterable<string>;
 }
 
 /**
@@ -94,7 +98,7 @@ export function buildInGuestAudit(options: InGuestAuditOptions): LeakAudit {
   const tapPrefix = options.ownedTapPrefix ?? TAP_NAME_PREFIX;
   const netnsPrefix = options.ownedNetnsPrefix ?? "sbx";
   return new LeakAudit([
-    procCmdlineOrphanEnumerator({ identityTokens: options.identityTokens }),
+    procCmdlineOrphanEnumerator({ ownedBinaries: options.ownedBinaries }),
     tapEnumerator({ ownedPrefix: tapPrefix }),
     netnsEnumerator({ ownedPrefix: netnsPrefix }),
     nftablesEnumerator({}),

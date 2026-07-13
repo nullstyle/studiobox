@@ -396,9 +396,17 @@ export function trackedProcessEnumerator(
   };
 }
 
-/** Allowance identity for a live pid in the `process` class. */
+/** Allowance identity for a live pid in the `process` class (host-safe ledger). */
 export function processIdentity(pid: number): string {
   return `pid=${pid}`;
+}
+
+/**
+ * Allowance identity for a live execution in the `process` class (the in-guest
+ * `/proc`-cmdline VMM scan keys on the jail exec-id, not the pid).
+ */
+export function processExecIdentity(executionId: string): string {
+  return `exec:${executionId}`;
 }
 
 /**

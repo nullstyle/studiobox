@@ -379,19 +379,52 @@ export interface ProcCmdlineOrphanEnumeratorOptions {
   /** Path to the proc filesystem. @default "/proc" */
   readonly procRoot?: string;
   /**
-   * Cmdline tokens that identify a studiobox VMM/jailer — e.g. the
-   * `firecracker` / `jailer` exec-file basenames and each live execution's
-   * `--id <executionId>` argv token. A process whose cmdline contains ANY of
-   * these is studiobox-owned.
+   * argv0 basenames that identify a studiobox VMM — the `firecracker` /
+   * `jailer` exec-file basenames. A process is studiobox-owned iff its
+   * `basename(argv[0])` is one of these — NOT a substring anywhere in the
+   * cmdline: the soak runner itself carries `SBX_VM_FIRECRACKER_BIN=…` in its
+   * env, so a substring match flags the runner.
    */
-  readonly identityTokens: () => Iterable<string>;
+  readonly ownedBinaries: () => Iterable<string>;
 }
 
 /**
- * `process` (in-guest variant): pids under `/proc` whose cmdline matches a
- * studiobox identity token. Unlike the host-safe pid ledger, this catches an
- * orphan VMM that has NO journal record at all (the true reconcile leak).
- * Live sandboxes' pids are passed in the allowance as `pid=<n>`.
+ * Parse `/proc/<pid>/cmdline` (NUL-separated argv, trailing NUL) into its argv
+ * vector, dropping the trailing empty element.
+ */
+export function parseProcCmdline(raw: Uint8Array): string[] {
+  return new TextDecoder().decode(raw).split("\0").filter((a) => a !== "");
+}
+
+/**
+ * The studiobox jail identity of a VMM argv, or `undefined` if `argv[0]`'s
+ * basename is not one of `owned`. Keyed on the jailer `--id <executionId>`
+ * (present on both the jailer and the firecracker it exec's into), so it is
+ * pid-namespace-independent; a matched VMM with no `--id` falls back to the pid.
+ */
+export function vmmJailIdentity(
+  argv: readonly string[],
+  owned: ReadonlySet<string>,
+  pid: string,
+): string | undefined {
+  const argv0 = argv[0];
+  if (argv0 === undefined) return undefined;
+  const base = argv0.slice(argv0.lastIndexOf("/") + 1);
+  if (!owned.has(base)) return undefined;
+  const idIdx = argv.indexOf("--id");
+  const execId = idIdx >= 0 ? argv[idIdx + 1] : undefined;
+  return execId !== undefined && execId !== ""
+    ? `exec:${execId}`
+    : `pid=${pid}`;
+}
+
+/**
+ * `process` (in-guest variant): every studiobox VMM under `/proc`, keyed by its
+ * jail exec-id (`exec:<executionId>`). A process is a VMM iff `basename(argv0)`
+ * is an owned binary (firecracker/jailer) — this catches an orphan VMM with NO
+ * journal record (the true reconcile leak) while ignoring the runner and other
+ * processes that merely mention the binary path. Live sandboxes' exec-ids are
+ * passed in the allowance as `exec:<executionId>`.
  */
 export function procCmdlineOrphanEnumerator(
   options: ProcCmdlineOrphanEnumeratorOptions,
@@ -400,9 +433,11 @@ export function procCmdlineOrphanEnumerator(
   return {
     leakClass: "process",
     async enumerate(): Promise<readonly string[]> {
-      const tokens = [...options.identityTokens()].filter((t) => t !== "");
-      if (tokens.length === 0) return [];
-      const out: string[] = [];
+      const owned = new Set(
+        [...options.ownedBinaries()].filter((b) => b !== ""),
+      );
+      if (owned.size === 0) return [];
+      const found = new Set<string>();
       let entries: AsyncIterable<Deno.DirEntry>;
       try {
         entries = Deno.readDir(procRoot);
@@ -418,12 +453,14 @@ export function procCmdlineOrphanEnumerator(
         } catch {
           continue; // the process exited between readDir and read
         }
-        const cmdline = new TextDecoder().decode(raw).replaceAll("\0", " ");
-        if (tokens.some((token) => cmdline.includes(token))) {
-          out.push(`pid=${entry.name}`);
-        }
+        const identity = vmmJailIdentity(
+          parseProcCmdline(raw),
+          owned,
+          entry.name,
+        );
+        if (identity !== undefined) found.add(identity);
       }
-      return out.sort();
+      return [...found].sort();
     },
   };
 }

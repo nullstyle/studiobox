@@ -210,27 +210,52 @@ Deno.test("parseMountPoints ignores the scope base itself when not present", () 
   assertEquals(points, ["/x/y", "/z"]);
 });
 
-Deno.test("procCmdlineOrphanEnumerator finds pids whose cmdline matches an identity token", async () => {
+Deno.test("procCmdlineOrphanEnumerator keys VMMs by jail exec-id, ignoring substring matches", async () => {
   const proc = await Deno.makeTempDir({ dir: "/tmp", prefix: "sbx-proc-" });
   try {
-    // pid 123: a jailed firecracker VMM (--id x0-0). pid 456: an unrelated
-    // shell. pid 789: the jailer for the same execution.
-    await writeCmdline(proc, 123, ["firecracker", "--id", "x0-0"]);
-    await writeCmdline(proc, 456, ["/bin/bash", "-c", "sleep 1"]);
-    await writeCmdline(proc, 789, ["jailer", "--id", "x0-0", "--exec-file"]);
+    // pid 123: a jailed firecracker VMM; pid 789: the jailer for the SAME
+    // execution (jailer exec's into firecracker) — both key to exec:x0-0 and
+    // dedup to one identity.
+    await writeCmdline(proc, 123, [
+      "/firecracker",
+      "--id",
+      "x0-0",
+      "--api-sock",
+      "/fc.sock",
+    ]);
+    await writeCmdline(proc, 789, [
+      "/usr/local/bin/jailer",
+      "--id",
+      "x0-0",
+      "--exec-file",
+      "firecracker",
+    ]);
+    // pid 456: the soak runner — its cmdline CONTAINS "firecracker" (an env var
+    // passed as an `env VAR=val` argv element), but argv0 is `sudo`, NOT a VMM
+    // binary, so it must NOT be flagged (the old substring match did).
+    await writeCmdline(proc, 456, [
+      "sudo",
+      "-E",
+      "env",
+      "SBX_VM_FIRECRACKER_BIN=/usr/local/bin/firecracker",
+      "deno",
+      "run",
+    ]);
+    // pid 999: an unrelated shell.
+    await writeCmdline(proc, 999, ["/bin/bash", "-c", "sleep 1"]);
     // A non-numeric dir must be ignored.
     await Deno.mkdir(join(proc, "self"), { recursive: true });
 
     const found = await procCmdlineOrphanEnumerator({
       procRoot: proc,
-      identityTokens: () => ["firecracker", "jailer"],
+      ownedBinaries: () => ["firecracker", "jailer"],
     }).enumerate();
-    assertEquals(found, ["pid=123", "pid=789"]);
+    assertEquals(found, ["exec:x0-0"]);
 
-    // No tokens → nothing is studiobox-owned.
+    // No owned binaries → nothing is studiobox-owned.
     const none = await procCmdlineOrphanEnumerator({
       procRoot: proc,
-      identityTokens: () => [],
+      ownedBinaries: () => [],
     }).enumerate();
     assertEquals(none, []);
   } finally {
