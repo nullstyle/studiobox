@@ -67,6 +67,13 @@ Deno.test({
     buildId: "m5-cycle",
   });
 
+  // Delta-based: the shared golden cache may already carry artifact refs from
+  // earlier tests/runs, so measure the belt BEFORE launch and assert it returns
+  // to THAT baseline on terminate (not an absolute 0), tolerating pre-existing
+  // refs — this launch pins +1 and terminate releases it.
+  const cache = new ArtifactCache({ root: config.cacheRoot });
+  const baselineRefcount = await cache.refcount(config.manifestHash);
+
   const sandboxId = "sbx-m5-cycle";
   const executionId = "e-cyc-1";
   const bootNonce = crypto.getRandomValues(new Uint8Array(32));
@@ -240,11 +247,11 @@ Deno.test({
     assertEquals(record?.phase, "terminated", "journal record is terminal");
     assertEquals(record?.terminationReason, "kill");
 
-    // The artifact belt is released and the per-boot overlay removed.
-    const cache = new ArtifactCache({ root: config.cacheRoot });
+    // The artifact belt is released (back to the pre-launch baseline) and the
+    // per-boot overlay removed.
     assertEquals(
       await cache.refcount(config.manifestHash),
-      0,
+      baselineRefcount,
       "artifact refcount released on terminate",
     );
     assertEquals(
