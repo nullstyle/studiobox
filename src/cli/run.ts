@@ -138,6 +138,9 @@ function defaultLifecycleFactory(
       ...(flags.rootdBin === undefined
         ? {}
         : { rootdBinarySource: flags.rootdBin }),
+      ...(flags.manifestHash === undefined
+        ? {}
+        : { launchConfig: { manifestHash: flags.manifestHash } }),
       ...(flags.controlPort === undefined ? {} : {
         ports: {
           control: flags.controlPort,

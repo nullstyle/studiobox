@@ -110,6 +110,13 @@ export class BridgeServer {
       transport: "unix",
       path: options.socketPath,
     });
+    // hostd (the unprivileged service user) dials this per-tunnel bridge UDS to
+    // present its credential; a Unix connect needs WRITE on the node, so widen
+    // the default to 0660 (owner + group rw). The socket's group is rootd's
+    // process group — `studiobox` on a provisioned host (its unit runs
+    // `Group=studiobox`) — so hostd, in that group, may connect. Confinement is
+    // still enforced by the 32-byte bridge credential, not the socket mode.
+    Deno.chmodSync(options.socketPath, 0o660);
     return new BridgeServer(listener, options);
   }
 

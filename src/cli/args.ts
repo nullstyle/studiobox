@@ -50,6 +50,12 @@ export interface HostFlags {
   readonly hostdBin?: string;
   /** Explicit host source of the `studiobox-rootd` binary. */
   readonly rootdBin?: string;
+  /**
+   * Content-manifest hash of the baked golden set (from
+   * `tools/build_golden_set.ts`). Supplying it enables rootd's launch planner so
+   * `Sandbox.create` boots a real microVM (up/provision).
+   */
+  readonly manifestHash?: string;
 }
 
 /** A parsed `host <sub>` invocation. */
@@ -89,7 +95,8 @@ host flags:
   --control-port <n> HostControl port (default 40000)
   --build-dir <dir>  directory holding the compiled daemons (default .build)
   --hostd-bin <path> explicit studiobox-hostd binary source
-  --rootd-bin <path> explicit studiobox-rootd binary source`;
+  --rootd-bin <path> explicit studiobox-rootd binary source
+  --manifest-hash <h> golden-set manifest hash (enables Sandbox.create)`;
 
 /** Raised on any malformed invocation; carries the usage text. */
 export class CliUsageError extends Error {
@@ -118,6 +125,16 @@ function parseArch(value: string): ArtifactArch {
     );
   }
   return value as ArtifactArch;
+}
+
+/** A golden-set content-manifest hash is a lowercase sha256 (64 hex chars). */
+function parseManifestHash(value: string): string {
+  if (!/^[0-9a-f]{64}$/.test(value)) {
+    throw new CliUsageError(
+      `--manifest-hash must be a 64-char lowercase sha256 (got "${value}")`,
+    );
+  }
+  return value;
 }
 
 /** Parse the full argv into a {@linkcode CliInvocation}. */
@@ -161,6 +178,7 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   let buildDir: string | undefined;
   let hostdBin: string | undefined;
   let rootdBin: string | undefined;
+  let manifestHash: string | undefined;
 
   for (let i = 0; i < flagArgs.length; i++) {
     const arg = flagArgs[i];
@@ -187,7 +205,9 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
     } else if (is("--build-dir")) buildDir = take("--build-dir");
     else if (is("--hostd-bin")) hostdBin = take("--hostd-bin");
     else if (is("--rootd-bin")) rootdBin = take("--rootd-bin");
-    else throw new CliUsageError(`unknown flag: ${arg}`);
+    else if (is("--manifest-hash")) {
+      manifestHash = parseManifestHash(take("--manifest-hash"));
+    } else throw new CliUsageError(`unknown flag: ${arg}`);
   }
 
   return {
@@ -204,6 +224,7 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
       ...(buildDir === undefined ? {} : { buildDir }),
       ...(hostdBin === undefined ? {} : { hostdBin }),
       ...(rootdBin === undefined ? {} : { rootdBin }),
+      ...(manifestHash === undefined ? {} : { manifestHash }),
     },
   };
 }

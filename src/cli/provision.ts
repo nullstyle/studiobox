@@ -48,8 +48,19 @@ const GUEST_ETC = "/etc/studiobox";
 export const HOSTD_TOKEN = `${GUEST_ETC}/hostd.token`;
 export const ROOTD_TOKEN = `${GUEST_ETC}/rootd.token`;
 export const WIRE_JSON = `${GUEST_ETC}/wire.json`;
+/** rootd's `--launch-config`: enables the golden-artifact launch planner. */
+export const LAUNCH_JSON = `${GUEST_ETC}/launch.json`;
 const GUEST_STATE_DIR = "/var/lib/studiobox";
 export const JOURNAL_PATH = `${GUEST_STATE_DIR}/journal.json`;
+// Launch-planner guest layout (mirrors the working /etc/studiobox/launch.json).
+// `installFirecrackerScript` installs both bins into GUEST_BIN_DIR; rootd (root)
+// creates the jail/overlay dirs on demand; the cache is populated by the golden
+// bake (`tools/build_golden_set.ts`).
+const GUEST_JAILER_BIN = `${GUEST_BIN_DIR}/jailer`;
+const GUEST_FIRECRACKER_BIN = `${GUEST_BIN_DIR}/firecracker`;
+const GUEST_CACHE_DIR = `${GUEST_STATE_DIR}/cache`;
+const GUEST_JAIL_DIR = `${GUEST_STATE_DIR}/jail`;
+const GUEST_OVERLAY_DIR = `${GUEST_STATE_DIR}/overlay`;
 const GUEST_RUN_DIR = "/run/studiobox";
 export const SUPERVISOR_SOCK = `${GUEST_RUN_DIR}/supervisor.sock`;
 const SERVICE_USER = "studiobox";
@@ -134,6 +145,7 @@ export type ProvisionStepName =
   | "directories"
   | "binaries"
   | "token"
+  | "launch-config"
   | "systemd";
 
 /** The fixed step order (also the assertion order in tests). */
@@ -143,6 +155,7 @@ export const PROVISION_STEP_ORDER: readonly ProvisionStepName[] = [
   "directories",
   "binaries",
   "token",
+  "launch-config",
   "systemd",
 ];
 
@@ -171,6 +184,12 @@ export interface ProvisionOptions {
   readonly rootdBinarySource: string;
   /** Host source of `compat/wire.json`. */
   readonly compatSource: string;
+  /**
+   * When set, write `launch.json` and wire rootd's `--launch-config` so
+   * `Sandbox.create` can boot a real microVM. Omit to bring up a control-plane-
+   * only host (a warning is recorded and `Sandbox.create` stays unavailable).
+   */
+  readonly launchConfig?: LaunchConfigInput;
   /** Re-mint the token even when one already exists. @default false */
   readonly rotateToken?: boolean;
   /** Bootstrap-token source (32 bytes). @default 32 random bytes */
@@ -182,13 +201,75 @@ export interface ProvisionOptions {
 const TOKEN_BYTES = 32;
 
 /**
+ * Operator-supplied inputs that turn ON rootd's launch planner (so
+ * `Sandbox.create` can boot a real microVM). The only thing that varies per
+ * host is the identity of the baked golden artifact set — its content-manifest
+ * hash, which `tools/build_golden_set.ts` prints. Everything else in the launch
+ * config (bin paths, uid/gid, chroot/overlay/cache dirs) is fixed by the guest
+ * layout this provisioner installs, so {@linkcode buildLaunchConfig} fills it in.
+ *
+ * Absent ⇒ rootd runs control-plane only: `host doctor` is green but
+ * `Sandbox.create` fails until a golden set is baked and `host up` is re-run
+ * with its hash.
+ */
+export interface LaunchConfigInput {
+  /** sha256 content-manifest hash of the baked golden artifact set. */
+  readonly manifestHash: string;
+  /** Enable the Tier-B dataplane with this upstream DNS resolver (else vsock-only). */
+  readonly upstreamDns?: string;
+  /** Override the default pool CIDR (`10.201.0.0/16`); must not overlap host bridges. */
+  readonly poolCidr?: string;
+  /** Force the pre-M10 vsock-only path even when `upstreamDns` is set. */
+  readonly netlessOnly?: boolean;
+  /** Opt into warm-template snapshot restore (gated; default cold). */
+  readonly launchStrategy?: "cold" | "snapshot";
+}
+
+/**
+ * Compose the `--launch-config` JSON rootd reads, from the fixed guest layout
+ * plus the operator's {@linkcode LaunchConfigInput}. Pure + exported so a unit
+ * test pins the shape against rootd's own parser without a host.
+ */
+export function buildLaunchConfig(
+  arch: ArtifactArch,
+  input: LaunchConfigInput,
+): Record<string, unknown> {
+  return {
+    artifactCache: GUEST_CACHE_DIR,
+    manifestHash: input.manifestHash,
+    arch,
+    jailerBin: GUEST_JAILER_BIN,
+    firecrackerBin: GUEST_FIRECRACKER_BIN,
+    uid: 0,
+    gid: 0,
+    chrootBaseDir: GUEST_JAIL_DIR,
+    overlayDir: GUEST_OVERLAY_DIR,
+    ...(input.upstreamDns === undefined
+      ? {}
+      : { upstreamDns: input.upstreamDns }),
+    ...(input.poolCidr === undefined ? {} : { poolCidr: input.poolCidr }),
+    ...(input.netlessOnly === undefined
+      ? {}
+      : { netlessOnly: input.netlessOnly }),
+    ...(input.launchStrategy === undefined
+      ? {}
+      : { launchStrategy: input.launchStrategy }),
+  };
+}
+
+/**
  * Render the two systemd units. Pure + exported so a unit test pins the
  * `ExecStart` argv (which must match the daemons' own flag parsers) without a
- * host.
+ * host. When `launchConfigPath` is set, rootd is wired to read its launch
+ * planner config from there (enabling `Sandbox.create`).
  */
 export function renderSystemdUnits(
   ports: HostPortConfig,
+  options: { readonly launchConfigPath?: string } = {},
 ): { readonly rootd: string; readonly hostd: string } {
+  const launchArg = options.launchConfigPath === undefined
+    ? ""
+    : ` --launch-config ${options.launchConfigPath}`;
   const rootd = `[Unit]
 Description=studiobox-rootd (root supervisor)
 Documentation=https://jsr.io/@nullstyle/studiobox
@@ -202,7 +283,7 @@ User=root
 # RuntimeDirectory (/run/studiobox) and the supervisor UDS it binds there are
 # owned root:${SERVICE_USER} — letting the unprivileged hostd traverse + connect.
 Group=${SERVICE_USER}
-ExecStart=${ROOTD_BIN} --socket ${SUPERVISOR_SOCK} --state ${JOURNAL_PATH} --token-file ${ROOTD_TOKEN} --build-id ${BUILD_ID} --compat ${WIRE_JSON}
+ExecStart=${ROOTD_BIN} --socket ${SUPERVISOR_SOCK} --state ${JOURNAL_PATH} --token-file ${ROOTD_TOKEN} --build-id ${BUILD_ID} --compat ${WIRE_JSON}${launchArg}
 RuntimeDirectory=studiobox
 RuntimeDirectoryMode=0710
 StateDirectory=studiobox
@@ -221,7 +302,7 @@ Requires=studiobox-rootd.service
 [Service]
 Type=simple
 User=${SERVICE_USER}
-ExecStart=${HOSTD_BIN} --listen 0.0.0.0:${ports.control} --rootd-socket ${SUPERVISOR_SOCK} --token-file ${HOSTD_TOKEN} --rootd-token-file ${ROOTD_TOKEN} --build-id ${BUILD_ID} --compat ${WIRE_JSON}
+ExecStart=${HOSTD_BIN} --listen 0.0.0.0:${ports.control} --tunnel-listen 0.0.0.0:${ports.tunnel} --rootd-socket ${SUPERVISOR_SOCK} --token-file ${HOSTD_TOKEN} --rootd-token-file ${ROOTD_TOKEN} --build-id ${BUILD_ID} --compat ${WIRE_JSON}
 Restart=on-failure
 RestartSec=2
 
@@ -320,8 +401,45 @@ export async function provisionHost(
   });
   steps.push(tokenResult.step);
 
+  // 5b) launch-planner config (optional) -----------------------------------
+  // Written before the units so the rootd unit that references it can start.
+  // Without it rootd is control-plane only; Sandbox.create needs a golden set.
+  let launchConfigPath: string | undefined;
+  if (options.launchConfig !== undefined) {
+    log("provision: launch-planner config");
+    const json = JSON.stringify(
+      buildLaunchConfig(options.arch, options.launchConfig),
+      null,
+      2,
+    );
+    await env.guestExec(writeGuestConfigScript(LAUNCH_JSON, json, "0640"), {
+      check: true,
+      sudo: true,
+    });
+    launchConfigPath = LAUNCH_JSON;
+    steps.push({
+      name: "launch-config",
+      status: "ran",
+      detail: `manifest ${options.launchConfig.manifestHash.slice(0, 12)}…`,
+    });
+  } else {
+    warnings.push(
+      "no launch config provided; rootd runs control-plane only and " +
+        "Sandbox.create is unavailable — bake a golden set " +
+        "(tools/build_golden_set.ts) and re-run host up with its manifest hash",
+    );
+    steps.push({
+      name: "launch-config",
+      status: "skipped",
+      detail: "no golden set / manifest hash supplied",
+    });
+  }
+
   // 6) systemd units -------------------------------------------------------
-  const units = renderSystemdUnits(ports);
+  const units = renderSystemdUnits(
+    ports,
+    launchConfigPath === undefined ? {} : { launchConfigPath },
+  );
   log("provision: systemd units");
   await env.guestExec(writeUnitScript("studiobox-rootd.service", units.rootd), {
     check: true,
@@ -451,4 +569,19 @@ function directoriesScript(): string {
 function writeUnitScript(unitName: string, contents: string): string {
   return `cat > /etc/systemd/system/${unitName} <<'STUDIOBOX_UNIT_EOF'\n` +
     `${contents}STUDIOBOX_UNIT_EOF`;
+}
+
+/**
+ * Write a guest config file from a quoted heredoc (no interpolation — the
+ * delimiter is single-quoted, so JSON's double quotes are literal), then set its
+ * mode and `root:${SERVICE_USER}` ownership. Runs under `sudo` (the caller
+ * passes `{ sudo: true }`).
+ */
+function writeGuestConfigScript(
+  path: string,
+  contents: string,
+  mode: string,
+): string {
+  return `cat > ${path} <<'STUDIOBOX_CFG_EOF'\n${contents}\nSTUDIOBOX_CFG_EOF\n` +
+    `chmod ${mode} ${path}; chown root:${SERVICE_USER} ${path}`;
 }

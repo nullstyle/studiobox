@@ -46,6 +46,43 @@ aims to follow [semantic versioning](https://semver.org/) from 1.0 onward.
   `host
   doctor` green on negotiate, capacity, and quarantine.
 
+### Added
+
+- **`Sandbox.create()` boots a real microVM through a provisioned host, proven
+  end to end.** With a golden set baked (`tools/build_golden_set.ts`), a host
+  provisioned by `studiobox host up --manifest-hash <hash>` runs the full
+  drop-in on real Firecracker: a client `Sandbox.create()` cold-boots a jailed
+  microVM in ~4.7s, then `sh`, `fs.readTextFile`/`writeTextFile`, and
+  `deno.eval` all execute in-guest over the ticketed tunnel, and `close()`
+  reclaims it. Validated against a host provisioned entirely from source (no
+  manual steps).
+- **`host up|provision --manifest-hash <sha256>`** enables rootd's launch
+  planner. Provisioning writes `/etc/studiobox/launch.json` (bin paths, uid/gid,
+  chroot/overlay/cache dirs are fixed by the guest layout; the manifest hash is
+  the one per-host input) and wires the rootd unit's `--launch-config`. Without
+  it, `host up` still brings up a control-plane-only host and records a warning
+  that `Sandbox.create` needs a golden set.
+
+### Fixed
+
+- **The ticketed tunnel now assembles through a provisioned (split-user) host.**
+  Two bugs blocked the client's tunnel attach, both invisible until a real
+  cross-user deploy:
+  - the hostd unit binds the tunnel router on `0.0.0.0` (`--tunnel-listen`), not
+    the guest loopback — Lima forwards a `0.0.0.0` bind to the mac loopback but
+    never a `127.0.0.1` one, so the client could not reach the tunnel port;
+  - rootd's per-tunnel bridge UDS is created `0660` under a `0710`
+    group-traversable root, so the unprivileged hostd (in the `studiobox` group)
+    can connect to it; it was `0700 root` before, and every ticket was refused
+    `SupervisorUnavailable`. The 32-byte bridge credential, not the socket mode,
+    remains the confinement boundary.
+- **No first-`create` tunnel race.** hostd binds the tunnel router eagerly at
+  startup (rather than lazily on the first `openTunnel`) so a front-of-host
+  forwarder establishes the route before any client dials; the client also
+  retries a refused tunnel connect for a few seconds, since the single-use
+  ticket is presented only after the connect succeeds and so is never burned by
+  a retry.
+
 ## [0.1.1] — 2026-07-12
 
 ### Fixed

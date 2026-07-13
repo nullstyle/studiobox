@@ -70,6 +70,8 @@ Deno.test("parseCliArgs: value flags (space form)", () => {
     "/b/hostd",
     "--rootd-bin",
     "/b/rootd",
+    "--manifest-hash",
+    "a".repeat(64),
   ]);
   assert(parsed.kind === "host");
   assertEquals(parsed.flags.name, "my-host");
@@ -78,6 +80,15 @@ Deno.test("parseCliArgs: value flags (space form)", () => {
   assertEquals(parsed.flags.buildDir, "out");
   assertEquals(parsed.flags.hostdBin, "/b/hostd");
   assertEquals(parsed.flags.rootdBin, "/b/rootd");
+  assertEquals(parsed.flags.manifestHash, "a".repeat(64));
+});
+
+Deno.test("parseCliArgs: --manifest-hash rejects a non-sha256 value", () => {
+  assertThrows(
+    () => parseCliArgs(["host", "up", "--manifest-hash", "not-a-hash"]),
+    CliUsageError,
+    "64-char lowercase sha256",
+  );
 });
 
 Deno.test("parseCliArgs: value flags (inline = form)", () => {

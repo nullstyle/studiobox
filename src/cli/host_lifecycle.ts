@@ -36,6 +36,7 @@ import {
   defaultCompatPath,
   defaultDaemonBinary,
   defaultHostTokenPath,
+  type LaunchConfigInput,
   provisionHost,
   type ProvisionResult,
 } from "./provision.ts";
@@ -66,6 +67,12 @@ export interface HostLifecycleOptions {
   readonly rootdBinarySource?: string;
   /** Host source of `compat/wire.json`. @default the committed pin */
   readonly compatSource?: string;
+  /**
+   * Enable rootd's launch planner so `Sandbox.create` boots a real microVM.
+   * The one required field is the baked golden set's `manifestHash` (printed by
+   * `tools/build_golden_set.ts`); omit to bring up a control-plane-only host.
+   */
+  readonly launchConfig?: LaunchConfigInput;
   /** Overrides passed to {@linkcode renderLimaTemplate}. */
   readonly templateOptions?: LimaTemplateOptions;
   /** Render the template to a path `createVm` consumes. @default temp file */
@@ -129,6 +136,7 @@ export class HostLifecycle {
   readonly #hostdBinarySource: string;
   readonly #rootdBinarySource: string;
   readonly #compatSource: string;
+  readonly #launchConfig: LaunchConfigInput | undefined;
   readonly #templateOptions: LimaTemplateOptions;
   readonly #writeTemplate: (yaml: string) => Promise<string>;
   readonly #tokenFactory: (() => Uint8Array) | undefined;
@@ -149,6 +157,7 @@ export class HostLifecycle {
     this.#rootdBinarySource = options.rootdBinarySource ??
       defaultDaemonBinary(buildDir, "studiobox-rootd", this.#arch);
     this.#compatSource = options.compatSource ?? defaultCompatPath();
+    this.#launchConfig = options.launchConfig;
     this.#templateOptions = options.templateOptions ??
       { ports: this.#ports };
     this.#writeTemplate = options.writeTemplate ?? defaultWriteTemplate;
@@ -230,6 +239,9 @@ export class HostLifecycle {
       hostdBinarySource: this.#hostdBinarySource,
       rootdBinarySource: this.#rootdBinarySource,
       compatSource: this.#compatSource,
+      ...(this.#launchConfig === undefined
+        ? {}
+        : { launchConfig: this.#launchConfig }),
       rotateToken,
       log: this.#log,
       ...(this.#tokenFactory === undefined

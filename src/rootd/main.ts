@@ -809,14 +809,19 @@ async function main(): Promise<void> {
   });
 
   // The bridge splice tier (PLAN.md §M8): rootd binds each minted grant's
-  // loopback UDS under the root-owned bridge root and splices it to the guest
-  // agent vsock. hostd dials that UDS (credential-authenticated) to reach the
-  // guest. Ensure the root exists (0700: only root + the bridge peer reach it).
-  await Deno.mkdir(BRIDGE_SOCKET_ROOT, { recursive: true, mode: 0o700 }).catch(
+  // loopback UDS under the bridge root and splices it to the guest agent vsock.
+  // hostd dials that UDS (credential-authenticated) to reach the guest, so the
+  // root must be TRAVERSABLE by the unprivileged hostd: 0710, owned
+  // root:${group} (rootd's unit runs `Group=studiobox`), lets the group enter
+  // but not list; the per-bridge sockets inside carry their own 0660 mode.
+  await Deno.mkdir(BRIDGE_SOCKET_ROOT, { recursive: true, mode: 0o710 }).catch(
     (error) => {
       if (!(error instanceof Deno.errors.AlreadyExists)) throw error;
     },
   );
+  // `mkdir` mode only applies on creation; ensure an already-existing root (a
+  // prior run left it 0700) is group-traversable too.
+  await Deno.chmod(BRIDGE_SOCKET_ROOT, 0o710).catch(() => {});
   const bridgeServers = new Set<BridgeServer>();
   const onBridgeGranted = (
     grant: { socketPath: string; bridgeCredential: Uint8Array },

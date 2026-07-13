@@ -531,6 +531,17 @@ async function main(): Promise<void> {
     bridgeFactory: new WireBridgeFactory(session),
     tunnelListen: flags.tunnelListen,
   });
+  // Bind the tunnel router now (not lazily on the first openTunnel) so a
+  // front-of-host port-forwarder — Lima on macOS forwards only ports it sees
+  // listening — establishes the forward before any client dials, removing a
+  // first-`create` race. Best-effort: the lazy bind still covers a failure here.
+  await core.warmTunnelRouter().catch((error) => {
+    console.error(
+      `hostd could not pre-bind the tunnel router: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  });
   const server = await startHostControlServer({
     listen: flags.listen,
     core,

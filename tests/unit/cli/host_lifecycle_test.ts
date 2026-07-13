@@ -1,7 +1,9 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { HostLifecycle } from "../../../src/cli/host_lifecycle.ts";
 import {
+  buildLaunchConfig,
   HOSTD_TOKEN,
+  LAUNCH_JSON,
   PROVISION_STEP_ORDER,
   renderSystemdUnits,
   ROOTD_TOKEN,
@@ -27,8 +29,13 @@ interface Fixture {
 }
 
 function makeFixture(
-  overrides: Partial<{ mode: "lima" | "no-lima"; daemonsPresent: boolean }> =
-    {},
+  overrides: Partial<
+    {
+      mode: "lima" | "no-lima";
+      daemonsPresent: boolean;
+      manifestHash: string;
+    }
+  > = {},
 ): Fixture {
   const runner = new FakeHostRunner();
   const fs = new FakeLocalFs();
@@ -47,6 +54,9 @@ function makeFixture(
     compatSource: COMPAT_SRC,
     tokenFactory: sequentialTokenFactory(),
     writeTemplate: () => Promise.resolve("/tmp/fake-template.yaml"),
+    ...(overrides.manifestHash === undefined
+      ? {}
+      : { launchConfig: { manifestHash: overrides.manifestHash } }),
   });
   return { runner, fs, lifecycle };
 }
@@ -246,15 +256,64 @@ Deno.test("renderSystemdUnits: ExecStart matches the daemons' flag contracts", (
   assert(units.rootd.includes(`--compat ${WIRE_JSON}`));
   assert(units.rootd.includes("User=root"));
 
-  // hostd: --listen, --rootd-socket, --token-file, --rootd-token-file, --compat.
+  // rootd is control-plane only by default — NO launch planner wired.
+  assert(
+    !units.rootd.includes("--launch-config"),
+    "no --launch-config without a launch config",
+  );
+
+  // hostd: --listen, --tunnel-listen, --rootd-socket, tokens, --compat.
   assert(units.hostd.includes("ExecStart=/usr/local/bin/studiobox-hostd"));
   assert(units.hostd.includes("--listen 0.0.0.0:40000"));
+  // The tunnel router must bind 0.0.0.0 (Lima forwards only 0.0.0.0 binds to
+  // the mac loopback; a guest-loopback bind is unreachable from the client).
+  assert(units.hostd.includes("--tunnel-listen 0.0.0.0:40001"));
   assert(units.hostd.includes("--rootd-socket /run/studiobox/supervisor.sock"));
   assert(units.hostd.includes(`--token-file ${HOSTD_TOKEN}`));
   assert(units.hostd.includes(`--rootd-token-file ${ROOTD_TOKEN}`));
   // hostd is unprivileged and ordered after rootd (DESIGN.md §3).
   assert(units.hostd.includes("User=studiobox"));
   assert(units.hostd.includes("Requires=studiobox-rootd.service"));
+});
+
+Deno.test("renderSystemdUnits: a launch-config path wires rootd's planner", () => {
+  const units = renderSystemdUnits(DEFAULT_PORTS, {
+    launchConfigPath: "/etc/studiobox/launch.json",
+  });
+  assert(
+    units.rootd.includes("--launch-config /etc/studiobox/launch.json"),
+    "rootd ExecStart carries --launch-config when a path is given",
+  );
+  // Still trailing (after --compat) so the base contract is unchanged.
+  assert(
+    /--compat \S+ --launch-config /.test(units.rootd),
+    "--launch-config follows --compat",
+  );
+});
+
+Deno.test("buildLaunchConfig: mirrors the working launch.json shape", () => {
+  const cfg = buildLaunchConfig("aarch64", {
+    manifestHash: "a".repeat(64),
+  });
+  assertEquals(cfg.artifactCache, "/var/lib/studiobox/cache");
+  assertEquals(cfg.manifestHash, "a".repeat(64));
+  assertEquals(cfg.arch, "aarch64");
+  assertEquals(cfg.jailerBin, "/usr/local/bin/jailer");
+  assertEquals(cfg.firecrackerBin, "/usr/local/bin/firecracker");
+  assertEquals(cfg.uid, 0);
+  assertEquals(cfg.gid, 0);
+  assertEquals(cfg.chrootBaseDir, "/var/lib/studiobox/jail");
+  assertEquals(cfg.overlayDir, "/var/lib/studiobox/overlay");
+  // Optional dataplane fields are omitted unless supplied.
+  assert(!("upstreamDns" in cfg));
+  assertEquals(
+    buildLaunchConfig("aarch64", {
+      manifestHash: "b".repeat(64),
+      upstreamDns: "1.1.1.1",
+      launchStrategy: "snapshot",
+    }).upstreamDns,
+    "1.1.1.1",
+  );
 });
 
 Deno.test("provision: firecracker step installs the pinned version", async () => {
@@ -266,5 +325,53 @@ Deno.test("provision: firecracker step installs the pinned version", async () =>
       c.args.some((a) => a.includes("firecracker/releases/download/v1.16.1"))
     ),
     "provision installs the FIRECRACKER_COMPAT-pinned Firecracker",
+  );
+});
+
+Deno.test("provision: a manifest hash writes launch.json + wires --launch-config", async () => {
+  const hash = "c".repeat(64);
+  const { runner, lifecycle } = makeFixture({ manifestHash: hash });
+  const result = await lifecycle.provision();
+
+  // launch.json is written into the guest carrying the manifest hash.
+  assert(
+    runner.calls.some((c) =>
+      c.args.some((a) => a.includes(LAUNCH_JSON) && a.includes(hash))
+    ),
+    "provision writes launch.json with the manifest hash",
+  );
+  // The rootd unit is (re)written with --launch-config pointing at it.
+  assert(
+    runner.calls.some((c) =>
+      c.args.some((a) =>
+        a.includes("studiobox-rootd.service") &&
+        a.includes(`--launch-config ${LAUNCH_JSON}`)
+      )
+    ),
+    "the rootd unit is wired with --launch-config",
+  );
+  const step = result.steps.find((s) => s.name === "launch-config");
+  assertEquals(step?.status, "ran");
+});
+
+Deno.test("provision: no manifest hash leaves rootd control-plane only", async () => {
+  const { runner, lifecycle } = makeFixture();
+  const result = await lifecycle.provision();
+
+  assert(
+    !runner.calls.some((c) => c.args.some((a) => a.includes(LAUNCH_JSON))),
+    "no launch.json is written without a manifest hash",
+  );
+  assert(
+    !runner.calls.some((c) =>
+      c.args.some((a) => a.includes("--launch-config"))
+    ),
+    "the rootd unit carries no --launch-config",
+  );
+  const step = result.steps.find((s) => s.name === "launch-config");
+  assertEquals(step?.status, "skipped");
+  assert(
+    result.warnings.some((w) => w.includes("Sandbox.create is unavailable")),
+    "a warning explains Sandbox.create needs a golden set",
   );
 });

@@ -36,11 +36,29 @@ export type TunnelEndpoint =
 /** Default budget for the whole dial (connect + preface + ACK). */
 export const DEFAULT_TUNNEL_DIAL_TIMEOUT_MS = 10_000;
 
+/** Default delay between CONNECT retries while the endpoint is unreachable. */
+export const DEFAULT_TUNNEL_CONNECT_RETRY_INTERVAL_MS = 150;
+
 export interface DialTunnelOptions {
   /** Bound (ms) for the ACK read (and, best effort, the connect). */
   readonly timeoutMs?: number;
   /** External cancellation. */
   readonly signal?: AbortSignal;
+  /**
+   * Best-effort budget (ms) to keep retrying the INITIAL connect while the
+   * endpoint refuses / isn't reachable yet — e.g. a Lima/NAT port-forward the
+   * host just started listening on hasn't propagated. Safe to retry: the ticket
+   * is presented only AFTER a successful connect, so a refused connect never
+   * burns it. Retries the connect ONLY; any post-connect failure is terminal.
+   * Keep it well under the route TTL (10s) to leave room for the preface + ACK.
+   * @default 0 (no retry)
+   */
+  readonly connectRetryMs?: number;
+  /**
+   * Delay between connect retries.
+   * @default {@link DEFAULT_TUNNEL_CONNECT_RETRY_INTERVAL_MS}
+   */
+  readonly connectRetryIntervalMs?: number;
 }
 
 /** A failed tunnel dial, carrying the ACK status when the server sent one. */
@@ -76,20 +94,7 @@ export async function dialTunnel(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TUNNEL_DIAL_TIMEOUT_MS;
   const preface = encodeTunnelRequest(ticket);
 
-  let conn: Deno.Conn;
-  try {
-    conn = endpoint.transport === "unix"
-      ? await Deno.connect({ transport: "unix", path: endpoint.path })
-      : await Deno.connect({
-        transport: "tcp",
-        hostname: endpoint.hostname,
-        port: endpoint.port,
-      });
-  } catch (error) {
-    throw new TunnelDialError(
-      `tunnel endpoint is unreachable: ${errorText(error)}`,
-    );
-  }
+  const conn = await connectWithRetry(endpoint, options);
 
   try {
     await writeAll(conn, preface);
@@ -118,6 +123,58 @@ export async function dialTunnel(
     }
     throw new TunnelDialError(`tunnel handshake failed: ${errorText(error)}`);
   }
+}
+
+/**
+ * Connect the endpoint, retrying a refused / unreachable connect within
+ * {@link DialTunnelOptions.connectRetryMs}. Only the connect is retried — no
+ * ticket byte is written here, so retrying is side-effect-free. Throws
+ * {@link TunnelDialError} once the budget lapses (or immediately when the budget
+ * is 0, preserving the original no-retry behavior).
+ */
+async function connectWithRetry(
+  endpoint: TunnelEndpoint,
+  options: DialTunnelOptions,
+): Promise<Deno.Conn> {
+  const budgetMs = options.connectRetryMs ?? 0;
+  const intervalMs = options.connectRetryIntervalMs ??
+    DEFAULT_TUNNEL_CONNECT_RETRY_INTERVAL_MS;
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    if (options.signal?.aborted) {
+      throw new TunnelDialError("tunnel endpoint is unreachable: aborted");
+    }
+    try {
+      return endpoint.transport === "unix"
+        ? await Deno.connect({ transport: "unix", path: endpoint.path })
+        : await Deno.connect({
+          transport: "tcp",
+          hostname: endpoint.hostname,
+          port: endpoint.port,
+        });
+    } catch (error) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new TunnelDialError(
+          `tunnel endpoint is unreachable: ${errorText(error)}`,
+        );
+      }
+      await sleep(Math.min(intervalMs, remaining), options.signal);
+    }
+  }
+}
+
+/** Resolve after `ms`, or early if `signal` aborts (never rejects). */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, ms);
+    function finish(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    }
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 }
 
 /** Adapt a `Deno.Conn` to the fixed-preface reader (read exact, close). */

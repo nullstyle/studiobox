@@ -1023,6 +1023,21 @@ export class HostControlCore {
     this.#forwardPorts.release(hostPort);
   }
 
+  /**
+   * Eagerly bind the shared tunnel router now, instead of lazily on the first
+   * {@link HostSandbox.openTunnel}. Only meaningful with an explicit
+   * {@link tunnelListen} (a fixed TCP endpoint): binding at hostd startup lets a
+   * NAT/port-forwarder in front of the host (e.g. Lima on macOS forwards only
+   * ports it observes listening) establish the forward BEFORE the first tunnel
+   * dial, eliminating a first-`create` race where the forward isn't up yet. A
+   * no-op without `tunnelListen` (the ephemeral-UDS path binds per test run).
+   * Idempotent; the returned promise resolves once the listener is open.
+   */
+  async warmTunnelRouter(): Promise<void> {
+    if (this.#tunnelListen === undefined) return;
+    await this.#ensureRouter();
+  }
+
   /** Bind (once) the shared tunnel router the whole core multiplexes onto. */
   async #ensureRouter(): Promise<TunnelRouter> {
     if (this.#router !== undefined) return this.#router;

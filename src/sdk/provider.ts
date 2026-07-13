@@ -81,6 +81,12 @@ const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 const DEFAULT_MEMORY_MIB = 1280;
 const DEFAULT_VCPUS = 2;
 const MAX_LABELS = 5;
+/**
+ * How long to keep retrying the tunnel connect while the endpoint is still
+ * unreachable (a just-established Lima/NAT forward). Bounded under the 10s
+ * route TTL so a retried connect still leaves room for the preface + ACK.
+ */
+const TUNNEL_CONNECT_RETRY_MS = 6_000;
 
 /** Studiobox-facing sandbox id grammar (`sbx_loc_` + 20 of the alphabet). */
 const SANDBOX_ID_RE = /^sbx_loc_[0-9a-hjkmnp-z]{20}$/;
@@ -380,6 +386,11 @@ export class StudioboxProvider implements SandboxProvider {
     try {
       tunnelConn = await dialTunnel(this.#tunnel, grant.ticket, {
         timeoutMs: this.#timeoutMs,
+        // Ride out a just-established front-of-host port-forward (Lima on macOS
+        // forwards a freshly-bound tunnel port only once it observes it) — the
+        // ticket isn't presented until the connect succeeds, so this can't burn
+        // it. Bounded under the 10s route TTL to leave room for preface + ACK.
+        connectRetryMs: TUNNEL_CONNECT_RETRY_MS,
       });
     } catch (error) {
       await hostConnection.close();
