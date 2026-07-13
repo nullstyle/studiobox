@@ -1,0 +1,342 @@
+name: Integration (real Firecracker microVMs)
+
+# The T3/T4 real-microVM suites (tests/vm/, parity, snapshot, soak) that the
+# `test:vm` Lima driver runs locally on a Mac, ported to run NATIVELY on a
+# KVM-equipped x86_64 GitHub runner. This is the #1 gap to 1.0: nothing else in
+# CI boots real Firecracker.
+#
+# It mirrors two proven shapes:
+#   * tools/lima_vm_test.ts — the SBX_VM_* environment contract
+#     (tests/vm/support.ts), the Firecracker v1.16.1 install
+#     (images/pins.json → kernel.firecrackerPinned), the golden bake via
+#     tools/build_golden_set.ts (final stdout line is a JSON `{ "hash", … }`),
+#     and running the suite as root against that set; and
+#   * firecracker-deno's KVM integration job — the udev MODE=0666 rule,
+#     `modprobe vhost_vsock`, and a /dev/kvm preflight (PLAN.md §4).
+#
+# Two jobs share that setup shape:
+#   * `integration` runs per PR / push (T3 then sudo T4); and
+#   * `soak` runs the real-microVM 1.0 drill on a nightly cron.
+# Both LOUD-SKIP (staying green) when the runner has no /dev/kvm.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * *" # nightly 06:00 UTC — the real-VM soak drill
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Mirror ci.yml's cancel-superseded pattern, but key on event_name too so a
+  # push to main never cancels an in-flight nightly soak (they land in
+  # different groups); redundant PR/push runs on the same ref still supersede.
+  group: integration-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  # Host Deno pinned to ci.yml's floor. The golden bake compiles studioboxd
+  # with THIS deno, so its version participates in the manifest hash.
+  DENO_VERSION: "2.9.1"
+  # images/pins.json → kernel.firecrackerPinned (the pinned jailer+firecracker).
+  FC_VERSION: "v1.16.1"
+  # Native runner arch. GitHub-hosted ubuntu-24.04 runners are x86_64.
+  GOLDEN_ARCH: x86_64
+  # Firecracker + jailer land here (workspace, runner-owned → cacheable);
+  # SBX_VM_{JAILER,FIRECRACKER}_BIN point the suite at them.
+  FC_DIR: ${{ github.workspace }}/.ci/fc
+  # Golden artifact cache + build scratch + the captured manifest hash.
+  GOLDEN_CACHE: ${{ github.workspace }}/.ci/golden-cache
+  GOLDEN_BUILD: ${{ github.workspace }}/.ci/golden-build
+  GOLDEN_HASH_FILE: ${{ github.workspace }}/.ci/golden.hash
+  # Short work base: it prefixes the vsock sun_path (~104-byte sockaddr_un),
+  # so it MUST stay short — mirrors the Lima driver's /tmp/sbxw.
+  SBX_VM_WORK: /tmp/sbxw
+
+jobs:
+  integration:
+    name: Real microVM suite (T3 + T4)
+    # Per PR / push only; the nightly cron drives the `soak` job instead.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Preflight /dev/kvm + enable for the runner user
+        id: preflight
+        # udev rule (usable /dev/kvm without root) + vhost_vsock, mirroring
+        # firecracker-deno's KVM job — but LOUD-SKIP (green) instead of failing
+        # when /dev/kvm is absent, so KVM-less runners don't red the board.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo modprobe vhost_vsock || true
+          if [ -e /dev/kvm ]; then
+            echo "kvm=true" >> "$GITHUB_OUTPUT"
+            echo "✓ /dev/kvm present — running the real-microVM suite"
+          else
+            echo "kvm=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::/dev/kvm absent on this runner — loud-skipping the real-microVM suite (T3/T4). Nested virt is required; use a KVM-capable runner."
+          fi
+
+      - name: Install Deno
+        if: steps.preflight.outputs.kvm == 'true'
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+          cache: true
+
+      - name: Install rootfs build deps
+        if: steps.preflight.outputs.kvm == 'true'
+        # debootstrap + e2fsprogs (mke2fs -d) + unzip (guest Deno) + squashfs,
+        # matching the Lima driver's guest provisioning.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q debootstrap e2fsprogs unzip squashfs-tools
+
+      - name: Cache Firecracker + jailer
+        id: fc-cache
+        if: steps.preflight.outputs.kvm == 'true'
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ env.FC_DIR }}
+          key: fc-${{ env.FC_VERSION }}-${{ env.GOLDEN_ARCH }}-v1
+
+      - name: Install Firecracker + jailer ${{ env.FC_VERSION }}
+        if: steps.preflight.outputs.kvm == 'true' && steps.fc-cache.outputs.cache-hit != 'true'
+        # Mirrors tools/lima_vm_test.ts's install, but into a runner-owned
+        # workspace dir (cacheable) instead of /usr/local/bin.
+        run: |
+          mkdir -p "$FC_DIR"
+          tmp="$(mktemp -d)"
+          url="https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${GOLDEN_ARCH}.tgz"
+          echo "installing Firecracker ${FC_VERSION} (${GOLDEN_ARCH}) from $url"
+          curl --fail --location --proto '=https' --tlsv1.2 "$url" -o "$tmp/fc.tgz"
+          tar -xzf "$tmp/fc.tgz" -C "$tmp"
+          install -m0755 "$tmp/release-${FC_VERSION}-${GOLDEN_ARCH}/firecracker-${FC_VERSION}-${GOLDEN_ARCH}" "$FC_DIR/firecracker"
+          install -m0755 "$tmp/release-${FC_VERSION}-${GOLDEN_ARCH}/jailer-${FC_VERSION}-${GOLDEN_ARCH}" "$FC_DIR/jailer"
+          rm -rf "$tmp"
+
+      - name: Show Firecracker + jailer versions
+        if: steps.preflight.outputs.kvm == 'true'
+        run: |
+          "$FC_DIR/firecracker" --version | head -1
+          "$FC_DIR/jailer" --version | head -1
+
+      - name: Cache the golden artifact set
+        id: golden-cache
+        if: steps.preflight.outputs.kvm == 'true'
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ${{ env.GOLDEN_CACHE }}
+            ${{ env.GOLDEN_HASH_FILE }}
+          # Every input that feeds the manifest hash: the pins, the rootfs
+          # builder, the overlay init, the agent source (compiled into the
+          # rootfs) with its full transitive closure — src/agent + the src/api
+          # and src/wire (generated AND hand-written, e.g. contract.ts) it
+          # imports — and the import map. A too-coarse key only costs a rebake;
+          # the hash is always re-read from the sidecar, but a too-NARROW key
+          # would silently reuse a stale set against a changed binary.
+          key: golden-${{ env.GOLDEN_ARCH }}-fc${{ env.FC_VERSION }}-deno${{ env.DENO_VERSION }}-${{ hashFiles('images/pins.json', 'images/build_rootfs.sh', 'images/overlay_init/**', 'src/agent/**', 'src/api/**', 'src/wire/**', 'deno.json') }}
+
+      - name: Bake the golden artifact set
+        if: steps.preflight.outputs.kvm == 'true' && steps.golden-cache.outputs.cache-hit != 'true'
+        # Root: debootstrap + `mke2fs -d` ownership. Human logs go to stderr;
+        # the FINAL stdout line is `{ "hash", … }` (build_golden_set.ts). We
+        # keep the last line only (subprocess stdout is inherited before it).
+        run: |
+          mkdir -p "$(dirname "$GOLDEN_HASH_FILE")"
+          sudo -E "$(command -v deno)" run -A tools/build_golden_set.ts \
+            --arch "$GOLDEN_ARCH" --cache-root "$GOLDEN_CACHE" --work "$GOLDEN_BUILD" \
+            | tee "$RUNNER_TEMP/bake.out"
+          hash="$(tail -n 1 "$RUNNER_TEMP/bake.out" | jq -r '.hash')"
+          if [ -z "$hash" ] || [ "$hash" = "null" ]; then
+            echo "::error::golden bake did not print a result JSON with .hash" >&2
+            exit 1
+          fi
+          printf '%s' "$hash" > "$GOLDEN_HASH_FILE"
+          # Hand ownership back to the runner so actions/cache can archive the
+          # root-owned set; the suite runs as root, which reads it regardless.
+          sudo chown -R "$(id -u):$(id -g)" "$GOLDEN_CACHE" "$GOLDEN_HASH_FILE"
+          echo "✓ baked golden set $hash"
+
+      - name: Load the golden-set manifest hash
+        id: golden-hash
+        if: steps.preflight.outputs.kvm == 'true'
+        # Works for both a fresh bake and a cache hit (the sidecar rides along).
+        run: |
+          if [ ! -s "$GOLDEN_HASH_FILE" ]; then
+            echo "::error::no golden hash (bake and cache both missed?)" >&2
+            exit 1
+          fi
+          hash="$(cat "$GOLDEN_HASH_FILE")"
+          echo "GOLDEN_HASH=$hash" >> "$GITHUB_ENV"
+          echo "golden manifest hash: $hash"
+
+      - name: Run the tests/vm/ suite against the golden set
+        if: steps.preflight.outputs.kvm == 'true'
+        # The SBX_VM_* contract from tests/vm/support.ts. Root: the jailer must
+        # chroot / mknod / drop privilege. `deno task test:vm:run` →
+        # `deno test -A --unstable-vsock tests/vm/`.
+        run: |
+          sudo mkdir -p "$SBX_VM_WORK"
+          sudo -E env \
+            SBX_VM=1 \
+            SBX_VM_CACHE="$GOLDEN_CACHE" \
+            SBX_VM_MANIFEST_HASH="$GOLDEN_HASH" \
+            SBX_VM_WORK="$SBX_VM_WORK" \
+            SBX_VM_JAILER_BIN="$FC_DIR/jailer" \
+            SBX_VM_FIRECRACKER_BIN="$FC_DIR/firecracker" \
+            "$(command -v deno)" task test:vm:run
+
+      - name: Loud-skip notice (no /dev/kvm)
+        if: steps.preflight.outputs.kvm != 'true'
+        run: |
+          echo "Real-microVM suite skipped: this runner has no /dev/kvm."
+          echo "Run it locally on a Mac via \`deno task test:vm\` (Lima), or"
+          echo "target a KVM-capable runner. The rest of CI still gates the tree."
+
+  soak:
+    name: Real microVM soak (1.0 drill)
+    # Nightly cron (and manual dispatch) only — the 1.0 no-leak drill.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      # The 1.0 bar: 200 create→use→terminate cycles with periodic
+      # kill-9-mid-fleet + destructive reconcile. Tunable here (or via the
+      # SBX_SOAK_* knobs soak_vm_main.ts reads).
+      SBX_SOAK_CYCLES: "200"
+      SBX_SOAK_CRASHES: "12"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Preflight /dev/kvm + enable for the runner user
+        id: preflight
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo modprobe vhost_vsock || true
+          if [ -e /dev/kvm ]; then
+            echo "kvm=true" >> "$GITHUB_OUTPUT"
+            echo "✓ /dev/kvm present — running the real-microVM soak"
+          else
+            echo "kvm=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::/dev/kvm absent on this runner — loud-skipping the real-microVM soak."
+          fi
+
+      - name: Install Deno
+        if: steps.preflight.outputs.kvm == 'true'
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+          cache: true
+
+      - name: Install rootfs build deps
+        if: steps.preflight.outputs.kvm == 'true'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q debootstrap e2fsprogs unzip squashfs-tools
+
+      - name: Cache Firecracker + jailer
+        id: fc-cache
+        if: steps.preflight.outputs.kvm == 'true'
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ env.FC_DIR }}
+          key: fc-${{ env.FC_VERSION }}-${{ env.GOLDEN_ARCH }}-v1
+
+      - name: Install Firecracker + jailer ${{ env.FC_VERSION }}
+        if: steps.preflight.outputs.kvm == 'true' && steps.fc-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$FC_DIR"
+          tmp="$(mktemp -d)"
+          url="https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${GOLDEN_ARCH}.tgz"
+          echo "installing Firecracker ${FC_VERSION} (${GOLDEN_ARCH}) from $url"
+          curl --fail --location --proto '=https' --tlsv1.2 "$url" -o "$tmp/fc.tgz"
+          tar -xzf "$tmp/fc.tgz" -C "$tmp"
+          install -m0755 "$tmp/release-${FC_VERSION}-${GOLDEN_ARCH}/firecracker-${FC_VERSION}-${GOLDEN_ARCH}" "$FC_DIR/firecracker"
+          install -m0755 "$tmp/release-${FC_VERSION}-${GOLDEN_ARCH}/jailer-${FC_VERSION}-${GOLDEN_ARCH}" "$FC_DIR/jailer"
+          rm -rf "$tmp"
+
+      - name: Show Firecracker + jailer versions
+        if: steps.preflight.outputs.kvm == 'true'
+        run: |
+          "$FC_DIR/firecracker" --version | head -1
+          "$FC_DIR/jailer" --version | head -1
+
+      - name: Cache the golden artifact set
+        id: golden-cache
+        if: steps.preflight.outputs.kvm == 'true'
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ${{ env.GOLDEN_CACHE }}
+            ${{ env.GOLDEN_HASH_FILE }}
+          key: golden-${{ env.GOLDEN_ARCH }}-fc${{ env.FC_VERSION }}-deno${{ env.DENO_VERSION }}-${{ hashFiles('images/pins.json', 'images/build_rootfs.sh', 'images/overlay_init/**', 'src/agent/**', 'src/api/**', 'src/wire/**', 'deno.json') }}
+
+      - name: Bake the golden artifact set
+        if: steps.preflight.outputs.kvm == 'true' && steps.golden-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$(dirname "$GOLDEN_HASH_FILE")"
+          sudo -E "$(command -v deno)" run -A tools/build_golden_set.ts \
+            --arch "$GOLDEN_ARCH" --cache-root "$GOLDEN_CACHE" --work "$GOLDEN_BUILD" \
+            | tee "$RUNNER_TEMP/bake.out"
+          hash="$(tail -n 1 "$RUNNER_TEMP/bake.out" | jq -r '.hash')"
+          if [ -z "$hash" ] || [ "$hash" = "null" ]; then
+            echo "::error::golden bake did not print a result JSON with .hash" >&2
+            exit 1
+          fi
+          printf '%s' "$hash" > "$GOLDEN_HASH_FILE"
+          sudo chown -R "$(id -u):$(id -g)" "$GOLDEN_CACHE" "$GOLDEN_HASH_FILE"
+          echo "✓ baked golden set $hash"
+
+      - name: Load the golden-set manifest hash
+        if: steps.preflight.outputs.kvm == 'true'
+        run: |
+          if [ ! -s "$GOLDEN_HASH_FILE" ]; then
+            echo "::error::no golden hash (bake and cache both missed?)" >&2
+            exit 1
+          fi
+          hash="$(cat "$GOLDEN_HASH_FILE")"
+          echo "GOLDEN_HASH=$hash" >> "$GITHUB_ENV"
+          echo "golden manifest hash: $hash"
+
+      - name: Run the real-microVM 1.0 soak drill
+        if: steps.preflight.outputs.kvm == 'true'
+        # `deno task soak:vm` → `deno run -A --unstable-vsock
+        # tools/soak/soak_vm_main.ts`; reads the SBX_VM_* contract (same as the
+        # suite) plus the SBX_SOAK_* knobs. Root for the jailer.
+        run: |
+          sudo mkdir -p "$SBX_VM_WORK"
+          sudo -E env \
+            SBX_VM=1 \
+            SBX_VM_CACHE="$GOLDEN_CACHE" \
+            SBX_VM_MANIFEST_HASH="$GOLDEN_HASH" \
+            SBX_VM_WORK="$SBX_VM_WORK" \
+            SBX_VM_JAILER_BIN="$FC_DIR/jailer" \
+            SBX_VM_FIRECRACKER_BIN="$FC_DIR/firecracker" \
+            SBX_SOAK_CYCLES="$SBX_SOAK_CYCLES" \
+            SBX_SOAK_CRASHES="$SBX_SOAK_CRASHES" \
+            "$(command -v deno)" task soak:vm
+
+      - name: Loud-skip notice (no /dev/kvm)
+        if: steps.preflight.outputs.kvm != 'true'
+        run: |
+          echo "Real-microVM soak skipped: this runner has no /dev/kvm."
+          echo "Run it locally via \`deno task test:vm\` provisioning + \`deno task soak:vm\`."
