@@ -12,8 +12,8 @@
     "supervisor.capnp"
   ],
   "hashAlgorithm": "sha256(filename + NUL + rawBytes + NUL, sorted)",
-  "schemaSha256": "4b41143db073b455d3ef2aea603a58492918649464251afe27887c0ea38d0a06",
-  "schemaSha256Note": "re-hashed 2026-07-11 over the carried studiobox schema/ bundle (renamed identifiers; limabox baseline was 617920c8753001a23873f850934fd2a6ebb3b964f81f4ce4a7504ab6d92fbe48); re-hashed 2026-07-12 for M10 W3 (added CreateOptions.allowNetSet; LaunchRequest allowNet/allowNetSet/netless/vcpus); re-hashed 2026-07-12 for M10 W6 (Supervisor.exposeHttp)",
+  "schemaSha256": "e57b47d01998020890563649768ee387ae11ec6c076b9001848b4cfbb9b33144",
+  "schemaSha256Note": "re-hashed 2026-07-11 over the carried studiobox schema/ bundle (renamed identifiers; limabox baseline was 617920c8753001a23873f850934fd2a6ebb3b964f81f4ce4a7504ab6d92fbe48); re-hashed 2026-07-12 for M10 W3 (added CreateOptions.allowNetSet; LaunchRequest allowNet/allowNetSet/netless/vcpus); re-hashed 2026-07-12 for M10 W6 (Supervisor.exposeHttp); re-hashed 2026-07-12 for snapshot-restore (AgentBootstrap.personalize)",
   "capnpCompiler": "Cap'n Proto version 1.4.0",
   "codegen": {
     "package": "@nullstyle/capnp",

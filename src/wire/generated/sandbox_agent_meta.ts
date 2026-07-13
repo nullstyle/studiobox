@@ -69,6 +69,18 @@ export const schemaNodes = [
     scopeId: 0x0n,
   },
   {
+    id: 0xbb1a81cf3191d4e3n,
+    kind: "struct",
+    displayName: "schema/sandbox_agent.capnp:AgentBootstrap.personalize$Params",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xbaace3266e9fad1an,
+    kind: "struct",
+    displayName: "schema/sandbox_agent.capnp:AgentBootstrap.personalize$Results",
+    scopeId: 0x0n,
+  },
+  {
     id: 0x800120e31b7659b8n,
     kind: "interface",
     displayName: "schema/sandbox_agent.capnp:DenoProcess",
@@ -387,6 +399,12 @@ export const schemaNodes = [
     scopeId: 0x0n,
   },
   {
+    id: 0xb2576c2525e6792an,
+    kind: "struct",
+    displayName: "schema/sandbox_agent.capnp:GuestNetwork",
+    scopeId: 0x9f91945d88bf875bn,
+  },
+  {
     id: 0xd7d904f16e76ef27n,
     kind: "struct",
     displayName: "schema/sandbox_agent.capnp:Header",
@@ -528,6 +546,24 @@ export const schemaNodes = [
     id: 0x95e22484b3adfb98n,
     kind: "struct",
     displayName: "schema/sandbox_agent.capnp:OpenResult",
+    scopeId: 0x9f91945d88bf875bn,
+  },
+  {
+    id: 0xd883e11a40ff1184n,
+    kind: "struct",
+    displayName: "schema/sandbox_agent.capnp:PersonalizeAck",
+    scopeId: 0x9f91945d88bf875bn,
+  },
+  {
+    id: 0x83c44305ab490fafn,
+    kind: "struct",
+    displayName: "schema/sandbox_agent.capnp:PersonalizeRequest",
+    scopeId: 0x9f91945d88bf875bn,
+  },
+  {
+    id: 0xe5c57a43e0a0f3f2n,
+    kind: "struct",
+    displayName: "schema/sandbox_agent.capnp:PersonalizeResult",
     scopeId: 0x9f91945d88bf875bn,
   },
   {
@@ -874,6 +910,14 @@ export const interfaceMethods = [
     codeOrder: 2,
     paramStructTypeId: 0xc8a02656f6480809n,
     resultStructTypeId: 0x8c8db93b9458ead6n,
+  },
+  {
+    interfaceId: 0xb7db3d1711e9fb65n,
+    interfaceName: "AgentBootstrap",
+    methodName: "personalize",
+    codeOrder: 3,
+    paramStructTypeId: 0xbb1a81cf3191d4e3n,
+    resultStructTypeId: 0xbaace3266e9fad1an,
   },
   {
     interfaceId: 0x800120e31b7659b8n,

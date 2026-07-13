@@ -1,7 +1,9 @@
 import type {
+  JailedRestoreOptions,
   JailerOptions,
   ReconcileResult,
   ShutdownOptions,
+  SnapshotLoadParams,
   StageEntry,
   VmConfig,
   VmmExit,
@@ -36,6 +38,30 @@ export interface JailedLaunchRequest {
   /** Caller cannot select hardlinks; the adapter always emits copy mode. */
   readonly stage: ReadonlyArray<CopyStageEntry>;
   readonly config: VmConfig;
+  readonly readinessTimeoutMs?: number;
+  readonly signal?: AbortSignal;
+  readonly metadata?: Readonly<Record<string, string>>;
+}
+
+/**
+ * A jailed snapshot-restore request (snapshot-restore §4): the twin of
+ * {@linkcode JailedLaunchRequest} that carries a snapshot to load instead of a
+ * cold {@linkcode VmConfig}. The `stage` copies the snapshot/mem/rootfs/overlay
+ * into the fresh jail exactly as the launch path stages the golden set (copy
+ * mode is forced); the `snapshot` names the IN-JAIL paths plus the per-restore
+ * `network_overrides` (re-point the NIC to this sandbox's TAP) and
+ * `vsock_override` (rebind the host-side UDS in this jail). No {@linkcode
+ * VmConfig} applies — the snapshot carries the machine configuration.
+ */
+export interface JailedRestoreRequest {
+  readonly sandboxId: string;
+  /** Fresh per restore attempt; never the public stable sandbox id. */
+  readonly executionId: string;
+  readonly jailer: Omit<JailerOptions, "id" | "stage">;
+  /** Caller cannot select hardlinks; the adapter always emits copy mode. */
+  readonly stage: ReadonlyArray<CopyStageEntry>;
+  /** Wire-verbatim `PUT /snapshot/load` params (in-jail snapshot/mem paths). */
+  readonly snapshot: SnapshotLoadParams;
   readonly readinessTimeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly metadata?: Readonly<Record<string, string>>;
@@ -106,6 +132,62 @@ export class FirecrackerAdapter {
       }
       throw normalizeFirecrackerError(error, {
         operation: "launch Firecracker",
+        signal: request.signal,
+        cleanupIncomplete,
+      });
+    }
+  }
+
+  /**
+   * Restore a sandbox from a warm-template snapshot (snapshot-restore §4): the
+   * twin of {@linkcode FirecrackerAdapter.launch}. Stages the
+   * snapshot/mem/rootfs/overlay into a fresh jail (copy mode), calls the
+   * package `Machine.restore` with the same jailer/registry/metadata wiring as
+   * a cold launch, and returns a {@linkcode FirecrackerMachine} the supervisor
+   * drives identically to a launched one (pid authority, vsock accessor,
+   * dispose/reclaim). A failed restore reconciles ONLY its own execution id,
+   * exactly like a failed launch, and never touches the cold launch path.
+   */
+  async restore(request: JailedRestoreRequest): Promise<FirecrackerMachine> {
+    assertExecutionId(request.executionId);
+    const options: JailedRestoreOptions = {
+      jailer: {
+        ...request.jailer,
+        id: request.executionId,
+        stage: request.stage.map(copyStageEntry),
+      },
+      snapshot: request.snapshot,
+      registry: this.#registry,
+      ...(request.readinessTimeoutMs === undefined
+        ? {}
+        : { readinessTimeoutMs: request.readinessTimeoutMs }),
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+      metadata: {
+        ...request.metadata,
+        [SANDBOX_ID_METADATA]: request.sandboxId,
+        [EXECUTION_ID_METADATA]: request.executionId,
+      },
+    };
+
+    try {
+      const machine = await this.#runtime.restore(options);
+      return new FirecrackerMachine(request.sandboxId, machine);
+    } catch (error) {
+      let cleanupIncomplete = false;
+      try {
+        const result = await this.#runtime.reconcile(
+          scopeRegistry(this.#registry, request.executionId),
+          // The caller's restore signal may already be aborted. Cleanup is a
+          // separate supervisor obligation and must still run.
+          { killLive: true },
+        );
+        cleanupIncomplete = result.failures.length > 0 ||
+          result.stillRunning.length > 0;
+      } catch {
+        cleanupIncomplete = true;
+      }
+      throw normalizeFirecrackerError(error, {
+        operation: "restore Firecracker",
         signal: request.signal,
         cleanupIncomplete,
       });

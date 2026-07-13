@@ -82,6 +82,10 @@ import type {
 } from "./api.ts";
 import { AgentError, SeekMode } from "./api.ts";
 import { encodeReplValue } from "./deno_runtime_codec.ts";
+import {
+  PersonalizationController,
+  PersonalizationError,
+} from "./personalize.ts";
 import { Sha256 } from "./sha256.ts";
 
 import {
@@ -336,6 +340,25 @@ function contractErrorToWire(error: ContractSbxError): wireCommon.SbxError {
     sandboxId: error.sandboxId,
     details: recordToKv({ ...error.details }),
   };
+}
+
+const PERSONALIZE_ERROR_CODES: Record<
+  PersonalizationError["code"],
+  wireCommon.ErrorCode
+> = {
+  alreadyPersonalized: "failedPrecondition",
+  invalidRequest: "invalidArgument",
+  networkApplyFailed: "internal",
+};
+
+/** Lower a personalization fault onto the wire's `SbxError`. */
+function personalizeErrorToWire(error: unknown): wireCommon.SbxError {
+  if (error instanceof PersonalizationError) {
+    return makeSbxError(PERSONALIZE_ERROR_CODES[error.code], error.message, [
+      { key: "personalizeCode", value: error.code },
+    ]);
+  }
+  return toWireSbxError(error);
 }
 
 function okResult(): wireCommon.EmptyResult {
@@ -1476,13 +1499,29 @@ export interface AgentWireOptions {
   /**
    * Shared credential presented by `authenticate` (the guest agent's
    * token, from its boot config). `null` fails every authentication
-   * closed — the plane is unusable without a credential.
+   * closed — the plane is unusable without a credential. Ignored when a
+   * {@linkcode AgentWireOptions.controller} is supplied (template mode);
+   * otherwise it seeds a synthesized `personalized` controller so the
+   * cold path behaves exactly as before.
    */
   readonly credential: Uint8Array | null;
   /** When set, `authenticate.sandboxId` must match (constant-time). */
   readonly expectedSandboxId?: string;
   /** When set, `authenticate.bootNonce` must match (constant-time). */
   readonly expectedBootNonce?: Uint8Array;
+  /**
+   * Process-global personalization identity (snapshot-restore §2.2). When
+   * supplied (template mode), the connection boots `pending`: `personalize`
+   * is accepted once and `authenticate`/`agent` are rejected (`not yet
+   * personalized`) until it succeeds; the SAME controller is shared across
+   * every served connection so the credential `personalize` sets on rootd's
+   * connection is the one a later client `authenticate` (a different
+   * connection, via the bridge) must present. When ABSENT (the cold path
+   * and every existing caller), a per-connection `personalized` controller
+   * is synthesized from {@linkcode AgentWireOptions.credential} — behavior
+   * is byte-identical to before this method existed.
+   */
+  readonly controller?: PersonalizationController;
   /** Local transport-limit ceiling; defaults to the shared defaults. */
   readonly limitsCeiling?: TransportLimits;
   /** Features the peer must offer; defaults to the agent's own set. */
@@ -1520,20 +1559,22 @@ export interface AgentWireConnection {
 }
 
 function credentialAccepted(
-  options: AgentWireOptions,
+  controller: PersonalizationController,
   params: wire.AuthenticateParams,
 ): boolean {
-  const expected = options.credential;
+  const expected = controller.credential;
   if (expected === null || expected.byteLength === 0) return false;
   let accepted = timingSafeEqual(params.credential, expected);
-  if (options.expectedSandboxId !== undefined) {
+  const expectedSandboxId = controller.expectedSandboxId;
+  if (expectedSandboxId !== undefined) {
     accepted = timingSafeEqual(
       textEncoder.encode(params.sandboxId),
-      textEncoder.encode(options.expectedSandboxId),
+      textEncoder.encode(expectedSandboxId),
     ) && accepted;
   }
-  if (options.expectedBootNonce !== undefined) {
-    accepted = timingSafeEqual(params.bootNonce, options.expectedBootNonce) &&
+  const expectedBootNonce = controller.expectedBootNonce;
+  if (expectedBootNonce !== undefined) {
+    accepted = timingSafeEqual(params.bootNonce, expectedBootNonce) &&
       accepted;
   }
   return accepted;
@@ -1548,6 +1589,17 @@ export function createAgentWireConnection(
   options: AgentWireOptions,
 ): AgentWireConnection {
   const state = new ConnectionState();
+  // Template mode supplies a shared, process-global controller (pending);
+  // every other caller (the cold path) gets a per-connection controller
+  // seeded `personalized` from the immutable boot credential, so its
+  // negotiate -> authenticate -> agent behavior is byte-identical to before
+  // `personalize` existed.
+  const controller = options.controller ??
+    PersonalizationController.personalized({
+      credential: options.credential,
+      expectedSandboxId: options.expectedSandboxId,
+      expectedBootNonce: options.expectedBootNonce,
+    });
   const policy: NegotiationPolicy = {
     identity: options.identity,
     ceiling: options.limitsCeiling ?? DEFAULT_TRANSPORT_LIMITS,
@@ -1588,7 +1640,21 @@ export function createAgentWireConnection(
       }
     },
     authenticate: (params, _ctx) => {
-      const verified = credentialAccepted(options, params);
+      // Template mode: reject until `personalize` sets the credential. This is
+      // a typed pre-condition failure, NOT an auth failure — it neither counts
+      // toward the attempt limit nor advances/closes the gate.
+      if (controller.state === "pending") {
+        return {
+          result: {
+            which: "error",
+            error: makeSbxError(
+              "failedPrecondition",
+              "sandbox not yet personalized",
+            ),
+          },
+        };
+      }
+      const verified = credentialAccepted(controller, params);
       try {
         state.gate.recordAuthentication(verified);
       } catch (error) {
@@ -1628,6 +1694,15 @@ export function createAgentWireConnection(
       };
     },
     agent: (_params, ctx) => {
+      // Template mode: no agent plane until personalized (a template-mode
+      // connection can never reach `authenticated`, since `authenticate` is
+      // rejected while pending — this surfaces the truthful reason).
+      if (controller.state === "pending") {
+        throw new AgentError(
+          "SBX_AGENT_STATE",
+          "sandbox not yet personalized",
+        );
+      }
       // Fails closed: assertAuthorized throws (and closes the gate) on
       // any phase other than `authenticated`.
       state.gate.assertAuthorized();
@@ -1636,6 +1711,48 @@ export function createAgentWireConnection(
         sandboxAgentServer(state, options),
       );
       return { agent: asStub<wire.SandboxAgent>(pointer) };
+    },
+    personalize: async (params, _ctx) => {
+      // Fail-closed: personalize is only meaningful once negotiate has proven
+      // caller and guest agree on the exact schema build, and only once.
+      if (state.gate.phase !== "negotiated") {
+        return {
+          result: {
+            which: "error",
+            error: makeSbxError(
+              "failedPrecondition",
+              `personalize requires the negotiated phase, received ${state.gate.phase}`,
+            ),
+          },
+        };
+      }
+      const request = params.request;
+      try {
+        const outcome = await controller.personalize({
+          credential: request.credential,
+          bootNonce: request.bootNonce,
+          sandboxId: request.sandboxId,
+          network: {
+            guestCidr: request.network.guestCidr,
+            gateway: request.network.gateway,
+            dns: request.network.dns,
+            iface: request.network.iface,
+          },
+        });
+        return {
+          result: {
+            which: "ok",
+            ok: {
+              buildId: options.identity.buildId,
+              appliedCidr: outcome.appliedCidr,
+            },
+          },
+        };
+      } catch (error) {
+        return {
+          result: { which: "error", error: personalizeErrorToWire(error) },
+        };
+      }
     },
   };
 

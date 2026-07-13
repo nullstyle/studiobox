@@ -282,6 +282,11 @@ function makeHarness(
       machines.set(vmId, machine);
       return machine;
     },
+    // The snapshot-restore path (WI-6) is not exercised by these cold-path
+    // core tests; the seam only needs to satisfy the widened runtime type.
+    restore: () => {
+      throw new Error("restore is not exercised by this cold-path test");
+    },
     reconcile: async (registry) => {
       if (overrides.reconcile !== undefined) {
         return await overrides.reconcile(registry);

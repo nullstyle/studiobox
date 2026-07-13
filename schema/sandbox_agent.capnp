@@ -252,12 +252,50 @@ interface DenoProcess extends(Process) {
   httpReady @1 () -> (result :HttpReadyResult);
 }
 
+# Per-restore personalization (snapshot-restore, DESIGN docs/snapshot-restore.md
+# §2.1). A warm-template studioboxd boots holding NO credential and with its
+# NIC present but unconfigured; every restore shares one snapshot's guest
+# memory, so per-sandbox identity CANNOT be baked at boot. rootd injects it
+# after restore+resume over the in-jail vsock via `personalize` (below), which
+# sets the credential the later `authenticate` must present and reconfigures the
+# guest NIC in-band. A cold-booted (--token-file) agent never needs it.
+struct GuestNetwork {
+  guestCidr @0 :Text;  # e.g. 10.201.0.2/30 ; EMPTY => netless (leave iface down)
+  gateway @1 :Text;    # host TAP address (10.201.<t>.<b+1>)
+  dns @2 :Text;        # per-sandbox dnsmasq (written to /etc/resolv.conf)
+  iface @3 :Text;      # guest NIC to (re)configure in-band (e.g. eth0)
+}
+
+struct PersonalizeRequest {
+  credential @0 :Data;        # per-restore authenticate secret (16..512 bytes)
+  bootNonce @1 :Data;         # per-restore boot nonce (bound like the cold path)
+  sandboxId @2 :Text;         # bound sandbox id
+  network @3 :GuestNetwork;   # in-band NIC config (empty guestCidr => netless)
+}
+
+struct PersonalizeAck {
+  buildId @0 :Text;      # echoes studioboxd buildId for the caller's log
+  appliedCidr @1 :Text;  # the applied guest CIDR; empty when netless
+}
+
+struct PersonalizeResult {
+  union {
+    ok @0 :PersonalizeAck;
+    error @1 :Common.SbxError;
+  }
+}
+
 interface AgentBootstrap {
   negotiate @0 (offer :Common.ProtocolOffer)
       -> (result :Common.HandshakeResult);
   authenticate @1 (credential :Data, sandboxId :Text, bootNonce :Data)
       -> (result :Common.AuthResult);
   agent @2 () -> (agent :SandboxAgent);
+  # Pre-auth, one-shot (snapshot-restore §2.1): a template-mode agent accepts
+  # ONLY personalize after negotiate (authenticate/agent are rejected until it
+  # succeeds); a second call after success returns "already personalized". Sets
+  # the per-sandbox credential + bootNonce binding and applies the guest NIC.
+  personalize @3 (request :PersonalizeRequest) -> (result :PersonalizeResult);
 }
 
 interface SandboxAgent {

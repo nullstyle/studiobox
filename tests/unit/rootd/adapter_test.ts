@@ -1,8 +1,10 @@
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertExists, assertRejects } from "@std/assert";
 import type {
+  JailedRestoreOptions,
   JailRecord,
   MachineOptions,
   ReconcileResult,
+  RestoreOptions,
   VmmExit,
   VsockConn,
 } from "@nullstyle/firecracker";
@@ -78,6 +80,128 @@ Deno.test("adapter forces copied staging and binds package metadata", async () =
   });
   assertEquals(launched.executionId, "sbx-exec-one");
   assertEquals(adapter.compatibility.pinned, "v1.16.1");
+});
+
+Deno.test("adapter restore stages copy-mode + issues loadSnapshot with the overrides, and returns a drivable machine", async () => {
+  const registry = testRegistry();
+  const machine = new FakeMachine("sbx-restore-one");
+  let captured: RestoreOptions | undefined;
+  const runtime = fakeRuntime({
+    restore: (options) => {
+      captured = options;
+      return Promise.resolve(machine);
+    },
+  });
+  const adapter = new FirecrackerAdapter({ registry, runtime });
+
+  const restored = await adapter.restore({
+    sandboxId: "sandbox-restore",
+    executionId: "sbx-restore-one",
+    jailer: baseJailer(),
+    stage: [
+      { hostPath: "/templates/hash/snapshot", jailPath: "/snapshot" },
+      { hostPath: "/templates/hash/mem", jailPath: "/mem" },
+      { hostPath: "/artifacts/rootfs", jailPath: "/rootfs.ext4" },
+      // A caller trying to smuggle in hardlink mode is forced to copy.
+      {
+        hostPath: "/templates/hash/overlay.ext4",
+        jailPath: "/overlay.ext4",
+        readWrite: true,
+        mode: "hardlink",
+      } as unknown as {
+        hostPath: string;
+        jailPath: string;
+        readWrite: boolean;
+      },
+    ],
+    snapshot: {
+      snapshot_path: "/snapshot",
+      mem_backend: { backend_type: "File", backend_path: "/mem" },
+      resume_vm: true,
+      clock_realtime: true,
+      network_overrides: [{ iface_id: "eth0", host_dev_name: "sbxtap5" }],
+      vsock_override: { uds_path: "v.sock" },
+    },
+    metadata: { tenant: "test" },
+  });
+
+  // Jailed restore: id + forced copy staging, exactly like launch.
+  assert(captured !== undefined);
+  const jailed = captured as JailedRestoreOptions;
+  assertEquals(jailed.jailer.id, "sbx-restore-one");
+  assertEquals(jailed.jailer.stage, [
+    {
+      hostPath: "/templates/hash/snapshot",
+      jailPath: "/snapshot",
+      mode: "copy",
+    },
+    { hostPath: "/templates/hash/mem", jailPath: "/mem", mode: "copy" },
+    { hostPath: "/artifacts/rootfs", jailPath: "/rootfs.ext4", mode: "copy" },
+    {
+      hostPath: "/templates/hash/overlay.ext4",
+      jailPath: "/overlay.ext4",
+      mode: "copy",
+      readWrite: true,
+    },
+  ]);
+  // The snapshot load params pass through verbatim (in-jail paths + overrides).
+  assertEquals(jailed.snapshot.snapshot_path, "/snapshot");
+  assertEquals(jailed.snapshot.mem_backend, {
+    backend_type: "File",
+    backend_path: "/mem",
+  });
+  assertEquals(jailed.snapshot.resume_vm, true);
+  assertEquals(jailed.snapshot.clock_realtime, true);
+  assertEquals(jailed.snapshot.network_overrides, [
+    { iface_id: "eth0", host_dev_name: "sbxtap5" },
+  ]);
+  assertEquals(jailed.snapshot.vsock_override, { uds_path: "v.sock" });
+  assertEquals(jailed.registry, registry);
+  assertEquals(jailed.metadata, {
+    tenant: "test",
+    "studiobox.sandbox-id": "sandbox-restore",
+    "studiobox.execution-id": "sbx-restore-one",
+  });
+
+  // The supervisor drives a restored machine exactly like a launched one.
+  assertEquals(restored.executionId, "sbx-restore-one");
+  assertEquals(restored.pid, 42);
+  const conn = await restored.connectVsock(1024);
+  assertExists(conn);
+  await restored.kill();
+  assertEquals(machine.killCalls, 1);
+  await restored[Symbol.asyncDispose]();
+});
+
+Deno.test("failed restore reconciles only its execution id", async () => {
+  const registry = testRegistry([
+    jailRecord("sbx-restore-fail"),
+    jailRecord("sbx-restore-live"),
+  ]);
+  let reconciledIds: string[] = [];
+  const runtime = fakeRuntime({
+    restore: () => Promise.reject({ code: "FC_API", status: 400 }),
+    reconcile: async (scoped) => {
+      reconciledIds = (await scoped.list()).map((record) => record.vmId);
+      return cleanReconcile(reconciledIds);
+    },
+  });
+  const adapter = new FirecrackerAdapter({ registry, runtime });
+
+  const error = await assertRejects(
+    () =>
+      adapter.restore({
+        sandboxId: "sandbox-restore-fail",
+        executionId: "sbx-restore-fail",
+        jailer: baseJailer(),
+        stage: [],
+        snapshot: { snapshot_path: "/snapshot", resume_vm: true },
+      }),
+    FirecrackerAdapterError,
+  );
+
+  assertEquals(reconciledIds, ["sbx-restore-fail"]);
+  assertEquals(error.code, "SBX_FC_API");
 });
 
 Deno.test("failed launch reconciles only its execution id", async () => {
@@ -293,6 +417,7 @@ function fakeRuntime(
   return {
     compatibility: { pinned: "v1.16.1", min: "v1.15.0" },
     launch: () => Promise.resolve(new FakeMachine("sbx-default")),
+    restore: () => Promise.resolve(new FakeMachine("sbx-default")),
     reconcile: () => Promise.resolve(cleanReconcile([])),
     ...overrides,
   };

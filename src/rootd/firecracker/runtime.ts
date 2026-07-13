@@ -5,6 +5,7 @@ import {
   reconcile,
   type ReconcileOptions,
   type ReconcileResult,
+  type RestoreOptions,
   type ShutdownOptions,
   type VmmExit,
   type VmRegistry,
@@ -36,6 +37,13 @@ export interface FirecrackerCompatibility {
 export interface FirecrackerRuntime {
   readonly compatibility: FirecrackerCompatibility;
   launch(options: MachineOptions): Promise<RuntimeMachine>;
+  /**
+   * Spawn a fresh VMM and load a snapshot into it (the snapshot-restore fast
+   * path). The restored machine comes back `running` when
+   * `snapshot.resume_vm` is set, and is otherwise driven exactly like a
+   * launched one (pidfile pid authority, vsock accessor, dispose/reclaim).
+   */
+  restore(options: RestoreOptions): Promise<RuntimeMachine>;
   reconcile(
     registry: VmRegistry,
     options?: ReconcileOptions,
@@ -45,5 +53,6 @@ export interface FirecrackerRuntime {
 export const nullstyleFirecrackerRuntime: FirecrackerRuntime = Object.freeze({
   compatibility: FIRECRACKER_COMPAT,
   launch: (options: MachineOptions) => Machine.launch(options),
+  restore: (options: RestoreOptions) => Machine.restore(options),
   reconcile,
 });

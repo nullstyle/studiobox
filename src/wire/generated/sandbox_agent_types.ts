@@ -244,6 +244,14 @@ export interface NegotiateResults {
   result: HandshakeResult;
 }
 
+export interface PersonalizeParams {
+  request: PersonalizeRequest;
+}
+
+export interface PersonalizeResults {
+  result: PersonalizeResult;
+}
+
 export interface FetchParams {
   request: HttpRequestHead;
   response: RpcStub<HttpResponseSink> | null;
@@ -458,6 +466,13 @@ export interface StatResults {
   result: FileInfoResult;
 }
 
+export interface GuestNetwork {
+  guestCidr: string;
+  gateway: string;
+  dns: string;
+  iface: string;
+}
+
 export interface Header {
   name: string;
   value: string;
@@ -547,6 +562,24 @@ export interface StartResults {
 export interface OpenResult {
   which?: "file" | "error";
   file?: RpcStub<RemoteFile> | null;
+  error?: SbxError;
+}
+
+export interface PersonalizeAck {
+  buildId: string;
+  appliedCidr: string;
+}
+
+export interface PersonalizeRequest {
+  credential: Uint8Array;
+  bootNonce: Uint8Array;
+  sandboxId: string;
+  network: GuestNetwork;
+}
+
+export interface PersonalizeResult {
+  which?: "ok" | "error";
+  ok?: PersonalizeAck;
   error?: SbxError;
 }
 
@@ -899,6 +932,54 @@ export const NegotiateResultsCodec: StructCodec<NegotiateResults> = {
     encodeStructMessage(NegotiateResultsStruct, value),
   decode: (bytes: Uint8Array): NegotiateResults =>
     decodeStructMessage(NegotiateResultsStruct, bytes),
+};
+
+export const PersonalizeParamsStruct: StructDescriptor<PersonalizeParams> = {
+  kind: "struct",
+  name: "PersonalizeParams",
+  dataWordCount: 0,
+  pointerCount: 1,
+  createDefault: () => ({
+    request: PersonalizeRequestStruct.createDefault(),
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "request",
+      offset: 0,
+      type: { kind: "struct", get: () => PersonalizeRequestStruct },
+    },
+  ],
+};
+export const PersonalizeParamsCodec: StructCodec<PersonalizeParams> = {
+  encode: (value: PersonalizeParams): Uint8Array =>
+    encodeStructMessage(PersonalizeParamsStruct, value),
+  decode: (bytes: Uint8Array): PersonalizeParams =>
+    decodeStructMessage(PersonalizeParamsStruct, bytes),
+};
+
+export const PersonalizeResultsStruct: StructDescriptor<PersonalizeResults> = {
+  kind: "struct",
+  name: "PersonalizeResults",
+  dataWordCount: 0,
+  pointerCount: 1,
+  createDefault: () => ({
+    result: PersonalizeResultStruct.createDefault(),
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "result",
+      offset: 0,
+      type: { kind: "struct", get: () => PersonalizeResultStruct },
+    },
+  ],
+};
+export const PersonalizeResultsCodec: StructCodec<PersonalizeResults> = {
+  encode: (value: PersonalizeResults): Uint8Array =>
+    encodeStructMessage(PersonalizeResultsStruct, value),
+  decode: (bytes: Uint8Array): PersonalizeResults =>
+    decodeStructMessage(PersonalizeResultsStruct, bytes),
 };
 
 export const FetchParamsStruct: StructDescriptor<FetchParams> = {
@@ -2270,6 +2351,51 @@ export const StatResultsCodec: StructCodec<StatResults> = {
     decodeStructMessage(StatResultsStruct, bytes),
 };
 
+export const GuestNetworkStruct: StructDescriptor<GuestNetwork> = {
+  kind: "struct",
+  name: "GuestNetwork",
+  dataWordCount: 0,
+  pointerCount: 4,
+  createDefault: () => ({
+    guestCidr: "",
+    gateway: "",
+    dns: "",
+    iface: "",
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "guestCidr",
+      offset: 0,
+      type: TYPE_TEXT,
+    },
+    {
+      kind: "slot",
+      name: "gateway",
+      offset: 1,
+      type: TYPE_TEXT,
+    },
+    {
+      kind: "slot",
+      name: "dns",
+      offset: 2,
+      type: TYPE_TEXT,
+    },
+    {
+      kind: "slot",
+      name: "iface",
+      offset: 3,
+      type: TYPE_TEXT,
+    },
+  ],
+};
+export const GuestNetworkCodec: StructCodec<GuestNetwork> = {
+  encode: (value: GuestNetwork): Uint8Array =>
+    encodeStructMessage(GuestNetworkStruct, value),
+  decode: (bytes: Uint8Array): GuestNetwork =>
+    decodeStructMessage(GuestNetworkStruct, bytes),
+};
+
 export const HeaderStruct: StructDescriptor<Header> = {
   kind: "struct",
   name: "Header",
@@ -2856,6 +2982,128 @@ export const OpenResultCodec: StructCodec<OpenResult> = {
     encodeStructMessage(OpenResultStruct, dehydrateStubs$OpenResult(value)),
   decode: (bytes: Uint8Array): OpenResult =>
     decodeStructMessage(OpenResultStruct, bytes),
+};
+
+export const PersonalizeAckStruct: StructDescriptor<PersonalizeAck> = {
+  kind: "struct",
+  name: "PersonalizeAck",
+  dataWordCount: 0,
+  pointerCount: 2,
+  createDefault: () => ({
+    buildId: "",
+    appliedCidr: "",
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "buildId",
+      offset: 0,
+      type: TYPE_TEXT,
+    },
+    {
+      kind: "slot",
+      name: "appliedCidr",
+      offset: 1,
+      type: TYPE_TEXT,
+    },
+  ],
+};
+export const PersonalizeAckCodec: StructCodec<PersonalizeAck> = {
+  encode: (value: PersonalizeAck): Uint8Array =>
+    encodeStructMessage(PersonalizeAckStruct, value),
+  decode: (bytes: Uint8Array): PersonalizeAck =>
+    decodeStructMessage(PersonalizeAckStruct, bytes),
+};
+
+export const PersonalizeRequestStruct: StructDescriptor<PersonalizeRequest> = {
+  kind: "struct",
+  name: "PersonalizeRequest",
+  dataWordCount: 0,
+  pointerCount: 4,
+  createDefault: () => ({
+    credential: new Uint8Array(0),
+    bootNonce: new Uint8Array(0),
+    sandboxId: "",
+    network: GuestNetworkStruct.createDefault(),
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "credential",
+      offset: 0,
+      type: TYPE_DATA,
+    },
+    {
+      kind: "slot",
+      name: "bootNonce",
+      offset: 1,
+      type: TYPE_DATA,
+    },
+    {
+      kind: "slot",
+      name: "sandboxId",
+      offset: 2,
+      type: TYPE_TEXT,
+    },
+    {
+      kind: "slot",
+      name: "network",
+      offset: 3,
+      type: { kind: "struct", get: () => GuestNetworkStruct },
+    },
+  ],
+};
+export const PersonalizeRequestCodec: StructCodec<PersonalizeRequest> = {
+  encode: (value: PersonalizeRequest): Uint8Array =>
+    encodeStructMessage(PersonalizeRequestStruct, value),
+  decode: (bytes: Uint8Array): PersonalizeRequest =>
+    decodeStructMessage(PersonalizeRequestStruct, bytes),
+};
+
+export const PersonalizeResultStruct: StructDescriptor<PersonalizeResult> = {
+  kind: "struct",
+  name: "PersonalizeResult",
+  dataWordCount: 1,
+  pointerCount: 1,
+  createDefault: () => ({
+    ok: PersonalizeAckStruct.createDefault(),
+    error: SbxErrorStruct.createDefault(),
+    which: "ok",
+  }),
+  union: {
+    discriminantOffset: 0,
+    defaultDiscriminant: 0,
+    byName: {
+      "ok": 0,
+      "error": 1,
+    },
+    byDiscriminant: {
+      0: "ok",
+      1: "error",
+    },
+  },
+  fields: [
+    {
+      kind: "slot",
+      name: "ok",
+      offset: 0,
+      type: { kind: "struct", get: () => PersonalizeAckStruct },
+      discriminantValue: 0,
+    },
+    {
+      kind: "slot",
+      name: "error",
+      offset: 0,
+      type: { kind: "struct", get: () => SbxErrorStruct },
+      discriminantValue: 1,
+    },
+  ],
+};
+export const PersonalizeResultCodec: StructCodec<PersonalizeResult> = {
+  encode: (value: PersonalizeResult): Uint8Array =>
+    encodeStructMessage(PersonalizeResultStruct, value),
+  decode: (bytes: Uint8Array): PersonalizeResult =>
+    decodeStructMessage(PersonalizeResultStruct, bytes),
 };
 
 export const CloseStdinParamsStruct: StructDescriptor<CloseStdinParams> = {
@@ -4708,18 +4956,21 @@ export const AgentBootstrapMethodOrdinals = {
   negotiate: 0,
   authenticate: 1,
   agent: 2,
+  personalize: 3,
 } as const;
 
 export interface AgentBootstrapClient {
   negotiate(params: NegotiateParams, options?: RpcCallOptions): Promise<NegotiateResults>;
   authenticate(params: AuthenticateParams, options?: RpcCallOptions): Promise<AuthenticateResults>;
   agent(params: AgentParams, options?: RpcCallOptions): Promise<AgentResults>;
+  personalize(params: PersonalizeParams, options?: RpcCallOptions): Promise<PersonalizeResults>;
 }
 
 export interface AgentBootstrapServer {
   negotiate(params: NegotiateParams, ctx: RpcCallContext): Promise<NegotiateResults> | NegotiateResults;
   authenticate(params: AuthenticateParams, ctx: RpcCallContext): Promise<AuthenticateResults> | AuthenticateResults;
   agent(params: AgentParams, ctx: RpcCallContext): Promise<AgentResults> | AgentResults;
+  personalize(params: PersonalizeParams, ctx: RpcCallContext): Promise<PersonalizeResults> | PersonalizeResults;
 }
 
 export function createAgentBootstrapClient(transport: RpcClientTransport, capability: CapabilityPointer): AgentBootstrapClient {
@@ -4847,6 +5098,47 @@ export function createAgentBootstrapClient(transport: RpcClientTransport, capabi
         }, "AgentBootstrap.agent failed");
       }
     },
+    personalize: async (params: PersonalizeParams, options?: RpcCallOptions): Promise<PersonalizeResults> => {
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(PersonalizeParamsStruct, params);
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xb7db3d1711e9fb65n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(capability, AgentBootstrapMethodOrdinals["personalize"], encoded.content, callOptions);
+          try {
+            return decodeStructMessageWithCaps(PersonalizeResultsStruct, raw.contentBytes, raw.capTable) as PersonalizeResults;
+          } finally {
+            if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(capability, AgentBootstrapMethodOrdinals["personalize"], encoded.content, callOptions);
+        try {
+          return decodeStructMessageWithCaps(PersonalizeResultsStruct, response, []) as PersonalizeResults;
+        } finally {
+          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+            await transport.finish(questionId, options?.finish);
+          }
+        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "AgentBootstrap",
+          interfaceId: 0xb7db3d1711e9fb65n,
+          methodName: "personalize",
+          methodId: 3,
+        }, "AgentBootstrap.personalize failed");
+      }
+    },
   };
 }
 
@@ -4893,6 +5185,15 @@ export function createAgentBootstrapServer(server: AgentBootstrapServer): RpcSer
           const decoded = decodeStructMessageWithCaps(AgentParamsStruct, params, ctx.paramsCapTable ?? []) as AgentParams;
           const result = await server["agent"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(AgentResultsStruct, dehydrateStubs$AgentResults(result));
+          if (encoded.capTable.length > 0) {
+            return { content: encoded.content, capTable: encoded.capTable };
+          }
+          return encoded.content;
+        }
+        case 3: {
+          const decoded = decodeStructMessageWithCaps(PersonalizeParamsStruct, params, ctx.paramsCapTable ?? []) as PersonalizeParams;
+          const result = await server["personalize"](decoded, ctx);
+          const encoded = encodeStructMessageWithCaps(PersonalizeResultsStruct, result);
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
@@ -8539,6 +8840,14 @@ export interface AgentBootstrap {
    * @returns Resolves with the decoded call result.
    */
   agent(options?: RpcCallOptions): Promise<RpcStub<SandboxAgent>>;
+  /**
+   * Call `AgentBootstrap.personalize`.
+   *
+   * @param value - Flattened `PersonalizeParams.request` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
+  personalize(value: PersonalizeParams["request"], options?: RpcCallOptions): Promise<PersonalizeResults["result"]>;
 }
 
 /**
@@ -8597,6 +8906,21 @@ export function createAgentBootstrapServiceClient(
         }, "AgentBootstrap.agent failed");
       }
     },
+    personalize: async (value: PersonalizeParams["request"], options?: RpcCallOptions) => {
+      try {
+        const result = await client.personalize({ request: value }, options);
+        return result.result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "AgentBootstrap",
+          interfaceName: "AgentBootstrap",
+          interfaceId: AgentBootstrapInterfaceId,
+          methodName: "personalize",
+          methodId: 3,
+        }, "AgentBootstrap.personalize failed");
+      }
+    },
   };
 }
 
@@ -8652,6 +8976,22 @@ function createAgentBootstrapServiceServer(
         }, "AgentBootstrap.agent handler failed");
       }
     },
+    personalize: async (params: PersonalizeParams, _ctx: RpcCallContext) => {
+      try {
+        const result = await server.personalize(params.request);
+        return { result: result };
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "AgentBootstrap",
+          interfaceName: "AgentBootstrap",
+          interfaceId: AgentBootstrapInterfaceId,
+          methodName: "personalize",
+          methodId: 3,
+          questionId: _ctx.questionId,
+        }, "AgentBootstrap.personalize handler failed");
+      }
+    },
   };
 }
 
@@ -8676,6 +9016,13 @@ export const AgentBootstrapDebugMethods = [
     serviceName: "AgentBootstrap",
     methodId: AgentBootstrapMethodOrdinals["agent"],
     methodName: "agent",
+  },
+  {
+    interfaceId: AgentBootstrapInterfaceId,
+    interfaceName: "AgentBootstrap",
+    serviceName: "AgentBootstrap",
+    methodId: AgentBootstrapMethodOrdinals["personalize"],
+    methodName: "personalize",
   },
 ] as const satisfies readonly RpcDebugSchemaMethod[];
 

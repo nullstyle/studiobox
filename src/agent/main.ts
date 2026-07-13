@@ -27,9 +27,14 @@
  * escapes as a global unhandled rejection.
  *
  * Flags: `--socket <path>` XOR `--vsock-port <port>`;
- * `--token-file <path>` (REQUIRED — hex-encoded shared credential the
- * peer must present to `authenticate`; the guest image's overlay-init
- * materializes it from the launch config); `--root <hostdir>` (default
+ * `--token-file <path>` (hex-encoded shared credential the peer must
+ * present to `authenticate`; the guest image's overlay-init materializes
+ * it from the launch config; REQUIRED on the cold path, and forbidden in
+ * template mode); `--template` (snapshot-restore §2.2 — boot in
+ * "template mode": stand up the vsock listener holding NO credential and
+ * NOT yet authenticatable, accepting only `AgentBootstrap.personalize`,
+ * which injects the per-restore credential and configures the NIC
+ * in-band; mutually exclusive with `--token-file`); `--root <hostdir>` (default
  * `/`); `--home <in-sandbox dir>` (default `/home/app`); `--deno
  * <host path>` (the pinned deno binary driving `DenoRuntime`; REQUIRED
  * in compiled builds, where the default — `Deno.execPath()` — resolves
@@ -48,6 +53,11 @@ import { AgentError } from "./api.ts";
 import { AgentDeno } from "./deno_runtime.ts";
 import { AgentEnv, guestBaseEnvironment } from "./env.ts";
 import { AgentFs } from "./fs.ts";
+import {
+  denoCommandRunner,
+  denoFileWriter,
+  PersonalizationController,
+} from "./personalize.ts";
 import {
   AgentProcesses,
   createCgroupOomAnnotator,
@@ -135,7 +145,10 @@ function assembleAgent(
 export interface AgentFlags {
   socket?: string;
   vsockPort?: number;
-  tokenFile: string;
+  /** Cold-path credential file; absent (and forbidden) in template mode. */
+  tokenFile?: string;
+  /** Template mode (snapshot-restore §2.2): boot holding no credential. */
+  template: boolean;
   root: string;
   home?: string;
   deno?: string;
@@ -167,6 +180,8 @@ export function parseAgentFlags(args: readonly string[]): AgentFlags {
       flags.vsockPort = value;
     } else if (arg === "--token-file" || arg.startsWith("--token-file=")) {
       flags.tokenFile = take("token-file");
+    } else if (arg === "--template" || arg === "--personalize-pending") {
+      flags.template = true;
     } else if (arg === "--root" || arg.startsWith("--root=")) {
       flags.root = take("root");
     } else if (arg === "--home" || arg.startsWith("--home=")) {
@@ -183,16 +198,28 @@ export function parseAgentFlags(args: readonly string[]): AgentFlags {
       "exactly one of --socket <path> or --vsock-port <port> is required",
     );
   }
-  if (flags.tokenFile === undefined) {
+  const template = flags.template ?? false;
+  // Template mode injects the credential over `personalize` after restore, so a
+  // boot-time credential would be a contradiction; the cold path still fails
+  // closed without one. This keeps the two modes cleanly disjoint.
+  if (template) {
+    if (flags.tokenFile !== undefined) {
+      throw new AgentError(
+        "SBX_AGENT_VALIDATION",
+        "--template mode must not be given --token-file (personalize injects the credential)",
+      );
+    }
+  } else if (flags.tokenFile === undefined) {
     throw new AgentError(
       "SBX_AGENT_VALIDATION",
-      "--token-file <path> is required",
+      "--token-file <path> is required (unless --template is set)",
     );
   }
   return {
     socket: flags.socket,
     vsockPort: flags.vsockPort,
     tokenFile: flags.tokenFile,
+    template,
     root: flags.root ?? "/",
     home: flags.home,
     deno: flags.deno,
@@ -358,23 +385,39 @@ export function serveWireConnection(
 
 async function main(): Promise<void> {
   let flags: AgentFlags;
-  let credential: Uint8Array;
+  // Template mode holds no boot credential; `personalize` sets it after
+  // restore. The cold path reads it from --token-file exactly as before.
+  let credential: Uint8Array | null = null;
   try {
     flags = parseAgentFlags(Deno.args);
-    credential = await readCredentialFile(flags.tokenFile);
+    if (!flags.template) {
+      credential = await readCredentialFile(flags.tokenFile as string);
+    }
   } catch (error) {
     console.error(
       error instanceof Error ? error.message : String(error),
-      "\nusage: studioboxd (--socket <path> | --vsock-port <port>) --token-file <path> [--root <dir>] [--home <dir>] [--deno <path>]",
+      "\nusage: studioboxd (--socket <path> | --vsock-port <port>) (--token-file <path> | --template) [--root <dir>] [--home <dir>] [--deno <path>]",
     );
     Deno.exit(2);
   }
   const config: AgentRootConfig = { root: flags.root, home: flags.home };
   const { api, processes } = assembleAgent(config, flags.deno);
+  // A pending controller is process-global: shared across every served
+  // connection so the credential `personalize` sets on rootd's connection is
+  // the one a later client `authenticate` must present. The cold path passes
+  // no controller — the wire plane synthesizes a `personalized` one from the
+  // boot credential, unchanged.
+  const controller = flags.template
+    ? PersonalizationController.pending({
+      runner: denoCommandRunner,
+      writer: denoFileWriter,
+    })
+    : undefined;
   const wireOptions: AgentWireOptions = {
     api,
     identity: m3AgentContractIdentity(BUILD_ID),
     credential,
+    ...(controller === undefined ? {} : { controller }),
     releaseProcess: (process) => void processes.release(process),
   };
 
@@ -421,6 +464,7 @@ async function main(): Promise<void> {
     studioboxd: {
       buildId: BUILD_ID,
       plane: "capnp",
+      mode: flags.template ? "template" : "cold",
       ...(flags.socket !== undefined
         ? { socket: flags.socket }
         : { vsockPort: flags.vsockPort }),
