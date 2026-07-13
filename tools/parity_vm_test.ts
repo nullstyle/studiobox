@@ -57,6 +57,8 @@ const siblings = args.has("--siblings");
 /** The in-guest gate file to run (default: the M8 parity gate). */
 const gateFile = flagValue("--gate") ?? "tests/vm/parity_vm_test.ts";
 const gateLabel = gateFile.split("/").pop() ?? gateFile;
+/** `--soak <cycles>`: run the real-microVM no-leak soak instead of a gate. */
+const soakCycles = flagValue("--soak");
 
 function skip(message: string): never {
   console.log(`\n⊘ test:vm:parity skipped — ${message}\n`);
@@ -259,17 +261,36 @@ const env = [
 // loopback ports between runs. (We deliberately do NOT `pkill -f
 // studiobox-hostd` here: that pattern also appears in this command's own
 // SBX_VM_*_BIN env, so `pkill -f` would match and kill its own shell.)
-const code = await guest(
-  `cd ${GUEST_REPO} && sudo mkdir -p ${GUEST_WORK} && ` +
-    `sudo -E env ${env} "$(command -v deno)" test -A --unstable-vsock ` +
-    gateFile,
-  false,
-);
-
-if (code === 0) {
-  console.log(
-    `\n✓ ${gateLabel} OK — green against REAL sandboxes inside ${name}.`,
+if (soakCycles !== undefined) {
+  // `--soak N`: the real-microVM no-leak drill runs the supervisor IN-PROCESS
+  // (no compiled daemons), so just point soak_vm_main at the SBX_VM_* contract.
+  const soakEnv = `${env} SBX_SOAK_CYCLES=${soakCycles}`;
+  const code = await guest(
+    `cd ${GUEST_REPO} && sudo mkdir -p ${GUEST_WORK} && ` +
+      `sudo -E env ${soakEnv} "$(command -v deno)" run -A --unstable-vsock ` +
+      `tools/soak/soak_vm_main.ts`,
+    false,
   );
+  if (code === 0) {
+    console.log(
+      `\n✓ soak:vm OK — ${soakCycles} cycles clean, no leaks, inside ${name}.`,
+    );
+  } else {
+    fail(`soak:vm failed inside ${name} (exit ${code})`);
+  }
 } else {
-  fail(`${gateLabel} failed inside ${name} (exit ${code})`);
+  const code = await guest(
+    `cd ${GUEST_REPO} && sudo mkdir -p ${GUEST_WORK} && ` +
+      `sudo -E env ${env} "$(command -v deno)" test -A --unstable-vsock ` +
+      gateFile,
+    false,
+  );
+
+  if (code === 0) {
+    console.log(
+      `\n✓ ${gateLabel} OK — green against REAL sandboxes inside ${name}.`,
+    );
+  } else {
+    fail(`${gateLabel} failed inside ${name} (exit ${code})`);
+  }
 }
