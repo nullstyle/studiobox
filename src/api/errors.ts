@@ -119,11 +119,44 @@ export class UnsupportedFeatureError extends SandboxSdkError {
   }
 }
 
-/** Raised until a host-side provider is installed by the runtime package. */
+/** Raised when a specific SDK feature is not yet implemented by this backend. */
 export class ImplementationPendingError extends SandboxSdkError {
   constructor(public readonly feature: string) {
     super(`${feature} is not wired to a Studiobox runtime`);
     this.name = "ImplementationPendingError";
+  }
+}
+
+/**
+ * Raised by `Sandbox.create`/`connect`/`list` when no sandbox provider is
+ * installed and one could not be auto-wired from the environment.
+ *
+ * This is a CONFIGURATION error — the SDK was never pointed at a host — and is
+ * deliberately distinct from {@linkcode ImplementationPendingError} (a specific
+ * feature is unimplemented). The message is actionable because hitting it means
+ * the caller has a working import but nothing behind `Sandbox.create()`.
+ */
+export class ProviderNotInstalledError extends SandboxSdkError {
+  constructor(cause?: unknown) {
+    super(
+      [
+        "No Studiobox sandbox provider is installed.",
+        "",
+        "Start a host and export its environment — then `Sandbox.create()` connects automatically:",
+        "  deno run -A jsr:@nullstyle/studiobox/cli host up   # prints STUDIOBOX_HOST / STUDIOBOX_TUNNEL to export",
+        "",
+        "Or wire a provider explicitly:",
+        '  import { installStudiobox } from "@nullstyle/studiobox/sdk";',
+        "  using _ = installStudiobox();",
+        "",
+        "For tests, install the in-process fake (no VM):",
+        '  import { FakeSandboxHost } from "@nullstyle/studiobox/testing";',
+        "  using _ = FakeSandboxHost.install();",
+        cause instanceof Error ? `\n(cause: ${cause.message})` : "",
+      ].join("\n"),
+      cause instanceof Error ? { cause } : undefined,
+    );
+    this.name = "ProviderNotInstalledError";
   }
 }
 

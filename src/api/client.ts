@@ -1,5 +1,5 @@
 import { UnsupportedFeatureError } from "./errors.ts";
-import { getSandboxProvider } from "./provider.ts";
+import { resolveSandboxProvider } from "./provider.ts";
 import { Sandbox } from "./sandbox.ts";
 import type {
   Apps,
@@ -45,7 +45,8 @@ export class Client {
     return {
       create: (options) => Sandbox.create(options),
       connect: (id, options) => Sandbox.connect(id, options),
-      list: (options) => getSandboxProvider().list(options),
+      list: (options) =>
+        resolveSandboxProvider().then((provider) => provider.list(options)),
     };
   }
 

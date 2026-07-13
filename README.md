@@ -11,6 +11,8 @@ boundary, not a container.
 // import { Sandbox } from "@deno/sandbox";
 import { Sandbox } from "@nullstyle/studiobox";
 
+// Auto-connects to your local host from STUDIOBOX_HOST / STUDIOBOX_TUNNEL
+// once `studiobox host up` has run (see Getting started).
 await using sandbox = await Sandbox.create();
 
 await sandbox.sh`ls -lh /`;
@@ -27,7 +29,7 @@ layers.
 
 ## Status
 
-**0.1.0 — early release, working end-to-end.** The `@deno/sandbox` client
+**0.1.1 — early release, working end-to-end.** The `@deno/sandbox` client
 surface runs against real jailed Firecracker microVMs: `sh`, `spawn`, `fs`,
 `env`, `deno.eval`/`repl`/`run`, `allowNet` egress policy, and `exposeHttp`. It
 is validated on real hardware — the M3 parity suite passes against real in-VM
@@ -47,14 +49,39 @@ still fast-follow work (cold boot is ~a few seconds per create).
 deno add jsr:@nullstyle/studiobox
 
 # One-time: provision + start the local host (Lima VM on macOS, native on Linux).
+# `host up` prints the STUDIOBOX_HOST / STUDIOBOX_TUNNEL values to export.
 deno run -A jsr:@nullstyle/studiobox/cli host up
 ```
 
-Then `import { Sandbox } from "@nullstyle/studiobox"` and use it exactly as the
-quickstart above. The SDK reads `STUDIOBOX_HOST` / `STUDIOBOX_TUNNEL` /
-`STUDIOBOX_TOKEN` from the environment (or call `installStudiobox(...)` from
-`@nullstyle/studiobox/sdk`); `studiobox host status` and `studiobox host doctor`
-report and diagnose the host. Requires macOS + Lima, or a Linux + KVM host.
+With `STUDIOBOX_HOST` / `STUDIOBOX_TUNNEL` (and optional `STUDIOBOX_TOKEN`)
+exported, `import { Sandbox } from "@nullstyle/studiobox"` is a true drop-in:
+`Sandbox.create()` auto-connects to the host from the environment, so the
+quickstart above runs verbatim. To wire the host explicitly instead — a
+different endpoint, or to be independent of the ambient environment — call
+`installStudiobox(...)` from `@nullstyle/studiobox/sdk` before your first
+`Sandbox.create()`:
+
+```ts
+import { installStudiobox } from "@nullstyle/studiobox/sdk";
+
+using _ = installStudiobox(); // or installStudiobox({ control, tunnel, token })
+```
+
+To develop or test a studiobox-consuming app with **no host and no VM**, install
+the in-process fake from `@nullstyle/studiobox/testing`
+([docs/testing-your-app.md](docs/testing-your-app.md)):
+
+```ts
+import { FakeSandboxHost } from "@nullstyle/studiobox/testing";
+
+using _ = FakeSandboxHost.install();
+```
+
+If you call `Sandbox.create()` with none of the above in place, it throws a
+`ProviderNotInstalledError` explaining exactly these options. Use
+`studiobox
+host status` and `studiobox host doctor` to report and diagnose the
+host. Requires either macOS with Lima, or a Linux host with KVM.
 
 - [DESIGN.md](DESIGN.md) — architecture, API fidelity tiers, state and security
   model

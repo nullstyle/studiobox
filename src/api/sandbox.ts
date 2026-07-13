@@ -8,7 +8,7 @@ import type { SandboxEnv } from "./env.ts";
 import type { SandboxFs } from "./fs.ts";
 import type { Memory } from "./memory.ts";
 import type { ChildProcess, ChildProcessStatus, Signal } from "./process.ts";
-import { getSandboxProvider } from "./provider.ts";
+import { resolveSandboxProvider } from "./provider.ts";
 import type {
   Region,
   SecretConfig,
@@ -69,7 +69,9 @@ export interface VsCodeOptions {
 /** Public sandbox contract; concrete instances are supplied by the RPC runtime. */
 export abstract class Sandbox implements AsyncDisposable {
   static create(options?: SandboxOptions): Promise<Sandbox> {
-    return getSandboxProvider().create(options);
+    return resolveSandboxProvider().then((provider) =>
+      provider.create(options)
+    );
   }
 
   static connect(id: string, options?: ConnectOptions): Promise<Sandbox>;
@@ -78,9 +80,11 @@ export abstract class Sandbox implements AsyncDisposable {
     idOrOptions: string | (ConnectOptions & { id: string }),
     options?: ConnectOptions,
   ): Promise<Sandbox> {
-    return typeof idOrOptions === "string"
-      ? getSandboxProvider().connect(idOrOptions, options)
-      : getSandboxProvider().connect(idOrOptions.id, idOrOptions);
+    return resolveSandboxProvider().then((provider) =>
+      typeof idOrOptions === "string"
+        ? provider.connect(idOrOptions, options)
+        : provider.connect(idOrOptions.id, idOrOptions)
+    );
   }
 
   sh = (

@@ -4,6 +4,28 @@ All notable changes to `@nullstyle/studiobox` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 aims to follow [semantic versioning](https://semver.org/) from 1.0 onward.
 
+## [0.1.1] — 2026-07-12
+
+### Fixed
+
+- **`Sandbox.create()` is now a true drop-in.** With `STUDIOBOX_HOST` /
+  `STUDIOBOX_TUNNEL` exported (after `studiobox host up`),
+  `import { Sandbox }
+  from "@nullstyle/studiobox"` followed by
+  `Sandbox.create()` now auto-connects to the host — no separate
+  `installStudiobox()` call required. The host-dialing provider is loaded lazily
+  (via dynamic import) only when this fallback fires, so the client barrel stays
+  free of daemon code, and an explicitly installed provider (a `FakeSandboxHost`
+  or `installStudiobox()`) always wins.
+- **Actionable error when unconfigured.** Calling `Sandbox.create` / `connect` /
+  `list` with no provider and no usable environment now throws a dedicated
+  `ProviderNotInstalledError` that spells out the fix (`host up`,
+  `installStudiobox()`, or `FakeSandboxHost.install()`), instead of the
+  misleading `ImplementationPendingError` ("not wired to a Studiobox runtime"),
+  which now denotes only genuinely-unimplemented features.
+- README getting-started corrected to document the auto-wire, the explicit
+  `installStudiobox()` path, and the `FakeSandboxHost` test path.
+
 ## [0.1.0] — 2026-07-12
 
 First public release: a Deno-native, source-compatible substitute for
@@ -50,4 +72,5 @@ First public release: a Deno-native, source-compatible substitute for
 - JSR doc-score coverage of the upstream-shaped client interfaces is a
   work-in-progress.
 
+[0.1.1]: https://jsr.io/@nullstyle/studiobox
 [0.1.0]: https://jsr.io/@nullstyle/studiobox

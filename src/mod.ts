@@ -54,6 +54,7 @@ export {
   InvalidTokenError,
   MissingTokenError,
   NetworkError,
+  ProviderNotInstalledError,
   RpcError,
   SandboxCommandError,
   SandboxKillError,
@@ -141,3 +142,24 @@ export type {
 export { Volume } from "./api/volume.ts";
 export { Snapshot } from "./api/snapshot.ts";
 export { type BaseClientOptions, Client } from "./api/client.ts";
+
+import { ProviderNotInstalledError } from "./api/errors.ts";
+import { registerDefaultSandboxProvider } from "./api/provider.ts";
+
+// Auto-wire the real provider from the environment the first time
+// `Sandbox.create()`/`connect()`/`list()` runs with nothing installed
+// explicitly — so `import { Sandbox } from "@nullstyle/studiobox"` is a true
+// drop-in once a host is up (STUDIOBOX_HOST/STUDIOBOX_TUNNEL set). The
+// host-dialing graph (`./sdk/provider.ts` → hostd/rootd/capnp) is loaded via
+// DYNAMIC import so it never enters the client barrel's static graph, and it
+// only loads when the fallback actually fires. An explicitly installed provider
+// (a `FakeSandboxHost`, or `installStudiobox()`) always wins; a missing
+// environment surfaces as an actionable `ProviderNotInstalledError`.
+registerDefaultSandboxProvider(async () => {
+  try {
+    const { StudioboxProvider } = await import("./sdk/provider.ts");
+    return StudioboxProvider.fromEnv();
+  } catch (cause) {
+    throw new ProviderNotInstalledError(cause);
+  }
+});
