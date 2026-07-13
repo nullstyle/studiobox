@@ -178,7 +178,7 @@ Deno.test("SoakRunner: completes a clean stub run and audits every phase", async
     // 9 normal cycles × (create+use+terminate = 3 audits) + 3 crash × 1 audit.
     assertEquals(result.audits, 9 * 3 + 3);
     assertEquals(result.creates, 9);
-    assertEquals(result.skipped.length, 9); // only `process` is wired
+    assertEquals(result.skipped.length, 10); // only `process` is wired
   } finally {
     await backend.close();
   }
@@ -317,6 +317,7 @@ Deno.test("fake-VMM soak: cycles + kill-9-reconcile complete clean, zero leaks",
     assert(result.creates >= 1, "at least one normal-cycle create");
     // The Linux-only classes are honestly reported as bounded coverage.
     assertEquals([...result.skipped].sort(), [
+      "dnsmasq",
       "mount",
       "netns",
       "nftables",

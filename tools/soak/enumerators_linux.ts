@@ -20,6 +20,8 @@
  */
 
 import { egressTableName } from "../../src/rootd/network/ruleset.ts";
+import { portForwardTableName } from "../../src/rootd/network/port_forward.ts";
+import { DNS_RUN_DIR } from "../../src/rootd/network/dnsmasq.ts";
 import type { LeakEnumerator } from "./leak_audit.ts";
 
 /** Result of running one enumeration command. */
@@ -150,7 +152,7 @@ export function parseNetnsNames(output: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// nftables egress chains
+// nftables per-sandbox tables (egress + port-forward)
 // ---------------------------------------------------------------------------
 
 export interface NftablesEnumeratorOptions {
@@ -162,6 +164,11 @@ export interface NftablesEnumeratorOptions {
    * tables. @default the `sbx_eg_` prefix used by the egress engine
    */
   readonly tablePrefix?: string;
+  /**
+   * Only `ip` tables whose name starts with this are studiobox exposeHttp
+   * port-forward tables. @default the `sbx_pf_` prefix the forward engine uses
+   */
+  readonly portForwardPrefix?: string;
 }
 
 /**
@@ -172,46 +179,148 @@ export interface NftablesEnumeratorOptions {
 export const EGRESS_TABLE_PREFIX = egressTableName("0").slice(0, -1);
 
 /**
- * `nftables`: `inet` egress tables with the studiobox-owned prefix. Parses
- * `nft -j list tables`. Live sandboxes' table names are passed in the
- * allowance.
+ * The prefix every per-sandbox exposeHttp forward table name carries, derived
+ * the same injective way as {@link EGRESS_TABLE_PREFIX} so it tracks the
+ * forward engine — `portForwardTableName("0")` is `sbx_pf_0`, so dropping the
+ * single id byte leaves exactly the `sbx_pf_` prefix.
+ */
+export const PORT_FORWARD_TABLE_PREFIX = portForwardTableName("0").slice(0, -1);
+
+/** One nft table's family + name, from `nft -j list tables` JSON. */
+export interface NftTableId {
+  readonly family: string;
+  readonly name: string;
+}
+
+/**
+ * `nftables`: the per-sandbox nft tables studiobox owns — `inet sbx_eg_*`
+ * egress tables AND `ip sbx_pf_*` exposeHttp port-forward tables. Parses
+ * `nft -j list tables`. The shared, persistent `studiobox_nat` /
+ * `studiobox_isolation` / `studiobox_hostguard` tables are NOT per-sandbox
+ * leaks and are excluded by the owned-prefix filter (their names carry neither
+ * prefix). Identity is family-qualified (`inet:sbx_eg_…` / `ip:sbx_pf_…`) so a
+ * name collision across families stays distinct. Live sandboxes' table ids are
+ * passed in the allowance.
  */
 export function nftablesEnumerator(
   options: NftablesEnumeratorOptions = {},
 ): LeakEnumerator {
   const runner = options.runner ?? new DenoSoakCommandRunner();
   const nftBin = options.nftBin ?? "nft";
-  const prefix = options.tablePrefix ?? EGRESS_TABLE_PREFIX;
+  const egressPrefix = options.tablePrefix ?? EGRESS_TABLE_PREFIX;
+  const forwardPrefix = options.portForwardPrefix ?? PORT_FORWARD_TABLE_PREFIX;
   return {
     leakClass: "nftables",
     async enumerate(): Promise<readonly string[]> {
       const result = await runner.run(nftBin, ["-j", "list", "tables"]);
       requireOk(result, `${nftBin} list tables`);
-      return parseNftInetTables(result.stdout)
-        .filter((name) => name.startsWith(prefix))
-        .sort();
+      const out: string[] = [];
+      for (const { family, name } of parseNftTables(result.stdout)) {
+        const owned = (family === "inet" && name.startsWith(egressPrefix)) ||
+          (family === "ip" && name.startsWith(forwardPrefix));
+        if (owned) out.push(`${family}:${name}`);
+      }
+      return out.sort();
     },
   };
 }
 
-/** Extract `inet` table names from `nft -j list tables` JSON output. */
-export function parseNftInetTables(json: string): string[] {
+/** Extract every `{ family, name }` table from `nft -j list tables` JSON. */
+export function parseNftTables(json: string): NftTableId[] {
   const parsed = parseJsonObject(json);
   const list = parsed.nftables;
-  const names: string[] = [];
+  const tables: NftTableId[] = [];
   if (Array.isArray(list)) {
     for (const entry of list) {
       if (!isRecord(entry)) continue;
       const table = entry.table;
       if (
-        isRecord(table) && table.family === "inet" &&
+        isRecord(table) && typeof table.family === "string" &&
         typeof table.name === "string"
       ) {
-        names.push(table.name);
+        tables.push({ family: table.family, name: table.name });
       }
     }
   }
-  return names;
+  return tables;
+}
+
+/**
+ * Extract `inet` table names from `nft -j list tables` JSON output. Retained
+ * for callers that only want the egress family; {@link parseNftTables} returns
+ * both families with their family tag.
+ */
+export function parseNftInetTables(json: string): string[] {
+  return parseNftTables(json)
+    .filter((table) => table.family === "inet")
+    .map((table) => table.name);
+}
+
+// ---------------------------------------------------------------------------
+// Per-sandbox dnsmasq forwarders
+// ---------------------------------------------------------------------------
+
+export interface DnsmasqEnumeratorOptions {
+  readonly runner?: SoakCommandRunner;
+  /** `pgrep` binary. @default "pgrep" */
+  readonly pgrepBin?: string;
+  /**
+   * The studiobox dns run dir whose `<slot>.pid` pidfiles a spawned dnsmasq
+   * `--pid-file=` argument points at. Only dnsmasq processes whose args name
+   * this dir are studiobox-owned. @default {@link DNS_RUN_DIR}
+   */
+  readonly runDir?: string;
+}
+
+/**
+ * `dnsmasq`: the per-sandbox dnsmasq forwarders studiobox spawns (one per
+ * non-netless sandbox, bound to its gateway on `sbxtap<slot>`). Parses
+ * `pgrep -a dnsmasq` and keeps ONLY lines whose args carry the studiobox dns
+ * run dir in `--pid-file=<runDir>/<slot>.pid`, so a host's own / unrelated
+ * dnsmasq is never flagged. Identity is `dns:<slot>` (the slot parsed from the
+ * pidfile path); a live sandbox's dnsmasq slot is passed in the allowance.
+ */
+export function dnsmasqEnumerator(
+  options: DnsmasqEnumeratorOptions = {},
+): LeakEnumerator {
+  const runner = options.runner ?? new DenoSoakCommandRunner();
+  const pgrepBin = options.pgrepBin ?? "pgrep";
+  const runDir = options.runDir ?? DNS_RUN_DIR;
+  return {
+    leakClass: "dnsmasq",
+    async enumerate(): Promise<readonly string[]> {
+      const result = await runner.run(pgrepBin, ["-a", "dnsmasq"]);
+      // `pgrep` exits 1 with no output when nothing matches — that is a clean
+      // "no dnsmasq at all", not a command failure.
+      if (result.code !== 0 && result.stdout.trim() === "") return [];
+      requireOk(result, `${pgrepBin} -a dnsmasq`);
+      return parseDnsmasqSlots(result.stdout, runDir).sort();
+    },
+  };
+}
+
+/**
+ * Extract `dns:<slot>` identities from `pgrep -a dnsmasq` output, keeping only
+ * lines whose `--pid-file=<runDir>/<slot>.pid` names the studiobox dns run dir.
+ * The slot is the pidfile basename minus its `.pid` suffix.
+ */
+export function parseDnsmasqSlots(
+  pgrepOutput: string,
+  runDir: string = DNS_RUN_DIR,
+): string[] {
+  const base = runDir.endsWith("/") ? runDir : `${runDir}/`;
+  const marker = `--pid-file=${base}`;
+  const slots: string[] = [];
+  for (const line of pgrepOutput.split("\n")) {
+    if (line.trim() === "") continue;
+    const at = line.indexOf(marker);
+    if (at === -1) continue;
+    // The pidfile token runs to the next whitespace; strip the `.pid` suffix.
+    const token = line.slice(at + marker.length).split(/\s+/, 1)[0] ?? "";
+    const slot = token.replace(/\.pid$/, "");
+    if (slot !== "") slots.push(`dns:${slot}`);
+  }
+  return slots;
 }
 
 // ---------------------------------------------------------------------------

@@ -45,7 +45,8 @@ const SEED: Record<LeakClass, string[]> = {
   process: ["pid=4242"],
   tap: ["sbx-tap0"],
   netns: ["sbx-ns-9"],
-  nftables: ["sbx_eg_deadbeef"],
+  nftables: ["inet:sbx_eg_deadbeef"],
+  dnsmasq: ["dns:7"],
   mount: ["/srv/jail/j/firecracker/x/root/overlay"],
   overlay: ["ov-e7.ext4"],
   jailRoot: ["firecracker-fake-ready/e7"],
@@ -137,6 +138,7 @@ Deno.test("LeakAudit: unwired classes are reported as skipped (bounded coverage)
     "tap",
     "netns",
     "nftables",
+    "dnsmasq",
     "mount",
     "overlay",
     "jailRoot",
@@ -145,7 +147,7 @@ Deno.test("LeakAudit: unwired classes are reported as skipped (bounded coverage)
   ]);
   const report = await audit.audit();
   assertEquals(report.clean, true);
-  assertEquals(report.skipped.length, 8);
+  assertEquals(report.skipped.length, 9);
 });
 
 Deno.test("LeakAudit: with() replaces an enumerator for its class", async () => {

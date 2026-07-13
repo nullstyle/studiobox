@@ -11,14 +11,18 @@ import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 
 import {
+  dnsmasqEnumerator,
   EGRESS_TABLE_PREFIX,
   mountEnumerator,
   netnsEnumerator,
   nftablesEnumerator,
+  parseDnsmasqSlots,
   parseIpLinkNames,
   parseMountPoints,
   parseNetnsNames,
   parseNftInetTables,
+  parseNftTables,
+  PORT_FORWARD_TABLE_PREFIX,
   procCmdlineOrphanEnumerator,
   type SoakCommandResult,
   type SoakCommandRunner,
@@ -85,26 +89,94 @@ Deno.test("netnsEnumerator parses both JSON and plain formats", async () => {
   );
 });
 
-Deno.test("nftablesEnumerator returns only inet egress tables with the prefix", async () => {
+Deno.test("PORT_FORWARD_TABLE_PREFIX tracks the port-forward engine", () => {
+  assertEquals(PORT_FORWARD_TABLE_PREFIX, "sbx_pf_");
+});
+
+Deno.test("nftablesEnumerator returns owned egress (inet) + port-forward (ip), family-qualified", async () => {
   const runner = runnerFor({
     "nft -j list tables": ok(JSON.stringify({
       nftables: [
         { metainfo: { version: "1.0" } },
+        // Owned per-sandbox tables: the inet egress seal + the ip forward table.
         { table: { family: "inet", name: "sbx_eg_616263" } },
+        { table: { family: "ip", name: "sbx_pf_616263" } },
+        // The shared, persistent masquerade table is NOT a per-sandbox leak.
+        { table: { family: "ip", name: "studiobox_nat" } },
+        // An unrelated table on the box.
         { table: { family: "inet", name: "filter" } },
-        { table: { family: "ip", name: "sbx_eg_notinet" } },
       ],
     })),
   });
+  // Sorted, family-qualified: `inet:` sorts before `ip:`.
   assertEquals(await nftablesEnumerator({ runner }).enumerate(), [
-    "sbx_eg_616263",
+    "inet:sbx_eg_616263",
+    "ip:sbx_pf_616263",
   ]);
 });
 
-Deno.test("parseNftInetTables handles empty / missing keys", () => {
+Deno.test("parseNftTables reads both families; parseNftInetTables keeps inet only", () => {
+  const json = JSON.stringify({
+    nftables: [
+      { metainfo: { version: "1.0" } },
+      { table: { family: "inet", name: "sbx_eg_1" } },
+      { table: { family: "ip", name: "sbx_pf_1" } },
+    ],
+  });
+  assertEquals(parseNftTables(json), [
+    { family: "inet", name: "sbx_eg_1" },
+    { family: "ip", name: "sbx_pf_1" },
+  ]);
+  assertEquals(parseNftInetTables(json), ["sbx_eg_1"]);
+});
+
+Deno.test("parseNftTables / parseNftInetTables handle empty / missing keys", () => {
+  assertEquals(parseNftTables(""), []);
+  assertEquals(parseNftTables(JSON.stringify({})), []);
   assertEquals(parseNftInetTables(""), []);
   assertEquals(parseNftInetTables(JSON.stringify({})), []);
   assertEquals(parseNftInetTables(JSON.stringify({ nftables: [] })), []);
+});
+
+Deno.test("dnsmasqEnumerator returns only studiobox dns-run-dir instances", async () => {
+  const runner = runnerFor({
+    "pgrep -a dnsmasq": ok(
+      [
+        // A studiobox per-sandbox dnsmasq: its pidfile names the dns run dir.
+        "1234 dnsmasq --pid-file=/run/studiobox/dns/7.pid --listen-address=10.201.0.1 --bind-interfaces --interface=sbxtap7 --server=1.1.1.1",
+        // An unrelated host dnsmasq: no studiobox run-dir pidfile → ignored.
+        "5678 /usr/sbin/dnsmasq --conf-file=/etc/dnsmasq.conf",
+      ].join("\n") + "\n",
+    ),
+  });
+  assertEquals(await dnsmasqEnumerator({ runner }).enumerate(), ["dns:7"]);
+});
+
+Deno.test("dnsmasqEnumerator treats an empty pgrep (exit 1) as no instances", async () => {
+  const runner: SoakCommandRunner = {
+    run: () => Promise.resolve({ code: 1, stdout: "", stderr: "" }),
+  };
+  assertEquals(await dnsmasqEnumerator({ runner }).enumerate(), []);
+});
+
+Deno.test("parseDnsmasqSlots parses the slot from --pid-file, custom run dir", () => {
+  assertEquals(
+    parseDnsmasqSlots(
+      "42 dnsmasq --pid-file=/run/studiobox/dns/3.pid --server=1.1.1.1\n",
+    ),
+    ["dns:3"],
+  );
+  // A custom run dir + a line that does not name it.
+  assertEquals(
+    parseDnsmasqSlots(
+      [
+        "10 dnsmasq --pid-file=/var/run/sbx/dns/12.pid --server=8.8.8.8",
+        "11 dnsmasq --pid-file=/somewhere/else/9.pid",
+      ].join("\n"),
+      "/var/run/sbx/dns",
+    ),
+    ["dns:12"],
+  );
 });
 
 Deno.test("mountEnumerator returns jail-scoped mount points, unescaped", async () => {

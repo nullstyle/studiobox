@@ -11,7 +11,9 @@
  *                       host-safe, a `/proc` cmdline scan in-guest);
  * - `tap`             — leaked TAP devices;
  * - `netns`           — leaked network namespaces;
- * - `nftables`        — leaked egress chains (`sbx_eg_*`);
+ * - `nftables`        — leaked per-sandbox nft tables (`inet sbx_eg_*` egress
+ *                       + `ip sbx_pf_*` port-forward);
+ * - `dnsmasq`         — leaked per-sandbox dnsmasq forwarders;
  * - `mount`           — leaked jail mounts;
  * - `overlay`         — leaked per-boot overlay ext4 files;
  * - `jailRoot`        — leaked jail root dirs;
@@ -52,6 +54,7 @@ export type LeakClass =
   | "tap"
   | "netns"
   | "nftables"
+  | "dnsmasq"
   | "mount"
   | "overlay"
   | "jailRoot"
@@ -65,6 +68,7 @@ export const LEAK_CLASSES: readonly LeakClass[] = Object.freeze([
   "tap",
   "netns",
   "nftables",
+  "dnsmasq",
   "mount",
   "overlay",
   "jailRoot",
