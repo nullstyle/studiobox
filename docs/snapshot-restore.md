@@ -58,9 +58,14 @@ from memory.
   never see it. If restore/personalize fails, the core **falls back to a cold
   boot for that create**, reusing the already-provisioned network, so a template
   problem never fails a create.
-- **Latency win.** Cold ≈ 3.7 s. Restore ≈ **restore+resume (~100-300 ms) +
-  network provision (~50-150 ms) + personalize (~20-50 ms) + staging copies**;
-  p50 ≈ **0.4-0.8 s**, a ~5-8× improvement, and it pairs naturally with a future
+- **Latency win.** Restore ≈ **restore+resume + network provision + personalize
+  + per-restore staging copies**. MEASURED end-to-end (client → hostd → rootd,
+  fc-smoke aarch64): cold ≈ 5.4 s, restore ≈ 3.3-3.6 s — a **~1.6× win in 1.0
+  copy-mode**, where the per-restore 512 MiB mem + 256 MiB overlay copies (ext4,
+  no reflink) dominate. The larger win the restore OPERATION alone promises
+  (~0.5 s, skipping kernel boot + Deno cold-start) is diluted by the shared
+  create pipeline and gated on the **shared-read-only-mem COW optimization**
+  (§6, post-1.0) that deletes the mem copy. It pairs naturally with a future
   pre-warm pool (`PLAN.md:291`).
 - **Work order (serialization point = the schema change).** WI-1 `personalize`
   schema + codegen + wire ratchet + golden **rebake** (forced because the
@@ -673,8 +678,11 @@ known contributor (`PLAN.md:321` R3).
 | `Machine.restore` (spawn fc + `loadSnapshot` File + resume) | ~100-300 ms | File backend pages in lazily; no kernel boot, no `mkfs`, no Deno/capnp warm-up |
 | Dial vsock + `negotiate` + `personalize` (+ in-guest `ip`)  | ~20-50 ms   | one round-trip + a few `ip` calls                                              |
 
-**p50 ≈ 0.4-0.8 s, p95 < 1 s** — a ~5-8× win, dominated by the mem-file staging
-copy and network provisioning (both attackable; §6 optimization + a warm-pool).
+**MEASURED (fc-smoke, WI-8):** end-to-end create cold ≈ 5.4 s vs restore ≈
+3.3-3.6 s — a **~1.6× win in 1.0 copy-mode**. The per-restore 512 MiB mem +
+256 MiB overlay copies (ext4, no reflink) dominate the restore time; the §6
+shared-RO-mem COW optimization (post-1.0) that deletes the mem copy, plus a
+warm-pool, are what unlock the larger win the restore operation itself allows.
 
 **Template build cost (one-time per hash):** a full cold boot (~3.7 s) + pause +
 snapshot + copy-out (~1-2 s) ≈ a few seconds, amortized across every subsequent
