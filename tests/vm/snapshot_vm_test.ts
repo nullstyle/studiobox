@@ -25,14 +25,41 @@
  */
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { join } from "@std/path";
 
 import { inGuest, readVmConfig } from "./support.ts";
 import { startRealStack } from "./real_stack.ts";
 import { installSandboxProvider } from "../../src/api/provider.ts";
 import { Sandbox } from "../../src/api/sandbox.ts";
+import { TemplateStore } from "../../src/rootd/template/mod.ts";
 
 /** The per-sandbox dnsmasq upstream; presence flips rootd into the dataplane. */
 const UPSTREAM_DNS = "1.1.1.1";
+
+/** Count running processes whose exact name is `name` (leaked VMMs/jailers). */
+async function countProcess(name: string): Promise<number> {
+  const out = await new Deno.Command("pgrep", {
+    args: ["-x", name],
+    stdout: "piped",
+    stderr: "null",
+  }).output();
+  const text = new TextDecoder().decode(out.stdout).trim();
+  return text === "" ? 0 : text.split("\n").length;
+}
+
+/** Poll `predicate` until true or the deadline; returns whether it settled. */
+async function settlesWithin(
+  predicate: () => Promise<boolean>,
+  timeoutMs: number,
+  intervalMs = 500,
+): Promise<boolean> {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    if (await predicate()) return true;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return await predicate();
+}
 
 /** Exercise the full client surface of a created sandbox and assert it works. */
 async function assertFunctional(sandbox: Sandbox): Promise<void> {
@@ -176,4 +203,81 @@ Deno.test({
   } finally {
     await Deno.remove(emptyTemplates, { recursive: true }).catch(() => {});
   }
+});
+
+Deno.test({
+  name:
+    "M-snap: repeated restore/terminate cycles leak nothing — the template refcount returns to baseline (FINDING 1 on real hardware)",
+  ignore: !inGuest,
+}, async () => {
+  const config = readVmConfig();
+  // Clear any leaked VMMs from EARLIER tests' stack disposes: rootd's SIGTERM
+  // shutdown defers its reclaim sweep to a restart a test never does, so a VMM
+  // (and memory) can linger. Reap them so this leak check measures only its own
+  // cycles and is not starved of the 4 GiB guest. (A real rootd restart would
+  // reconcile them; this is test hygiene, not a product concern.)
+  for (const name of ["firecracker", "jailer"]) {
+    await new Deno.Command("pkill", { args: ["-9", "-x", name] }).output()
+      .catch(() => {});
+  }
+
+  const store = new TemplateStore({
+    root: join(config.cacheRoot, "templates"),
+  });
+  const baselineRefcount = await store.refcount(config.manifestHash);
+  const CYCLES = 12;
+  let restores = 0;
+
+  {
+    await using stack = await startRealStack(config, {
+      network: { upstreamDns: UPSTREAM_DNS },
+      snapshot: true,
+    });
+    const provider = installSandboxProvider(stack.provider);
+    try {
+      for (let i = 0; i < CYCLES; i++) {
+        const sandbox = await Sandbox.create();
+        try {
+          assertEquals(
+            (await sandbox.sh`echo cycle-${i}`.text()).trim(),
+            `cycle-${i}`,
+          );
+        } finally {
+          await sandbox.close();
+        }
+      }
+    } finally {
+      provider();
+    }
+    restores = stack.rootdStderr.filter((l) =>
+      l.includes("created via snapshot restore")
+    ).length;
+
+    // Every terminate releases its template pin (FINDING 1's durable, per-record
+    // reclaim). `sandbox.close()` returns when the client tunnel drops; rootd
+    // then reclaims asynchronously, so poll for the refcount to return to
+    // baseline (a genuine leak never drains). Do this WHILE the stack is live —
+    // disposing rootd (SIGTERM) mid-reclaim would defer the sweep to a restart
+    // that never comes, which is a harness artifact, not a product leak.
+    const drained = await settlesWithin(
+      async () =>
+        (await store.refcount(config.manifestHash)) === baselineRefcount,
+      30_000,
+    );
+    assertEquals(
+      await store.refcount(config.manifestHash),
+      baselineRefcount,
+      `template refcount did not return to baseline (${baselineRefcount}) after ${CYCLES} restore/terminate cycles — drained=${drained}`,
+    );
+    // With every sandbox terminated + reclaimed, no jailed VMM/jailer is left.
+    assert(
+      await settlesWithin(async () =>
+        (await countProcess("firecracker")) === 0, 10_000),
+      "leaked firecracker VMMs after restore/terminate cycles",
+    );
+    assertEquals(await countProcess("jailer"), 0, "leaked jailer processes");
+  }
+
+  // All CYCLES took the restore path.
+  assertEquals(restores, CYCLES, "every cycle should have restored");
 });
