@@ -27,16 +27,26 @@ The **compiled daemons** (`studiobox-hostd` / `studiobox-rootd`), the in-guest
 JSR package yet — they are built from a checkout. So a bare
 `deno run -A jsr:@nullstyle/studiobox/cli host up` provisions the host and then
 stops with a clear warning that no compiled daemon binaries are present (the
-units are written but not enabled). Build the artifacts from a checkout and
-re-run `host up` (or `host provision`) to install and start them:
+units are written but not enabled). From a checkout, `host up --bake` finishes
+the job in one command — it cross-compiles the daemons for the guest, bakes the
+golden artifact set **inside the guest** (agent compile + rootfs build, no
+separate `agent:compile` / `images:build`), and wires rootd's launch planner so
+`Sandbox.create()` works:
 
 ```sh
 git clone https://github.com/nullstyle/studiobox && cd studiobox
-deno task daemons:compile   # .build/studiobox-{hostd,rootd}-<arch>-unknown-linux-gnu
-deno task agent:compile     # .build/studioboxd
-deno task images:build      # golden kernel + rootfs
-deno task cli host up       # now installs + enables the daemons
+deno task daemons:compile     # .build/studiobox-{hostd,rootd}-<arch>-unknown-linux-gnu
+deno task cli host up --bake  # installs the daemons, bakes the golden set in-guest, starts everything
 ```
+
+`--bake` needs a local checkout (it builds from source); the bake is cached by
+manifest hash (a re-run skips it in seconds, `--rebuild` forces a fresh one) and
+a bake failure degrades to a control-plane-only host (nonzero exit) rather than
+aborting. To wire a **pre-baked** set instead, pass
+`host up --manifest-hash <sha256>` (from `tools/build_golden_set.ts`); `--bake`
+and `--manifest-hash` are mutually exclusive. Without either, `host up` brings
+up a control-plane-only host and warns that `Sandbox.create()` needs a golden
+set.
 
 ## The verbs
 
@@ -50,18 +60,21 @@ deno task cli host up       # now installs + enables the daemons
 
 ### Flags
 
-| Flag                 | Applies to     | Meaning                                                                       |
-| -------------------- | -------------- | ----------------------------------------------------------------------------- |
-| `--recreate`         | up             | Delete and recreate the VM before provisioning (the `smoke:lima` pattern).    |
-| `--no-lima`          | all            | Provision **this** Linux machine directly — no Lima VM (CI + Linux desktops). |
-| `--rotate-token`     | up, provision  | Re-mint the bootstrap token even if one already exists.                       |
-| `--json`             | status, doctor | Machine-readable output.                                                      |
-| `--name <name>`      | all            | Override the Lima instance name (default `studiobox-host-<arch>`).            |
-| `--arch <arch>`      | all            | Target `aarch64` or `x86_64` (default: this host).                            |
-| `--control-port <n>` | all            | Override the HostControl port (default 40000; tunnel/expose derive from it).  |
-| `--build-dir <dir>`  | up, provision  | Where the compiled daemon binaries live (default `.build`).                   |
-| `--hostd-bin <path>` | up, provision  | Explicit `studiobox-hostd` binary source.                                     |
-| `--rootd-bin <path>` | up, provision  | Explicit `studiobox-rootd` binary source.                                     |
+| Flag                  | Applies to     | Meaning                                                                       |
+| --------------------- | -------------- | ----------------------------------------------------------------------------- |
+| `--recreate`          | up             | Delete and recreate the VM before provisioning (the `smoke:lima` pattern).    |
+| `--no-lima`           | all            | Provision **this** Linux machine directly — no Lima VM (CI + Linux desktops). |
+| `--rotate-token`      | up, provision  | Re-mint the bootstrap token even if one already exists.                       |
+| `--json`              | status, doctor | Machine-readable output.                                                      |
+| `--name <name>`       | all            | Override the Lima instance name (default `studiobox-host-<arch>`).            |
+| `--arch <arch>`       | all            | Target `aarch64` or `x86_64` (default: this host).                            |
+| `--control-port <n>`  | all            | Override the HostControl port (default 40000; tunnel/expose derive from it).  |
+| `--build-dir <dir>`   | up, provision  | Where the compiled daemon binaries live (default `.build`).                   |
+| `--hostd-bin <path>`  | up, provision  | Explicit `studiobox-hostd` binary source.                                     |
+| `--rootd-bin <path>`  | up, provision  | Explicit `studiobox-rootd` binary source.                                     |
+| `--bake`              | up, provision  | Bake the golden set in-guest + wire the launch planner (needs a checkout).    |
+| `--rebuild`           | up, provision  | Force a fresh golden bake, ignoring the cache (with `--bake`).                |
+| `--manifest-hash <h>` | up, provision  | Wire a pre-baked golden set by its hash (exclusive with `--bake`).            |
 
 Exit codes: `0` success, `1` a runtime failure (incl. an unhealthy `doctor`),
 `2` a usage error.
@@ -181,13 +194,13 @@ Run from a checkout so the daemons and images exist locally (see
 is the checkout's alias for the CLI.
 
 ```sh
-# 1. Compile the daemons + agent and build the golden images (once per arch).
+# 1. Cross-compile the daemons for the guest (once per arch).
 deno task daemons:compile   # .build/studiobox-{hostd,rootd}-<arch>-unknown-linux-gnu
-deno task agent:compile     # .build/studioboxd
-deno task images:build      # golden kernel + rootfs
 
-# 2. Bring the host up (first run downloads Ubuntu; a few minutes).
-deno task cli host up
+# 2. Bring the host up and bake the golden set in-guest (first run downloads
+#    Ubuntu + a base rootfs; a few minutes). --bake also compiles the agent and
+#    builds the images inside the guest, so no separate agent:compile/images:build.
+deno task cli host up --bake
 
 # 3. Verify.
 deno task cli host status

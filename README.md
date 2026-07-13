@@ -59,15 +59,21 @@ deno run -A jsr:@nullstyle/studiobox/cli host up
 The compiled daemons and guest images are **not** shipped in the package yet, so
 `host up` from a bare `jsr:` invocation stops after provisioning with a clear
 "no compiled daemon binaries present" warning. To run sandboxes today you need a
-local checkout to build those artifacts, then re-run `host up` from it:
+local checkout, then `host up --bake` — which cross-compiles the daemons for the
+guest, bakes the golden artifact set **inside the guest**, and wires rootd's
+launch planner so `Sandbox.create()` works, in one command:
 
 ```sh
 git clone https://github.com/nullstyle/studiobox && cd studiobox
-deno task daemons:compile   # -> .build/studiobox-{hostd,rootd}-<arch>-unknown-linux-gnu
-deno task agent:compile     # -> .build/studioboxd (in-guest agent)
-deno task images:build      # -> golden kernel + rootfs set
-deno task cli host up       # provisions + installs the daemons, then starts them
+deno task daemons:compile     # -> .build/studiobox-{hostd,rootd}-<arch>-unknown-linux-gnu
+deno task cli host up --bake  # provisions, bakes the golden set in-guest, starts everything
 ```
+
+`--bake` runs the golden bake (agent compile + rootfs build) in the guest, so no
+separate `agent:compile` / `images:build` is needed; it is cached by manifest
+hash (a re-run skips it). Without `--bake` (or `--manifest-hash <hash>` for a
+pre-baked set), `host up` still brings up a control-plane-only host and warns
+that `Sandbox.create()` needs a golden set.
 
 `host up` prints the `STUDIOBOX_HOST` / `STUDIOBOX_TUNNEL` values to export.
 With `STUDIOBOX_HOST` / `STUDIOBOX_TUNNEL` (and optional `STUDIOBOX_TOKEN`)
