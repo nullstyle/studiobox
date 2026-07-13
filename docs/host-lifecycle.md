@@ -15,6 +15,29 @@ token flow are below. Everything the CLI does externally goes through `limactl`
 (macOS) or `bash`/`sudo` (Linux), so the flow is identical whether you watch it
 or drive it from a script.
 
+### From JSR vs. a local checkout
+
+`host up` runs straight from JSR and provisions the whole host — the VM,
+Firecracker, the directories, the bootstrap token, and the systemd units. The
+packaged `compat/wire.json` identity pin travels with it, so no checkout is
+needed for provisioning itself.
+
+The **compiled daemons** (`studiobox-hostd` / `studiobox-rootd`), the in-guest
+**agent** (`studioboxd`), and the **golden image set** are not shipped in the
+JSR package yet — they are built from a checkout. So a bare
+`deno run -A jsr:@nullstyle/studiobox/cli host up` provisions the host and then
+stops with a clear warning that no compiled daemon binaries are present (the
+units are written but not enabled). Build the artifacts from a checkout and
+re-run `host up` (or `host provision`) to install and start them:
+
+```sh
+git clone https://github.com/nullstyle/studiobox && cd studiobox
+deno task daemons:compile   # .build/studiobox-{hostd,rootd}-<arch>-unknown-linux-gnu
+deno task agent:compile     # .build/studioboxd
+deno task images:build      # golden kernel + rootfs
+deno task cli host up       # now installs + enables the daemons
+```
+
 ## The verbs
 
 | Command          | What it does                                                                                                                                       |
@@ -153,23 +176,28 @@ full report.
 
 ## Cold-start walkthrough (macOS)
 
+Run from a checkout so the daemons and images exist locally (see
+[From JSR vs. a local checkout](#from-jsr-vs-a-local-checkout)); `deno task cli`
+is the checkout's alias for the CLI.
+
 ```sh
-# 1. Compile the daemons for the VM's arch (once; see the tasksWanted note).
-#    deno compile ... src/hostd/main.ts -> .build/studiobox-hostd-aarch64-unknown-linux-gnu
-#    deno compile ... src/rootd/main.ts -> .build/studiobox-rootd-aarch64-unknown-linux-gnu
+# 1. Compile the daemons + agent and build the golden images (once per arch).
+deno task daemons:compile   # .build/studiobox-{hostd,rootd}-<arch>-unknown-linux-gnu
+deno task agent:compile     # .build/studioboxd
+deno task images:build      # golden kernel + rootfs
 
 # 2. Bring the host up (first run downloads Ubuntu; a few minutes).
-deno run -A jsr:@nullstyle/studiobox/cli host up
+deno task cli host up
 
 # 3. Verify.
-deno run -A jsr:@nullstyle/studiobox/cli host status
-deno run -A jsr:@nullstyle/studiobox/cli host doctor
+deno task cli host status
+deno task cli host doctor
 
 # 4. Your app now finds the token at ~/.studiobox/token.
 #    await using sandbox = await Sandbox.create();
 
 # 5. Tear down when done.
-deno run -A jsr:@nullstyle/studiobox/cli host down
+deno task cli host down
 ```
 
 > **Deferred to manual validation.** A full cold `host up` boots a real second
@@ -183,7 +211,8 @@ deno run -A jsr:@nullstyle/studiobox/cli host down
 ## Linux / CI walkthrough
 
 ```sh
-# On a KVM-capable Linux box (root), with the daemons compiled into .build/:
-deno run -A jsr:@nullstyle/studiobox/cli host up --no-lima
-deno run -A jsr:@nullstyle/studiobox/cli host doctor --no-lima
+# On a KVM-capable Linux box (root), from a checkout with the daemons + images
+# built into .build/ (deno task daemons:compile / agent:compile / images:build):
+deno task cli host up --no-lima
+deno task cli host doctor --no-lima
 ```

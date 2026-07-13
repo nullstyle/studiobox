@@ -31,7 +31,10 @@
  */
 
 import { FIRECRACKER_COMPAT } from "@nullstyle/firecracker";
-import { fromFileUrl } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
+// Import the pin directly so it is embedded in the package (works local AND
+// when the module is fetched from a remote registry).
+import wireCompat from "../../compat/wire.json" with { type: "json" };
 import type { ArtifactArch } from "../../images/pins.ts";
 import type { HostEnv } from "./host_env.ts";
 import type { HostPortConfig } from "./lima_template.ts";
@@ -66,9 +69,56 @@ export function defaultDaemonBinary(
   return `${buildDir}/${daemon}-${arch}-unknown-linux-gnu`;
 }
 
-/** Path to the committed `compat/wire.json` shipped into the guest. */
+/**
+ * Materialize the package-embedded `compat/wire.json` pin to a fresh temp file
+ * and return its path.
+ *
+ * Used when the CLI was fetched from a remote registry (`jsr:`/`https:`), where
+ * `import.meta.resolve` yields a non-`file:` URL and the pin has no on-disk
+ * path — provisioning still needs a readable LOCAL file: {@linkcode provisionHost}
+ * `copyIn`s it into the guest and {@linkcode HostLifecycle} reads it to build the
+ * host contract identity.
+ *
+ * Re-serializing the embedded pin is safe: the daemons and the host/supervisor
+ * identity `JSON.parse` this file and consume the `protocol`, `schemaSha256`,
+ * and `codegen.version` FIELDS (see `buildSupervisorContractIdentity` in
+ * `src/rootd/service.ts`) — never a hash of the raw file bytes — and those
+ * fields survive `JSON.stringify` intact.
+ */
+export function materializeCompatPin(): string {
+  const dir = Deno.makeTempDirSync({ prefix: "studiobox-compat-" });
+  const path = join(dir, "wire.json");
+  Deno.writeTextFileSync(path, JSON.stringify(wireCompat));
+  return path;
+}
+
+/**
+ * Path to the committed `compat/wire.json` shipped into the guest.
+ *
+ * Kept SYNC because {@linkcode HostLifecycle}'s constructor calls it
+ * synchronously. Two branches resolve the SAME pin regardless of how the CLI
+ * was loaded:
+ *
+ *   1. LOCAL checkout — `import.meta.resolve` yields a `file:` URL and the pin
+ *      is on disk → return that path unchanged (byte-identical to the committed
+ *      file; the historical fast path).
+ *   2. REMOTE (`jsr:`/`https:`) or the file is absent — `fromFileUrl` would
+ *      throw on a non-`file:` URL, so materialize the package-embedded pin to a
+ *      temp file (see {@linkcode materializeCompatPin}) and return that path.
+ */
 export function defaultCompatPath(): string {
-  return fromFileUrl(import.meta.resolve("../../compat/wire.json"));
+  const url = import.meta.resolve("../../compat/wire.json");
+  if (url.startsWith("file:")) {
+    const path = fromFileUrl(url);
+    try {
+      Deno.statSync(path);
+      return path;
+    } catch {
+      // A file: URL that points nowhere on disk (unusual): fall through to
+      // materializing the embedded pin rather than handing back a dead path.
+    }
+  }
+  return materializeCompatPin();
 }
 
 /** One provisioning step's outcome. */

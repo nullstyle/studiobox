@@ -45,14 +45,31 @@ still fast-follow work (cold boot is ~a few seconds per create).
 
 ### Getting started
 
+Add the client and bring up the local host. `host up` provisions the host itself
+— the Lima VM (macOS) or the native machine (Linux), Firecracker, the
+directories, the bootstrap token, and the systemd units — directly from JSR:
+
 ```sh
 deno add jsr:@nullstyle/studiobox
 
 # One-time: provision + start the local host (Lima VM on macOS, native on Linux).
-# `host up` prints the STUDIOBOX_HOST / STUDIOBOX_TUNNEL values to export.
 deno run -A jsr:@nullstyle/studiobox/cli host up
 ```
 
+The compiled daemons and guest images are **not** shipped in the package yet, so
+`host up` from a bare `jsr:` invocation stops after provisioning with a clear
+"no compiled daemon binaries present" warning. To run sandboxes today you need a
+local checkout to build those artifacts, then re-run `host up` from it:
+
+```sh
+git clone https://github.com/nullstyle/studiobox && cd studiobox
+deno task daemons:compile   # -> .build/studiobox-{hostd,rootd}-<arch>-unknown-linux-gnu
+deno task agent:compile     # -> .build/studioboxd (in-guest agent)
+deno task images:build      # -> golden kernel + rootfs set
+deno task cli host up       # provisions + installs the daemons, then starts them
+```
+
+`host up` prints the `STUDIOBOX_HOST` / `STUDIOBOX_TUNNEL` values to export.
 With `STUDIOBOX_HOST` / `STUDIOBOX_TUNNEL` (and optional `STUDIOBOX_TOKEN`)
 exported, `import { Sandbox } from "@nullstyle/studiobox"` is a true drop-in:
 `Sandbox.create()` auto-connects to the host from the environment, so the

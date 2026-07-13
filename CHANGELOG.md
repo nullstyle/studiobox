@@ -4,6 +4,30 @@ All notable changes to `@nullstyle/studiobox` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 aims to follow [semantic versioning](https://semver.org/) from 1.0 onward.
 
+## [0.1.2] — 2026-07-13
+
+### Fixed
+
+- **`host up` no longer crashes when run straight from JSR.** The documented
+  `deno run -A jsr:@nullstyle/studiobox/cli host up` threw
+  `TypeError: URL must be a file URL: received https:` in the `HostLifecycle`
+  constructor, before any provisioning ran: resolving the packaged
+  `compat/wire.json` pin did `fromFileUrl(import.meta.resolve(...))`, which
+  works only for a `file:` module URL (a local checkout) and throws for the
+  `https:` URL a JSR-fetched module carries. `defaultCompatPath()` now imports
+  the pin directly (embedded in the package) and materializes it to a temp file
+  when the module was loaded remotely, so `host up` provisions the host — VM,
+  Firecracker, directories, token, and systemd units — from JSR just as it does
+  from a checkout. Re-serializing the pin is safe: the daemons and the
+  host/supervisor contract identity read its `protocol` / `schemaSha256` /
+  `codegen` fields, never a hash of the file bytes.
+- Getting-started docs (README + `docs/host-lifecycle.md`) now state the real
+  from-JSR flow accurately: `host up` provisions the host, but the compiled
+  daemons (`deno task daemons:compile`) plus the agent and golden images still
+  require a local checkout today, so `host up` from a bare `jsr:` invocation
+  stops at a clear "no compiled daemon binaries present" warning rather than a
+  crash.
+
 ## [0.1.1] — 2026-07-12
 
 ### Fixed
@@ -72,5 +96,6 @@ First public release: a Deno-native, source-compatible substitute for
 - JSR doc-score coverage of the upstream-shaped client interfaces is a
   work-in-progress.
 
+[0.1.2]: https://jsr.io/@nullstyle/studiobox
 [0.1.1]: https://jsr.io/@nullstyle/studiobox
 [0.1.0]: https://jsr.io/@nullstyle/studiobox
