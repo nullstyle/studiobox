@@ -18,6 +18,19 @@
 #                                 same port host-side. Falls back to
 #                                 DEFAULT_VSOCK_PORT for standalone smoke
 #                                 boots.
+#   studiobox.mode=template       Warm-template boot for the snapshot-restore
+#                                 fast path (docs/snapshot-restore.md §1.1,
+#                                 §2.2). ABSENT on every normal (cold) boot,
+#                                 which takes the path below unchanged. When
+#                                 present, studioboxd is exec'd `--template`
+#                                 with NO credential file and eth0 left
+#                                 present-but-unconfigured: every restore of
+#                                 the captured snapshot shares one guest
+#                                 memory, so the per-sandbox credential AND IP
+#                                 CANNOT be baked at boot — rootd injects them
+#                                 after restore over vsock (`personalize`). The
+#                                 template builder therefore passes NO
+#                                 studiobox.token/ip/gw/dns alongside it.
 #   studiobox.token=<HEX>         Shared credential (hex, decodes to
 #                                 16..512 bytes) the host must present to
 #                                 studioboxd's `authenticate`. Materialized
@@ -64,6 +77,7 @@ mount -t overlay overlay \
 
 # Parse the studiobox.* boot-config tokens out of the kernel cmdline.
 VSOCK_PORT=""
+MODE=""
 TOKEN_HEX=""
 GUEST_IP=""
 GUEST_GW=""
@@ -71,6 +85,7 @@ GUEST_DNS=""
 for tok in $(cat /proc/cmdline); do
   case "$tok" in
     studiobox.vsock_port=*) VSOCK_PORT="${tok#studiobox.vsock_port=}" ;;
+    studiobox.mode=*) MODE="${tok#studiobox.mode=}" ;;
     studiobox.token=*) TOKEN_HEX="${tok#studiobox.token=}" ;;
     studiobox.ip=*) GUEST_IP="${tok#studiobox.ip=}" ;;
     studiobox.gw=*) GUEST_GW="${tok#studiobox.gw=}" ;;
@@ -79,7 +94,11 @@ for tok in $(cat /proc/cmdline); do
 done
 [ -n "$VSOCK_PORT" ] || VSOCK_PORT="$DEFAULT_VSOCK_PORT"
 
-if [ -z "$TOKEN_HEX" ]; then
+# A template boot carries no credential by construction (it is injected after
+# restore via `personalize`); every other boot fails closed without one, so the
+# check is bypassed ONLY in template mode. With MODE empty this is the exact
+# same fail-closed gate as before.
+if [ "$MODE" != "template" ] && [ -z "$TOKEN_HEX" ]; then
   echo "overlay-init: FATAL no studiobox.token= in kernel cmdline" >&2
   exit 1
 fi
@@ -108,8 +127,25 @@ mount -t sysfs sysfs /mnt/root/sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /mnt/root/dev 2>/dev/null ||
   mount --bind /dev /mnt/root/dev
 
-# Materialize the credential (0600) inside the new root's /run — never on the
-# read-only golden root. studioboxd reads it at the in-chroot path.
+# Template mode (snapshot-restore §1.1/§2.2): exec studioboxd `--template` with
+# NO token file. It comes up pre-personalization holding no credential and NOT
+# yet authenticatable — accepting only `personalize`, which rootd calls after
+# restore to inject the per-restore credential and (re)configure eth0 in-band.
+# eth0 is left present-but-unconfigured here (the template carries no
+# studiobox.ip, so GUEST_IP was empty above and no eth0 config ran). The API
+# mounts above are still required so the chrooted agent sees /proc, /sys, /dev.
+if [ "$MODE" = "template" ]; then
+  echo "overlay-init: template mode, launching studioboxd --template on vsock port $VSOCK_PORT"
+  exec chroot /mnt/root "$AGENT" \
+    --vsock-port "$VSOCK_PORT" \
+    --template \
+    --deno "$DENO_BIN" \
+    --home "$SANDBOX_HOME"
+fi
+
+# Cold path (unchanged): materialize the credential (0600) inside the new
+# root's /run — never on the read-only golden root. studioboxd reads it at the
+# in-chroot path.
 TOKEN_FILE="/run/studioboxd.token"
 ( umask 077; printf '%s' "$TOKEN_HEX" > "/mnt/root${TOKEN_FILE}" )
 

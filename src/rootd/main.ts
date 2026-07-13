@@ -60,7 +60,7 @@
  * @module
  */
 
-import { fromFileUrl } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { RpcServerRuntime, TcpTransport } from "@nullstyle/capnp";
 import type { RpcAcceptedTransport, serve } from "@nullstyle/capnp";
 import type { BootstrapGate } from "../wire/bootstrap_gate.ts";
@@ -97,6 +97,11 @@ import {
   sweepNetworkOrphans,
 } from "./network/mod.ts";
 import type { PortForwardInstaller } from "./supervisor_core.ts";
+import { TemplateStore } from "./template/mod.ts";
+import {
+  firecrackerSupportsSnapshotRestore,
+  probeFirecrackerVersion,
+} from "./firecracker_version.ts";
 import type { SandboxRecord } from "../state/model.ts";
 import { BridgeServer } from "./bridge_server.ts";
 import { DEFAULT_BRIDGE_DIAL_TIMEOUT_MS } from "./bridge.ts";
@@ -394,7 +399,13 @@ interface RootdFlags {
 interface LaunchPlannerConfig extends
   Omit<
     GoldenArtifactLaunchPlannerOptions,
-    "cache" | "resolveManifestHash" | "mintCredential" | "dataplane"
+    | "cache"
+    | "resolveManifestHash"
+    | "mintCredential"
+    | "dataplane"
+    | "templateStore"
+    | "schemaSha256"
+    | "firecrackerVersion"
   > {
   readonly artifactCache: string;
   /** Enables the dataplane; the per-sandbox dnsmasq upstream resolver. */
@@ -403,7 +414,42 @@ interface LaunchPlannerConfig extends
   readonly poolCidr?: string;
   /** Force the pre-M10 vsock-only path even when `upstreamDns` is configured. */
   readonly netlessOnly?: boolean;
+  /**
+   * Snapshot-restore strategy (snapshot-restore §5.1). `"cold"` (default)
+   * always cold-boots — byte-identical to pre-snapshot rootd. `"snapshot"` opts
+   * in to warm-template restore, gated below by BOTH the Firecracker ≥ v1.16
+   * version check (§5.5) AND a per-request template-valid + networked check in
+   * the planner (§5.3, §5.4); a template problem always falls SAFE to cold.
+   * @default "cold"
+   */
+  readonly launchStrategy?: "cold" | "snapshot";
+  /**
+   * Where warm-template dirs (`<hash>/`) live (snapshot-restore §1.2). Defaults
+   * to `<artifactCache>/templates`. Only consulted for the `"snapshot"` strategy.
+   */
+  readonly templateCacheDir?: string;
+  /**
+   * OPTIONAL operator override for the installed Firecracker version used by the
+   * ≥ v1.16 `vsock_override` gate (§5.5, FINDING 3). When ABSENT (the norm)
+   * {@linkcode loadLaunchPlanner} PROBES the real `firecracker --version` binary
+   * for ground truth rather than trusting a default — so a real v1.15 host can
+   * never wrongly select snapshot. Set this only to pin a known-verified version
+   * (or as a deterministic test seam); any uncertainty still falls safe to cold.
+   */
+  readonly firecrackerVersion?: string;
 }
+
+// The Firecracker version helpers (comparison + the ≥ v1.16 snapshot gate) live
+// in `./firecracker_version.ts` so the planner can share them without a circular
+// import; re-export them here for callers (and the existing gate tests) that
+// reach them through the entrypoint.
+export {
+  compareFirecrackerVersions,
+  firecrackerSupportsSnapshotRestore,
+  MIN_SNAPSHOT_FIRECRACKER_VERSION,
+  parseFirecrackerVersionOutput,
+  probeFirecrackerVersion,
+} from "./firecracker_version.ts";
 
 /** What {@linkcode loadLaunchPlanner} hands back to {@linkcode main}. */
 interface LoadedLaunchPlanner {
@@ -539,18 +585,75 @@ const LAUNCH_PLANNING_UNCONFIGURED: SupervisorLaunchPlanner = {
  * `ensureGlobal` are surfaced for cold-start rebuild + the one-time seal. When
  * it is not, the pre-M10 vsock-only planner is returned unchanged.
  */
-async function loadLaunchPlanner(path: string): Promise<LoadedLaunchPlanner> {
+async function loadLaunchPlanner(
+  path: string,
+  options: {
+    readonly schemaSha256: string;
+    /**
+     * Ground-truth Firecracker version probe (§5.5, FINDING 3). Defaults to the
+     * real {@linkcode probeFirecrackerVersion} (`firecracker --version`); a test
+     * injects a deterministic result. Only invoked when the `"snapshot"`
+     * strategy is selected AND the config supplies no explicit override.
+     */
+    readonly probeFirecrackerVersion?: (bin: string) => Promise<string>;
+  },
+): Promise<LoadedLaunchPlanner> {
   const config = JSON.parse(
     await Deno.readTextFile(path),
   ) as LaunchPlannerConfig;
-  const { artifactCache, upstreamDns, poolCidr, netlessOnly, ...rest } = config;
+  const {
+    artifactCache,
+    upstreamDns,
+    poolCidr,
+    netlessOnly,
+    launchStrategy,
+    templateCacheDir,
+    firecrackerVersion,
+    ...rest
+  } = config;
   const cache = new ArtifactCache({ root: artifactCache });
+
+  // Snapshot-restore version gate (§5.5, FINDING 3): the gate must depend on
+  // GROUND TRUTH, not a config field that defaults to the pinned version — else
+  // a real v1.15 host wastefully selects snapshot (self-healing only via the
+  // cold fallback). So when the "snapshot" strategy is requested we PROBE the
+  // actual `firecracker --version` binary; an explicit config `firecrackerVersion`
+  // is honored as a deliberate operator override. Any uncertainty (probe fails /
+  // unparseable / < v1.16) falls SAFE to cold, keeping the byte-identical cold
+  // path. The probed version is ALSO handed to the planner so it can reject a
+  // template captured under an incompatible fc version (§5.5, FINDING 5). The
+  // per-request template-valid + networked check happens in the planner (§5.3,
+  // §5.4).
+  const probe = options.probeFirecrackerVersion ?? probeFirecrackerVersion;
+  let effectiveFcVersion: string | undefined = firecrackerVersion;
+  if (launchStrategy === "snapshot" && effectiveFcVersion === undefined) {
+    effectiveFcVersion = await probe(rest.firecrackerBin).catch(() =>
+      undefined
+    );
+  }
+  const snapshotSelected = launchStrategy === "snapshot" &&
+    effectiveFcVersion !== undefined &&
+    firecrackerSupportsSnapshotRestore(effectiveFcVersion);
+  const templateRoot = templateCacheDir ?? join(artifactCache, "templates");
+  // A restore re-points eth0 via network_overrides, so it needs a dataplane; the
+  // store is wired ONLY on the dataplane branch below (else it stays cold).
+  const snapshotPlannerOptions = snapshotSelected
+    ? {
+      launchStrategy: "snapshot" as const,
+      templateStore: new TemplateStore({ root: templateRoot }),
+      schemaSha256: options.schemaSha256,
+      // Ground-truth host version for the planner's template fc-compat gate
+      // (§5.5, FINDING 5). `snapshotSelected` guarantees it is defined.
+      firecrackerVersion: effectiveFcVersion!,
+    }
+    : {};
 
   const resolvedUpstream = upstreamDns ??
     Deno.env.get("STUDIOBOX_UPSTREAM_DNS");
   const resolvedPool = poolCidr ?? Deno.env.get("STUDIOBOX_POOL_CIDR");
   // Netless-only, or no upstream resolver configured ⇒ dataplane off: today's
-  // behavior (vsock-only launches, artifact hook only).
+  // behavior (vsock-only launches, artifact hook only). Snapshot needs a TAP to
+  // re-point, so a dataplane-less deploy stays cold regardless of strategy.
   if (netlessOnly === true || resolvedUpstream === undefined) {
     const planner = new GoldenArtifactLaunchPlanner({ ...rest, cache });
     return { planner, reclaimHooks: [planner.reclaimHook] };
@@ -579,13 +682,19 @@ async function loadLaunchPlanner(path: string): Promise<LoadedLaunchPlanner> {
       portForward,
       upstreamDns: resolvedUpstream,
     },
+    ...snapshotPlannerOptions,
   });
   // Network hook FIRST (§8): reclaim the TAP / egress table / dnsmasq before the
-  // overlay + artifact refcount.
+  // overlay + artifact refcount. The template-refcount hook (snapshot-restore
+  // §1.2) is appended when the snapshot strategy is enabled; it is a no-op for a
+  // cold launch (which pinned no template).
   const networkReclaimHook = planner.networkReclaimHook;
-  const reclaimHooks = networkReclaimHook === undefined
-    ? [planner.reclaimHook]
-    : [networkReclaimHook, planner.reclaimHook];
+  const templateReclaimHook = planner.templateReclaimHook;
+  const reclaimHooks = [
+    ...(networkReclaimHook === undefined ? [] : [networkReclaimHook]),
+    planner.reclaimHook,
+    ...(templateReclaimHook === undefined ? [] : [templateReclaimHook]),
+  ];
   return {
     planner,
     reclaimHooks,
@@ -628,7 +737,11 @@ async function main(): Promise<void> {
   const store = new JsonFileSandboxStore(flags.state);
   const launch: LoadedLaunchPlanner = flags.launchConfig === undefined
     ? { planner: LAUNCH_PLANNING_UNCONFIGURED, reclaimHooks: [] }
-    : await loadLaunchPlanner(flags.launchConfig);
+    // The running studioboxd's schema hash gates warm-template validity: a
+    // template captured under a different schema is stale (§1.2, §5.5).
+    : await loadLaunchPlanner(flags.launchConfig, {
+      schemaSha256: compat.schemaSha256,
+    });
 
   // Cold-start allocator rebuild (§8): reserve every slot a SURVIVING record
   // still owns — BEFORE the shared seal, before the core accepts any launch, and

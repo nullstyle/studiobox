@@ -46,6 +46,7 @@
     "test:vm:parity": "deno run -A tools/parity_vm_test.ts",
     "test:vm:network": "deno run -A tools/parity_vm_test.ts --gate tests/vm/network_vm_test.ts",
     "images:build": "deno run -A tools/build_golden_set.ts",
+    "template:build": "deno run -A --unstable-vsock tools/build_warm_template.ts",
     "agent:compile": "deno compile -A --unstable-vsock --output .build/studioboxd src/agent/main.ts && deno compile -A --unstable-vsock --target aarch64-unknown-linux-gnu --output .build/studioboxd-aarch64-unknown-linux-gnu src/agent/main.ts && deno compile -A --unstable-vsock --target x86_64-unknown-linux-gnu --output .build/studioboxd-x86_64-unknown-linux-gnu src/agent/main.ts",
     "compat:check": "deno run --allow-read tools/check_compat.ts",
     "images:fetch-kernel": "deno run --allow-read=images --allow-write=images/dist --allow-net=s3.amazonaws.com tools/images_fetch_kernel.ts",

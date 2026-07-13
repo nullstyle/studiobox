@@ -33,20 +33,28 @@
  */
 
 import { join } from "@std/path";
-import type { VmConfig } from "@nullstyle/firecracker";
+import type { SnapshotLoadParams, VmConfig } from "@nullstyle/firecracker";
 import {
   type ArtifactCache,
   ArtifactCacheError,
   KERNEL_FILE_NAME,
   ROOTFS_FILE_NAME,
 } from "../../images/cache.ts";
+import type { GuestNetworkConfig } from "../agent/personalize.ts";
+import { type TemplateStore, TemplateStoreError } from "./template/mod.ts";
+import {
+  compareFirecrackerVersions,
+  firecrackerSupportsSnapshotRestore,
+} from "./firecracker_version.ts";
 import type {
   ArtifactReference,
   SandboxRecord,
   SandboxResources,
 } from "../state/model.ts";
 import type {
+  ColdSupervisorLaunchPlan,
   ReclaimHook,
+  RestoreSupervisorLaunchPlan,
   SupervisorLaunchPlan,
   SupervisorLaunchPlanner,
 } from "./supervisor_core.ts";
@@ -70,8 +78,13 @@ export const DEFAULT_OVERLAY_SIZE_BYTES = 256 * 1024 * 1024;
 const KERNEL_JAIL_PATH = "/vmlinux";
 const ROOTFS_JAIL_PATH = "/rootfs.ext4";
 const OVERLAY_JAIL_PATH = "/overlay.ext4";
+/** In-jail snapshot-restore artifact names (snapshot-restore §4 step 2/3). */
+const SNAPSHOT_JAIL_PATH = "/snapshot";
+const MEM_JAIL_PATH = "/mem";
 /** In-jail vsock socket name — short on purpose (host view is ~104-byte). */
 const VSOCK_JAIL_PATH = "v.sock";
+/** Guest NIC the restore's `network_overrides`/`personalize` re-point (§4). */
+const GUEST_IFACE = "eth0";
 const CREDENTIAL_BYTES = 32;
 const GUEST_CID = 3;
 /** Dotted `/30` netmask for the kernel `ip=` cmdline token (§4). */
@@ -162,6 +175,41 @@ export interface GoldenArtifactLaunchPlannerOptions {
    * vsock-only exactly as before M10.
    */
   readonly dataplane?: LaunchPlannerDataplane;
+  /**
+   * Launch strategy (snapshot-restore §5.1). `"cold"` (the default) always
+   * cold-boots — the byte-identical pre-snapshot path. `"snapshot"` OPTS IN to
+   * warm-template restore, but only when a template exists + validates, the
+   * request is networked, and a dataplane is configured; otherwise it FALLS SAFE
+   * to cold per request (§5.3, §5.4). The Firecracker ≥ v1.16 version gate (§5.5)
+   * lives in the caller ({@linkcode import("./main.ts")}) — it only passes
+   * `"snapshot"` here on a capable host.
+   * @default "cold"
+   */
+  readonly launchStrategy?: "cold" | "snapshot";
+  /**
+   * The on-disk warm-template store (snapshot-restore §1.2). Required for the
+   * `"snapshot"` strategy to resolve a restore plan; absent ⇒ always cold.
+   */
+  readonly templateStore?: TemplateStore;
+  /**
+   * The running studioboxd's `compat/wire.json.schemaSha256`. A template
+   * captured under a DIFFERENT schema is stale and rejected (→ cold), because a
+   * schema change rolls the compiled agent and thus the whole snapshot. Required
+   * with {@linkcode GoldenArtifactLaunchPlannerOptions.templateStore}.
+   */
+  readonly schemaSha256?: string;
+  /**
+   * The ACTUAL installed Firecracker version, probed from the binary by the
+   * caller ({@linkcode import("./main.ts")}) — NOT a config default
+   * (snapshot-restore §5.5, FINDING 3). Two fail-safe gates depend on it:
+   * (a) DEFENSE-IN-DEPTH — without a known version ≥ v1.16 (which `vsock_override`
+   * needs) the planner resolves COLD even if `launchStrategy` is `"snapshot"`;
+   * (b) TEMPLATE COMPAT — a template whose captured `firecrackerVersion` is
+   * < v1.16, or newer than this host can restore, is rejected (→ cold; FINDING 5).
+   * Required (with the template store) for a restore to resolve; any uncertainty
+   * ⇒ cold.
+   */
+  readonly firecrackerVersion?: string;
 }
 
 /** The host-side agent coordinates the planner minted for one execution. */
@@ -205,7 +253,18 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
   readonly #readinessTimeoutMs: number;
   readonly #mintCredential: () => Uint8Array;
   readonly #dataplane: LaunchPlannerDataplane | undefined;
+  readonly #launchStrategy: "cold" | "snapshot";
+  readonly #templateStore: TemplateStore | undefined;
+  readonly #schemaSha256: string | undefined;
+  readonly #firecrackerVersion: string | undefined;
   readonly #coordinates = new Map<string, AgentLaunchCoordinates>();
+  /**
+   * ExecutionId → template manifest hash for every restore this process pinned
+   * (`templateStore.acquire`). {@linkcode TemplateReclaimHook} consults + clears
+   * it so a live restore's template ref is released EXACTLY once on teardown and
+   * a cold launch (which pinned nothing) never touches a template refcount.
+   */
+  readonly #templatePins = new Map<string, string>();
 
   constructor(options: GoldenArtifactLaunchPlannerOptions) {
     this.#cache = options.cache;
@@ -237,6 +296,10 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
     this.#mintCredential = options.mintCredential ??
       (() => crypto.getRandomValues(new Uint8Array(CREDENTIAL_BYTES)));
     this.#dataplane = options.dataplane;
+    this.#launchStrategy = options.launchStrategy ?? "cold";
+    this.#templateStore = options.templateStore;
+    this.#schemaSha256 = options.schemaSha256;
+    this.#firecrackerVersion = options.firecrackerVersion;
   }
 
   /** Host path of the fresh overlay for one execution. */
@@ -284,80 +347,19 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
           `minted credential must be ${CREDENTIAL_BYTES} bytes`,
         );
       }
-      const bootArgs = [
-        // `quiet loglevel=1` suppresses the kernel's verbose boot printk. Each
-        // printk blocks on the ttyS0 UART, so a chatty boot is a well-known
-        // Firecracker slow-start cause; init's own echoes still reach ttyS0.
-        "console=ttyS0",
-        "quiet",
-        "loglevel=1",
-        "reboot=k",
-        "panic=1",
-        "pci=off",
-        "root=/dev/vda",
-        "ro",
-        "init=/sbin/overlay-init",
-        `studiobox.vsock_port=${this.#agentVsockPort}`,
-        `studiobox.token=${toHex(credential)}`,
-      ];
 
       // Provision the Tier-B dataplane (TAP + egress seal + dnsmasq) unless the
       // request is netless or no dataplane is configured. There must be NO
       // window where the guest boots with a NIC but no egress filter, so a
-      // provisioning failure fully unwinds before it rethrows (§3, §W4).
+      // provisioning failure fully unwinds before it rethrows (§3, §W4). The
+      // SAME provisioned network backs a cold boot, a restore, AND a restore's
+      // cold fallback — it is generic per-sandbox, not strategy-specific (§5.3).
       const network = await this.#provisionNetwork(request);
-      if (network !== undefined) {
-        unwindNetwork = network.unwind;
-        // Kernel `ip=` is the belt for CONFIG_IP_PNP kernels; the studiobox.*
-        // tokens are what W5's overlay-init configures eth0 from explicitly.
-        bootArgs.push(
-          `ip=${network.alloc.guestIp}::${network.alloc.hostIp}:${NETMASK_30_DOTTED}::eth0:off`,
-          `studiobox.ip=${network.alloc.guestCidr}`,
-          `studiobox.gw=${network.alloc.hostIp}`,
-          `studiobox.dns=${network.alloc.hostIp}`,
-        );
-      }
+      if (network !== undefined) unwindNetwork = network.unwind;
 
-      const config: VmConfig = {
-        machine_config: {
-          // The per-launch request.vcpus (validated 1..64 by
-          // validateLaunchRequest) wins over the planner's static default, so a
-          // caller's requested vCPU count actually reaches the guest.
-          vcpu_count: request.vcpus ?? this.#vcpuCount,
-          mem_size_mib: this.#memSizeMib,
-        },
-        boot_source: {
-          kernel_image_path: KERNEL_JAIL_PATH,
-          boot_args: bootArgs.join(" "),
-        },
-        drives: [
-          {
-            drive_id: "rootfs",
-            path_on_host: ROOTFS_JAIL_PATH,
-            is_root_device: true,
-            is_read_only: true,
-          },
-          {
-            drive_id: "overlay",
-            path_on_host: OVERLAY_JAIL_PATH,
-            is_root_device: false,
-            is_read_only: false,
-          },
-        ],
-        vsock: { guest_cid: GUEST_CID, uds_path: VSOCK_JAIL_PATH },
-        // Exactly one TAP-backed NIC; the adapter's putNetworkInterface needs
-        // the TAP to already exist, which #provisionNetwork guaranteed (§4).
-        ...(network === undefined ? {} : {
-          network_interfaces: [
-            {
-              iface_id: "eth0",
-              host_dev_name: network.alloc.tapName,
-              guest_mac: network.alloc.guestMac,
-            },
-          ],
-        }),
-      };
-
+      // The credential the host presents to studioboxd — the SAME bytes the
+      // cold cmdline bakes AND the restore injects over `personalize`, returned
+      // by every openBridge grant (PLAN.md §M8; snapshot-restore §2.3).
       this.#coordinates.set(request.executionId, {
         sandboxId: request.sandboxId,
         executionId: request.executionId,
@@ -365,53 +367,382 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
         vsockPort: this.#agentVsockPort,
       });
 
-      return {
-        jailer: {
-          jailerBin: this.#jailerBin,
-          firecrackerBin: this.#firecrackerBin,
-          uid: this.#uid,
-          gid: this.#gid,
-          chrootBaseDir: this.#chrootBaseDir,
-          cgroupVersion: this.#cgroupVersion,
-        },
-        stage: [
-          {
-            hostPath: join(setDir, KERNEL_FILE_NAME),
-            jailPath: KERNEL_JAIL_PATH,
-          },
-          {
-            hostPath: join(setDir, ROOTFS_FILE_NAME),
-            jailPath: ROOTFS_JAIL_PATH,
-          },
-          {
-            hostPath: overlayPath,
-            jailPath: OVERLAY_JAIL_PATH,
-            readWrite: true,
-          },
-        ],
-        config,
-        readinessTimeoutMs: this.#readinessTimeoutMs,
-        agentVsockPort: this.#agentVsockPort,
-        // The guest bakes exactly this credential (studiobox.token) at boot;
-        // surfacing it on the plan lets the supervisor return it in every
-        // openBridge grant so the tunnel client can authenticate to studioboxd
-        // (PLAN.md §M8).
-        agentCredential: credential.slice(),
-        artifact: { manifestHash, arch: this.#arch },
-        // Journaled in the staging→booting commit (BEFORE boot) so a cold
-        // reconcile can reclaim the TAP / egress table / dnsmasq from the
-        // journal alone (§8, §9).
-        ...(network === undefined ? {} : { resources: network.resources }),
-      };
+      // Snapshot-restore is OPT-IN and resolved BELOW the supervisor surface
+      // (hard rule 1). Only a snapshot-strategy, networked request with a valid
+      // template resolves to a restore plan; everything else falls SAFE to the
+      // byte-identical cold plan (§5.3, §5.4).
+      if (await this.#shouldRestore(request, manifestHash, network)) {
+        try {
+          return await this.#resolveRestorePlan(
+            request,
+            manifestHash,
+            setDir,
+            credential,
+            // #shouldRestore guarantees a provisioned network for a restore.
+            network!,
+            overlayPath,
+          );
+        } catch (error) {
+          // TOCTOU: the template validated in #shouldRestore but vanished /
+          // corrupted before we could resolve + pin it (a concurrent GC). A
+          // template problem NEVER fails a create (§5.3): drop any partial pin
+          // and fall SAFE to a cold plan reusing the same provisioned network.
+          if (!(error instanceof TemplateStoreError)) throw error;
+          await this.#releaseTemplatePin(request.executionId).catch(() => {});
+        }
+      }
+      return this.#buildColdPlan(
+        request,
+        manifestHash,
+        setDir,
+        credential,
+        network,
+        overlayPath,
+      );
     } catch (error) {
       // The plan never reached the journal, so nothing else will release
       // this belt: undo the acquire and drop the coordinates/overlay, then
       // best-effort unwind any network state provisioned before the throw.
       await this.#cache.release(manifestHash).catch(() => {});
       this.#coordinates.delete(request.executionId);
+      // Release a template ref this resolve pinned (restore branch) before it
+      // could reach the reclaim hook — else a failed restore-plan resolve would
+      // leak the template pin forever.
+      await this.#releaseTemplatePin(request.executionId).catch(() => {});
       await Deno.remove(this.#overlayPath(request.executionId)).catch(() => {});
       if (unwindNetwork !== undefined) await unwindNetwork().catch(() => {});
       throw error;
+    }
+  }
+
+  /**
+   * Would this request resolve to a warm-template restore? Snapshot is opt-in
+   * and FAILS SAFE toward cold (§5.3, §5.4, §5.5): it requires the `"snapshot"`
+   * strategy, a networked request (a restore re-points `eth0` via
+   * `network_overrides`, so netless / vsock-only is always cold), a configured
+   * template store + running schema, and a template that PRESENT-AND-VALIDATES
+   * under that schema. A real I/O fault reading the template is swallowed to
+   * cold — a template problem must never fail a create.
+   */
+  async #shouldRestore(
+    request: SupervisorLaunchRequest,
+    manifestHash: string,
+    network: ProvisionedNetwork | undefined,
+  ): Promise<boolean> {
+    const store = this.#templateStore;
+    const schema = this.#schemaSha256;
+    const hostFc = this.#firecrackerVersion;
+    if (
+      this.#launchStrategy !== "snapshot" ||
+      request.netless === true ||
+      network === undefined ||
+      store === undefined ||
+      schema === undefined ||
+      // FINDING 3 (defense-in-depth): a restore needs `vsock_override`, so
+      // without a known host Firecracker ≥ v1.16 the strategy FALLS SAFE to
+      // cold even if the caller selected "snapshot". Any uncertainty ⇒ cold.
+      hostFc === undefined ||
+      !firecrackerSupportsSnapshotRestore(hostFc)
+    ) {
+      return false;
+    }
+    try {
+      // Validity (schema / size / present), then Firecracker compatibility
+      // (FINDING 5): a template captured under an fc version the host cannot
+      // restore is rejected → cold. `isValid` is kept (not folded into a single
+      // `resolve`) so the metadata read is a distinct step — the fc gate layers
+      // on top of the existing validity contract.
+      if (!(await store.isValid(manifestHash, { schemaSha256: schema }))) {
+        return false;
+      }
+      const metadata = await store.readMetadata(manifestHash);
+      return this.#templateFirecrackerCompatible(
+        metadata.firecrackerVersion,
+        hostFc,
+      );
+    } catch {
+      // A real I/O fault on the template dir: fail safe toward cold (§5.5).
+      return false;
+    }
+  }
+
+  /**
+   * Is a template captured under `templateFc` restorable on this `hostFc` host
+   * (snapshot-restore §5.5, FINDING 5)? Requires the template support
+   * `vsock_override` (≥ v1.16) AND the host be able to load it (host fc ≥ the
+   * template's capture version — a Firecracker snapshot restores on the same or
+   * newer minor, never older). Any uncertainty ⇒ `false` (cold).
+   */
+  #templateFirecrackerCompatible(templateFc: string, hostFc: string): boolean {
+    return firecrackerSupportsSnapshotRestore(templateFc) &&
+      compareFirecrackerVersions(hostFc, templateFc) >= 0;
+  }
+
+  /**
+   * Build a COLD launch plan (the byte-identical pre-snapshot path). Pure over
+   * the already-minted `credential`, the already-provisioned `network`, and the
+   * fresh `overlayPath` — those side effects live in {@linkcode
+   * GoldenArtifactLaunchPlanner.resolve}. It is ALSO the restore fallback recipe
+   * (§5.3): a template problem then boots exactly today's cold create.
+   */
+  #buildColdPlan(
+    request: SupervisorLaunchRequest,
+    manifestHash: string,
+    setDir: string,
+    credential: Uint8Array,
+    network: ProvisionedNetwork | undefined,
+    overlayPath: string,
+  ): ColdSupervisorLaunchPlan {
+    const bootArgs = [
+      // `quiet loglevel=1` suppresses the kernel's verbose boot printk. Each
+      // printk blocks on the ttyS0 UART, so a chatty boot is a well-known
+      // Firecracker slow-start cause; init's own echoes still reach ttyS0.
+      "console=ttyS0",
+      "quiet",
+      "loglevel=1",
+      "reboot=k",
+      "panic=1",
+      "pci=off",
+      "root=/dev/vda",
+      "ro",
+      "init=/sbin/overlay-init",
+      `studiobox.vsock_port=${this.#agentVsockPort}`,
+      `studiobox.token=${toHex(credential)}`,
+    ];
+    if (network !== undefined) {
+      // Kernel `ip=` is the belt for CONFIG_IP_PNP kernels; the studiobox.*
+      // tokens are what W5's overlay-init configures eth0 from explicitly.
+      bootArgs.push(
+        `ip=${network.alloc.guestIp}::${network.alloc.hostIp}:${NETMASK_30_DOTTED}::${GUEST_IFACE}:off`,
+        `studiobox.ip=${network.alloc.guestCidr}`,
+        `studiobox.gw=${network.alloc.hostIp}`,
+        `studiobox.dns=${network.alloc.hostIp}`,
+      );
+    }
+
+    const config: VmConfig = {
+      machine_config: {
+        // The per-launch request.vcpus (validated 1..64 by
+        // validateLaunchRequest) wins over the planner's static default, so a
+        // caller's requested vCPU count actually reaches the guest.
+        vcpu_count: request.vcpus ?? this.#vcpuCount,
+        mem_size_mib: this.#memSizeMib,
+      },
+      boot_source: {
+        kernel_image_path: KERNEL_JAIL_PATH,
+        boot_args: bootArgs.join(" "),
+      },
+      drives: [
+        {
+          drive_id: "rootfs",
+          path_on_host: ROOTFS_JAIL_PATH,
+          is_root_device: true,
+          is_read_only: true,
+        },
+        {
+          drive_id: "overlay",
+          path_on_host: OVERLAY_JAIL_PATH,
+          is_root_device: false,
+          is_read_only: false,
+        },
+      ],
+      vsock: { guest_cid: GUEST_CID, uds_path: VSOCK_JAIL_PATH },
+      // Exactly one TAP-backed NIC; the adapter's putNetworkInterface needs
+      // the TAP to already exist, which #provisionNetwork guaranteed (§4).
+      ...(network === undefined ? {} : {
+        network_interfaces: [
+          {
+            iface_id: GUEST_IFACE,
+            host_dev_name: network.alloc.tapName,
+            guest_mac: network.alloc.guestMac,
+          },
+        ],
+      }),
+    };
+
+    return {
+      jailer: this.#jailerOptions(),
+      stage: [
+        {
+          hostPath: join(setDir, KERNEL_FILE_NAME),
+          jailPath: KERNEL_JAIL_PATH,
+        },
+        {
+          hostPath: join(setDir, ROOTFS_FILE_NAME),
+          jailPath: ROOTFS_JAIL_PATH,
+        },
+        {
+          hostPath: overlayPath,
+          jailPath: OVERLAY_JAIL_PATH,
+          readWrite: true,
+        },
+      ],
+      config,
+      readinessTimeoutMs: this.#readinessTimeoutMs,
+      agentVsockPort: this.#agentVsockPort,
+      // The guest bakes exactly this credential (studiobox.token) at boot;
+      // surfacing it on the plan lets the supervisor return it in every
+      // openBridge grant so the tunnel client can authenticate to studioboxd
+      // (PLAN.md §M8).
+      agentCredential: credential.slice(),
+      artifact: { manifestHash, arch: this.#arch },
+      // Journaled in the staging→booting commit (BEFORE boot) so a cold
+      // reconcile can reclaim the TAP / egress table / dnsmasq from the
+      // journal alone (§8, §9).
+      ...(network === undefined ? {} : { resources: network.resources }),
+    };
+  }
+
+  /**
+   * Build a RESTORE launch plan (snapshot-restore §4): resolve + PIN the warm
+   * template (`templateStore.acquire`, released on teardown by {@linkcode
+   * TemplateReclaimHook}), stage snapshot/mem/rootfs(ro)/overlay-COPY into the
+   * fresh jail, and emit the `SnapshotLoadParams` re-pointing `eth0` to this
+   * sandbox's TAP + rebinding the in-jail vsock UDS. It carries a `fallback`
+   * cold recipe REUSING this same provisioned network (§5.3) so a restore or
+   * personalize failure never fails the create. The credential is injected over
+   * `personalize` after resume; the fallback bakes the SAME credential on the
+   * cmdline, so openBridge returns one credential that works for either path.
+   */
+  async #resolveRestorePlan(
+    request: SupervisorLaunchRequest,
+    manifestHash: string,
+    setDir: string,
+    credential: Uint8Array,
+    network: ProvisionedNetwork,
+    overlayPath: string,
+  ): Promise<RestoreSupervisorLaunchPlan> {
+    const store = this.#templateStore!;
+    const schema = this.#schemaSha256!;
+    const hostFc = this.#firecrackerVersion;
+    const template = await store.resolve(manifestHash, {
+      schemaSha256: schema,
+    });
+    // FINDING 5 (TOCTOU-safe re-check): the template validated in #shouldRestore,
+    // but re-assert Firecracker compatibility here, BEFORE the pin, so a template
+    // captured under an incompatible fc version resolves to COLD via resolve()'s
+    // TemplateStoreError catch (§5.3) rather than being restored.
+    if (
+      hostFc === undefined ||
+      !this.#templateFirecrackerCompatible(
+        template.metadata.firecrackerVersion,
+        hostFc,
+      )
+    ) {
+      throw new TemplateStoreError(
+        `template ${manifestHash} captured under firecracker ${template.metadata.firecrackerVersion} ` +
+          `is incompatible with host firecracker ${hostFc ?? "(unknown)"}`,
+      );
+    }
+    // Pin the template BEFORE the restore is journaled/spawned so GC can never
+    // reap it out from under a live restore (§1.2). The pin is released exactly
+    // once on teardown (TemplateReclaimHook) or by resolve()'s catch on failure.
+    await store.acquire(manifestHash);
+    this.#templatePins.set(request.executionId, manifestHash);
+
+    const guestNetwork: GuestNetworkConfig = {
+      guestCidr: network.alloc.guestCidr,
+      gateway: network.alloc.hostIp,
+      dns: network.alloc.hostIp,
+      iface: GUEST_IFACE,
+    };
+
+    const snapshot: SnapshotLoadParams = {
+      snapshot_path: SNAPSHOT_JAIL_PATH,
+      mem_backend: { backend_type: "File", backend_path: MEM_JAIL_PATH },
+      resume_vm: true,
+      clock_realtime: true,
+      network_overrides: [
+        { iface_id: GUEST_IFACE, host_dev_name: network.alloc.tapName },
+      ],
+      vsock_override: { uds_path: VSOCK_JAIL_PATH },
+    };
+
+    return {
+      kind: "restore",
+      jailer: this.#jailerOptions(),
+      // Copy mode is forced by the adapter; the overlay is a per-restore COPY of
+      // the template's EXACT captured overlay (§3), rootfs is shared read-only.
+      stage: [
+        { hostPath: template.snapshotPath, jailPath: SNAPSHOT_JAIL_PATH },
+        { hostPath: template.memPath, jailPath: MEM_JAIL_PATH },
+        {
+          hostPath: join(setDir, ROOTFS_FILE_NAME),
+          jailPath: ROOTFS_JAIL_PATH,
+        },
+        {
+          hostPath: template.overlayPath,
+          jailPath: OVERLAY_JAIL_PATH,
+          readWrite: true,
+        },
+      ],
+      snapshot,
+      readinessTimeoutMs: this.#readinessTimeoutMs,
+      agentVsockPort: this.#agentVsockPort,
+      agentCredential: credential.slice(),
+      artifact: { manifestHash, arch: this.#arch },
+      resources: network.resources,
+      personalize: {
+        network: guestNetwork,
+        // The tunnel client presents request.bootNonce at authenticate, so the
+        // guest must bind exactly it; the sandbox id is the rootd sandbox id.
+        bootNonce: request.bootNonce.slice(),
+        sandboxId: request.sandboxId,
+      },
+      // The fallback reuses the SAME provisioned network (already journaled by
+      // the staging→booting commit) and a fresh unformatted overlay — cold
+      // semantics — baking the same credential so cold readiness proves it (§5.3).
+      fallback: this.#buildColdPlan(
+        request,
+        manifestHash,
+        setDir,
+        credential,
+        network,
+        overlayPath,
+      ),
+    };
+  }
+
+  /** The jailer options shared by every plan this planner emits. */
+  #jailerOptions(): SupervisorLaunchPlan["jailer"] {
+    return {
+      jailerBin: this.#jailerBin,
+      firecrackerBin: this.#firecrackerBin,
+      uid: this.#uid,
+      gid: this.#gid,
+      chrootBaseDir: this.#chrootBaseDir,
+      cgroupVersion: this.#cgroupVersion,
+    };
+  }
+
+  /**
+   * Release a template ref an in-flight resolve pinned, clearing the in-process
+   * pin so it releases EXACTLY once. This covers ONLY the resolve-failure paths
+   * (a throw BEFORE the durable `templatePinned` marker reaches the journal): an
+   * execution that never pinned ⇒ no-op. The durable teardown path is
+   * {@linkcode GoldenArtifactLaunchPlanner.templateReclaimHook}, which reads the
+   * record — not this map.
+   */
+  async #releaseTemplatePin(executionId: string): Promise<void> {
+    const hash = this.#templatePins.get(executionId);
+    if (hash === undefined) return;
+    this.#templatePins.delete(executionId);
+    await this.#releaseTemplateByHash(hash);
+  }
+
+  /**
+   * Decrement a template's refcount, gone-tolerant like {@linkcode
+   * ArtifactReclaimHook}: a missing / below-zero template refcount is swallowed,
+   * never turned into a quarantine. Shared by the resolve-failure path (keyed off
+   * the in-process pin) and the durable teardown hook (keyed off the record).
+   */
+  async #releaseTemplateByHash(hash: string): Promise<void> {
+    const store = this.#templateStore;
+    if (store === undefined) return;
+    try {
+      if ((await store.refcount(hash)) > 0) await store.release(hash);
+    } catch (error) {
+      if (!(error instanceof TemplateStoreError)) throw error;
     }
   }
 
@@ -564,6 +895,45 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
         ? {}
         : { portForward: this.#dataplane.portForward }),
     });
+  }
+
+  /**
+   * The {@linkcode ReclaimHook} that releases a restored sandbox's warm-template
+   * refcount (`templateStore.release`) when its record reaches a terminal phase
+   * (snapshot-restore §1.2, §7; FINDING 1). `undefined` when no template store is
+   * configured (nothing to reclaim). Register it alongside the other reclaim
+   * hooks.
+   *
+   * The DURABLE record field is the SOURCE OF TRUTH — NOT the in-process pin map,
+   * which is empty after a rootd crash. It releases the refcount iff the record
+   * journaled `templatePinned` (so a COLD record, which pinned nothing, is a
+   * no-op), keyed off the SAME manifest hash the artifact reference carries. This
+   * mirrors {@linkcode ArtifactReclaimHook} EXACTLY: because the marker + hash
+   * live in the SURVIVING record, a fresh planner (empty map) after a destructive
+   * reconcile still drives the refcount to zero. The in-process pin is cleared
+   * opportunistically for a live same-process teardown. Best-effort: a missing /
+   * below-zero template refcount is swallowed, never a quarantine.
+   */
+  get templateReclaimHook(): ReclaimHook | undefined {
+    if (this.#templateStore === undefined) return undefined;
+    const pins = this.#templatePins;
+    const releaseByHash = (hash: string): Promise<void> =>
+      this.#releaseTemplateByHash(hash);
+    return {
+      name: "template-refcount",
+      async reclaim(record: SandboxRecord): Promise<void> {
+        // Only a record that durably pinned a template releases one; a cold
+        // record pinned nothing.
+        if (record.templatePinned !== true) return;
+        const hash = record.artifact?.manifestHash;
+        if (hash === undefined) return;
+        // Clear the in-process optimization pin (same-process teardown); a
+        // fresh planner after a crash simply has no entry — harmless.
+        const executionId = record.machine?.executionId;
+        if (executionId !== undefined) pins.delete(executionId);
+        await releaseByHash(hash);
+      },
+    };
   }
 }
 

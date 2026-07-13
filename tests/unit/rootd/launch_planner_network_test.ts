@@ -164,6 +164,7 @@ Deno.test("resolve(restricted): adds one eth0 NIC, the ip=/studiobox cmdline, an
     const planner = plannerWith(cacheRoot, workDir, dp.dataplane);
 
     const plan = await planner.resolve(request({ allowNet: ["1.2.3.4"] }));
+    assert(plan.kind !== "restore");
 
     // Exactly one TAP-backed NIC, slot 0 → sbxtap0 / MAC.
     assertEquals(plan.config.network_interfaces, [
@@ -252,6 +253,7 @@ Deno.test("resolve(allowNet unset): egress.apply is called with an UNRESTRICTED 
 
     // No allowNet key ⇒ unrestricted (full internet), the upstream default.
     const plan = await planner.resolve(request());
+    assert(plan.kind !== "restore");
 
     // A NIC + resources are still provisioned (unrestricted != netless).
     assertEquals(plan.config.network_interfaces?.length, 1);
@@ -278,6 +280,7 @@ Deno.test("resolve(netless): no NIC, no network/egress/dnsmasq calls, no resourc
     const planner = plannerWith(cacheRoot, workDir, dp.dataplane);
 
     const plan = await planner.resolve(request({ netless: true }));
+    assert(plan.kind !== "restore");
 
     assertEquals(plan.config.network_interfaces, undefined);
     assertEquals(plan.resources, undefined);

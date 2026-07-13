@@ -113,6 +113,17 @@ export interface SandboxRecord {
   machine?: MachineJournalState;
   /** Requires schema version 2; absent means "references no artifact set". */
   artifact?: ArtifactReference;
+  /**
+   * Durable warm-template pin marker (snapshot-restore §1.2). `true` on a record
+   * whose execution restored from (and pinned) a warm template keyed by
+   * {@link ArtifactReference.manifestHash}; absent/false on a cold record, which
+   * pinned no template. It is journaled BEFORE the restore spawns so
+   * `TemplateReclaimHook` can release the template refcount from the SURVIVING
+   * record after a rootd crash + destructive reconcile — when the in-process pin
+   * map is empty — exactly as the artifact refcount survives via
+   * {@link ArtifactReference}. Requires schema version 2.
+   */
+  templatePinned?: boolean;
   resources: SandboxResources;
   terminationReason?: string;
 }
@@ -188,6 +199,7 @@ export function validateSandboxRecord(value: unknown): SandboxRecord {
     "updatedAt",
     "machine",
     "artifact",
+    "templatePinned",
     "resources",
     "terminationReason",
   ], "sandbox record");
@@ -222,6 +234,16 @@ export function validateSandboxRecord(value: unknown): SandboxRecord {
       );
     }
     validateArtifactReference(record.artifact);
+  }
+  if (record.templatePinned !== undefined) {
+    if (record.schemaVersion === 1) {
+      throw new TypeError(
+        "sandbox record templatePinned requires schema version 2",
+      );
+    }
+    if (typeof record.templatePinned !== "boolean") {
+      throw new TypeError("sandbox record templatePinned must be a boolean");
+    }
   }
   return structuredClone(record as SandboxRecord);
 }

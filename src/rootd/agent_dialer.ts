@@ -37,6 +37,7 @@ import {
   limitsToWire,
   m3AgentContractIdentity,
 } from "../agent/service.ts";
+import type { GuestNetworkConfig } from "../agent/personalize.ts";
 import { DEFAULT_TRANSPORT_LIMITS } from "../wire/contract.ts";
 import * as wire from "../wire/generated/sandbox_agent_types.ts";
 import { SupervisorError } from "./supervisor_core_api.ts";
@@ -161,5 +162,125 @@ export async function openAgentSession(
       }`,
       error,
     );
+  }
+}
+
+/** Everything the one-shot restore `personalize` step needs (snapshot-restore §2.3). */
+export interface PersonalizeDialOptions {
+  /** Per-restore credential the later `authenticate` must present (32 bytes). */
+  readonly credential: Uint8Array;
+  /** Per-restore boot nonce bound on the guest (checked at `authenticate`). */
+  readonly bootNonce: Uint8Array;
+  /** Sandbox id bound on the guest (checked at `authenticate`). */
+  readonly sandboxId: string;
+  /** In-band NIC config (empty `guestCidr` ⇒ netless: the guest leaves eth0 down). */
+  readonly network: GuestNetworkConfig;
+  /** Build id presented to `negotiate`. @default DEFAULT_HOST_DIAL_BUILD_ID */
+  readonly callerBuildId?: string;
+  /** Bound (ms) for bootstrap acquisition and each call. @default DEFAULT_AGENT_DIAL_TIMEOUT_MS */
+  readonly timeoutMs?: number;
+}
+
+/** What a successful restore `personalize` reports back for logging. */
+export interface PersonalizeSessionOutcome {
+  /** studioboxd buildId echoed by the guest. */
+  readonly buildId: string;
+  /** The guest CIDR the guest applied; empty when netless. */
+  readonly appliedCidr: string;
+}
+
+/**
+ * Dial a restored studioboxd byte stream and inject its per-restore identity
+ * (snapshot-restore §2.3, §4 step 4): wrap the stream, run the bounded
+ * fail-closed `negotiate` (verifying the guest's `ContractIdentity` matches, so
+ * caller and guest agree on the exact schema build), then call the pre-auth
+ * `personalize @3` with `{credential, bootNonce, sandboxId, network}`. On
+ * success the guest sets the credential a later `authenticate` must present and
+ * reconfigures `eth0` in-band; `personalize` is then rejected as already done.
+ *
+ * `personalize` is ONE-SHOT — there is no retained session — so this closes the
+ * wire client + transport (which closes `conn`) on BOTH success and failure.
+ * Rejects with a typed {@linkcode SupervisorError} (`SBX_SUP_UNAVAILABLE`) —
+ * never hangs — if the peer stalls, sends a malformed/over-limit frame, rejects
+ * the handshake or personalize, or disconnects. The core maps that typed
+ * failure to its cold fallback (§5.3), so a template problem never fails a
+ * create.
+ */
+export async function openPersonalizeSession(
+  conn: Deno.Conn,
+  options: PersonalizeDialOptions,
+): Promise<PersonalizeSessionOutcome> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_AGENT_DIAL_TIMEOUT_MS;
+  const buildId = options.callerBuildId ?? DEFAULT_HOST_DIAL_BUILD_ID;
+
+  let wireClient: RpcWireClient | null = null;
+  // Same close-ownership contract as openAgentSession: bind teardown to both
+  // lifecycle edges so a peer EOF/RST or an out-of-band transport fault
+  // surfaces every pending call as a typed error and releases the session.
+  const transport = new TcpTransport(conn, {
+    closeTimeoutMs: timeoutMs,
+    frameLimits: { maxFrameBytes: DEFAULT_TRANSPORT_LIMITS.maxFrameBytes },
+    onClose: () => void wireClient?.close().catch(() => {}),
+    onError: () => void wireClient?.close().catch(() => {}),
+  });
+  wireClient = new RpcWireClient(transport, { defaultTimeoutMs: timeoutMs });
+  const client = wireClient;
+
+  try {
+    const bootstrap = await wire.AgentBootstrap.bootstrapClient(client, {
+      timeoutMs,
+    });
+    const handshake = await bootstrap.negotiate({
+      identity: identityToWire(m3AgentContractIdentity(buildId)),
+      limits: limitsToWire(DEFAULT_TRANSPORT_LIMITS),
+      requiredFeatureBits: AGENT_PLANE_FEATURES,
+    }, { timeoutMs });
+    if (handshake.which !== "accepted") {
+      throw new SupervisorError(
+        "SBX_SUP_UNAVAILABLE",
+        `studioboxd rejected negotiation: ${
+          handshake.error?.message ?? "unknown"
+        }`,
+      );
+    }
+    const result = await bootstrap.personalize({
+      credential: options.credential,
+      bootNonce: options.bootNonce,
+      sandboxId: options.sandboxId,
+      network: {
+        guestCidr: options.network.guestCidr,
+        gateway: options.network.gateway,
+        dns: options.network.dns,
+        iface: options.network.iface,
+      },
+    }, { timeoutMs });
+    if (result.which !== "ok") {
+      throw new SupervisorError(
+        "SBX_SUP_UNAVAILABLE",
+        `studioboxd rejected personalize: ${
+          result.error?.message ?? "unknown"
+        }`,
+      );
+    }
+    return {
+      buildId: result.ok?.buildId ?? "",
+      appliedCidr: result.ok?.appliedCidr ?? "",
+    };
+  } catch (error) {
+    if (error instanceof SupervisorError) throw error;
+    // A timeout, a transport/session error, or a peer disconnect: normalize to
+    // the typed "restore not personalizable" surface the core's fallback
+    // catches (§5.3) so a caller never has to hang or reason about capnp.
+    throw new SupervisorError(
+      "SBX_SUP_UNAVAILABLE",
+      `studioboxd personalize failed or timed out: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      error,
+    );
+  } finally {
+    // One-shot: always tear the local session down (closes conn), success or not.
+    await client.close().catch(() => {});
+    await transport.close().catch(() => {});
   }
 }

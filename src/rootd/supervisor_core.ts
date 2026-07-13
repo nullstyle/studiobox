@@ -15,10 +15,13 @@
  */
 
 import type {
+  SnapshotLoadParams,
   VmConfig,
   VsockConn,
   VsockDialOptions,
 } from "@nullstyle/firecracker";
+import type { GuestNetworkConfig } from "../agent/personalize.ts";
+import { openPersonalizeSession } from "./agent_dialer.ts";
 import {
   type ArtifactReference,
   assertSandboxId,
@@ -62,15 +65,10 @@ import { type SubnetAllocation, subnetForSlot } from "./network/allocator.ts";
 import { slotOfTapName } from "./network/reclaim_hook.ts";
 import { PortForwardError } from "./network/port_forward.ts";
 
-/**
- * Everything host-specific a launch needs, resolved from logical ids.
- * Producing it is rootd-internal policy (artifact staging is M4); the
- * supervisor surface itself never carries these fields.
- */
-export interface SupervisorLaunchPlan {
+/** Fields shared by every launch plan (cold or snapshot-restore). */
+interface SupervisorLaunchPlanBase {
   readonly jailer: JailedLaunchRequest["jailer"];
   readonly stage: JailedLaunchRequest["stage"];
-  readonly config: VmConfig;
   readonly readinessTimeoutMs?: number;
   /**
    * Guest AF_VSOCK port studioboxd listens on. When present the launch is
@@ -109,6 +107,76 @@ export interface SupervisorLaunchPlan {
    */
   readonly resources?: Partial<SandboxResources>;
 }
+
+/**
+ * A cold-boot launch plan (the default). `kind` is optional so a plan that
+ * omits the discriminant — every pre-snapshot-restore planner and test — is a
+ * cold plan, and the cold path stays BYTE-IDENTICAL to before this union
+ * existed (snapshot-restore hard rule 2).
+ */
+export interface ColdSupervisorLaunchPlan extends SupervisorLaunchPlanBase {
+  readonly kind?: "cold";
+  /** The `VmConfig` a cold `Machine.launch` boots from. */
+  readonly config: VmConfig;
+}
+
+/**
+ * In-band guest network a restore's `personalize` reconfigures `eth0` from
+ * (snapshot-restore §2.3, §4 step 4), plus the bindings a later `authenticate`
+ * checks. Derived by the planner from the SAME {@linkcode SubnetAllocation}
+ * that provisioned the TAP.
+ */
+export interface RestorePersonalizePlan {
+  /** In-band NIC config (empty `guestCidr` ⇒ netless). */
+  readonly network: GuestNetworkConfig;
+  /** Boot nonce the guest binds; the tunnel client presents the same at `authenticate`. */
+  readonly bootNonce: Uint8Array;
+  /** Sandbox id the guest binds; checked at `authenticate`. */
+  readonly sandboxId: string;
+  /** Bound (ms) for the dial + personalize. Defaults to the plan readiness budget. */
+  readonly timeoutMs?: number;
+}
+
+/**
+ * A snapshot-restore launch plan (snapshot-restore §4, §5.2): the twin of
+ * {@linkcode ColdSupervisorLaunchPlan} that loads a warm-template snapshot
+ * instead of cold-booting. `stage` copies snapshot/mem/rootfs(ro)/overlay-copy
+ * into the fresh jail; `snapshot` is the wire-verbatim `PUT /snapshot/load`
+ * body (in-jail paths + per-restore `network_overrides`/`vsock_override`);
+ * `personalize` carries the in-band identity injected after resume; and
+ * `fallback` is a complete cold recipe REUSING the already-provisioned network
+ * (§5.3) so a template problem never fails a create. `agentVsockPort` and
+ * `agentCredential` are REQUIRED (the restore dials the guest and injects the
+ * credential over `personalize`, unlike a cold boot which bakes it at boot).
+ */
+export interface RestoreSupervisorLaunchPlan extends SupervisorLaunchPlanBase {
+  readonly kind: "restore";
+  /** Wire-verbatim `PUT /snapshot/load` params (in-jail snapshot/mem paths + overrides). */
+  readonly snapshot: SnapshotLoadParams;
+  /** Dial+personalize target; the restored studioboxd already listens here. */
+  readonly agentVsockPort: number;
+  /** Freshly minted per restore; injected over `personalize`, returned by openBridge. */
+  readonly agentCredential: Uint8Array;
+  /** In-band identity `personalize` applies after resume. */
+  readonly personalize: RestorePersonalizePlan;
+  /**
+   * The cold recipe the core boots if restore OR personalize fails (§5.3),
+   * REUSING the same (already-provisioned, already-journaled) network — so the
+   * fallback must NOT re-journal resources and must carry a fresh unformatted
+   * overlay + a `studiobox.token`-baked cmdline for cold readiness.
+   */
+  readonly fallback: ColdSupervisorLaunchPlan;
+}
+
+/**
+ * Everything host-specific a launch needs, resolved from logical ids.
+ * Producing it is rootd-internal policy; the supervisor surface itself never
+ * carries these fields, nor which strategy resolved (hard rule 1: the SDK,
+ * hostd, and the wire never see `launchStrategy`).
+ */
+export type SupervisorLaunchPlan =
+  | ColdSupervisorLaunchPlan
+  | RestoreSupervisorLaunchPlan;
 
 /** Resolves logical artifact/allocation ids to a concrete launch plan. */
 export interface SupervisorLaunchPlanner {
@@ -157,6 +225,49 @@ export interface PortForwardInstaller {
   reclaim(sandboxId: string): Promise<void>;
 }
 
+/** What the core hands the {@linkcode RestorePersonalizer} for one restore. */
+export interface RestorePersonalizeInput {
+  /** The dialed guest vsock byte stream; the personalizer OWNS closing it. */
+  readonly conn: VsockConn;
+  /** Per-restore credential a later `authenticate` must present. */
+  readonly credential: Uint8Array;
+  /** Boot nonce bound on the guest. */
+  readonly bootNonce: Uint8Array;
+  /** Sandbox id bound on the guest. */
+  readonly sandboxId: string;
+  /** In-band NIC config (empty `guestCidr` ⇒ netless). */
+  readonly network: GuestNetworkConfig;
+  /** Bound (ms) for the negotiate + personalize round trip. */
+  readonly timeoutMs?: number;
+}
+
+/**
+ * Injection seam for the restore `personalize` step (snapshot-restore §2.3):
+ * dial-side identity injection over an already-dialed guest vsock. The real
+ * implementation is {@linkcode openPersonalizeSession}; host-safe tests inject
+ * a fake that records the input and succeeds/fails on demand, so the restore
+ * control flow is exercised with no vsock/capnp. Any throw is treated by the
+ * core as a restore-specific failure and drives the cold fallback (§5.3).
+ */
+export interface RestorePersonalizer {
+  personalize(input: RestorePersonalizeInput): Promise<void>;
+}
+
+/** Real personalizer: run the bounded `negotiate → personalize` over the vsock. */
+const DEFAULT_RESTORE_PERSONALIZER: RestorePersonalizer = {
+  async personalize(input: RestorePersonalizeInput): Promise<void> {
+    // `openPersonalizeSession` closes the transport (and thus `conn`) on both
+    // success and failure — the one-shot personalize retains no session.
+    await openPersonalizeSession(input.conn, {
+      credential: input.credential,
+      bootNonce: input.bootNonce,
+      sandboxId: input.sandboxId,
+      network: input.network,
+      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+    });
+  },
+};
+
 export interface SupervisorCoreOptions {
   /** The one authoritative journal (shared with the nested jail registry). */
   readonly store: SandboxStateStore;
@@ -164,6 +275,12 @@ export interface SupervisorCoreOptions {
   readonly planner: SupervisorLaunchPlanner;
   /** Injection seam; defaults to the real `@nullstyle/firecracker` runtime. */
   readonly runtime?: FirecrackerRuntime;
+  /**
+   * Restore-path `personalize` seam (snapshot-restore §2.3). Defaults to the
+   * real {@linkcode openPersonalizeSession} dialer; only the snapshot strategy
+   * ever uses it, so cold-only deploys need not configure one.
+   */
+  readonly personalizer?: RestorePersonalizer;
   readonly reclaimHooks?: readonly ReclaimHook[];
   /**
    * Installs the per-sandbox host→guest port forward for
@@ -213,6 +330,7 @@ export class SupervisorCore implements SupervisorApi {
   readonly #store: SandboxStateStore;
   readonly #planner: SupervisorLaunchPlanner;
   readonly #adapter: FirecrackerAdapter;
+  readonly #personalizer: RestorePersonalizer;
   readonly #hooks: readonly ReclaimHook[];
   readonly #portForward: PortForwardInstaller | undefined;
   readonly #buildId: string;
@@ -251,6 +369,7 @@ export class SupervisorCore implements SupervisorApi {
       registry,
       ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
     });
+    this.#personalizer = options.personalizer ?? DEFAULT_RESTORE_PERSONALIZER;
     this.#hooks = options.reclaimHooks ?? NOOP_RECLAIM_HOOKS;
     this.#portForward = options.portForward;
     this.#buildId = options.buildId ?? "dev";
@@ -305,71 +424,41 @@ export class SupervisorCore implements SupervisorApi {
         "staging",
       );
       const plan = await this.#planner.resolve(validated);
-      // The artifact reference AND the network resources ride the staging ->
-      // booting commit, so both are durable BEFORE any process spawns (the
-      // resources are what a cold-reconcile reclaim keys off, §8/§9).
+      // The artifact reference, the durable template-pin marker, AND the network
+      // resources ride the staging -> booting commit, so all are durable BEFORE
+      // any process spawns (the resources are what a cold-reconcile reclaim keys
+      // off, §8/§9). A restore records `templatePinned` here so that after a
+      // crash + destructive reconcile the TemplateReclaimHook can release the
+      // template refcount from the SURVIVING record — the in-process pin map is
+      // empty then (snapshot-restore §1.2, §7; FINDING 1). A cold plan pins no
+      // template, so the marker stays absent.
+      const bootingPatch: Partial<SandboxRecord> = {};
+      if (plan.artifact !== undefined) {
+        bootingPatch.artifact = structuredClone(plan.artifact);
+      }
+      if (plan.kind === "restore") {
+        bootingPatch.templatePinned = true;
+      }
       await this.#ownedTransition(
         validated.sandboxId,
         validated.executionId,
         ["staging"],
         "booting",
-        plan.artifact === undefined
-          ? undefined
-          : { artifact: structuredClone(plan.artifact) },
+        Object.keys(bootingPatch).length === 0 ? undefined : bootingPatch,
         plan.resources === undefined
           ? undefined
           : structuredClone(plan.resources),
       );
-      const machine = await this.#adapter.launch({
-        sandboxId: validated.sandboxId,
-        executionId: validated.executionId,
-        jailer: plan.jailer,
-        stage: plan.stage,
-        config: plan.config,
-        ...(plan.readinessTimeoutMs === undefined
-          ? {}
-          : { readinessTimeoutMs: plan.readinessTimeoutMs }),
-      });
-      try {
-        // Readiness is real when configured: dial studioboxd over vsock so
-        // "ready" means the guest agent answered, not just that the VMM is
-        // journaled and live (M5). The dial retries across the guest's boot
-        // + studioboxd startup window.
-        if (plan.agentVsockPort !== undefined) {
-          const probe = await machine.connectVsock(plan.agentVsockPort);
-          probe.close();
-        }
-        await this.#ownedTransition(
-          validated.sandboxId,
-          validated.executionId,
-          ["booting"],
-          "ready",
-        );
-      } catch (error) {
-        // The agent never answered, or the journal refused the move
-        // (typically SBX_SUP_STALE: a sweep or a newer execution owns the
-        // record now). Put the fresh VMM down instead of tracking a phantom
-        // machine.
-        await machine.kill().catch(() => {});
-        await machine[Symbol.asyncDispose]().catch(() => {});
-        throw error;
+      // The artifact reference AND the network resources are now journaled
+      // (BEFORE any spawn) for BOTH strategies. Branch below the supervisor
+      // surface: the SDK/hostd/wire never learn which strategy resolved
+      // (snapshot-restore hard rule 1). A restore that fails falls back to a
+      // cold boot reusing this same journaled network (§5.3), so the failure
+      // handling is IDENTICAL to cold — #parkFailedLaunch reclaims either way.
+      if (plan.kind === "restore") {
+        return await this.#launchRestore(validated, plan);
       }
-      this.#track(machine);
-      if (plan.agentVsockPort !== undefined) {
-        this.#agentPorts.set(validated.executionId, plan.agentVsockPort);
-      }
-      if (plan.agentCredential !== undefined) {
-        this.#agentCredentials.set(
-          validated.executionId,
-          plan.agentCredential.slice(),
-        );
-      }
-      return {
-        sandboxId: validated.sandboxId,
-        executionId: validated.executionId,
-        state: "running",
-        pid: machine.pid,
-      };
+      return await this.#bootColdPlan(validated, plan);
     } catch (error) {
       await this.#parkFailedLaunch(
         validated.sandboxId,
@@ -378,6 +467,238 @@ export class SupervisorCore implements SupervisorApi {
       );
       throw error;
     }
+  }
+
+  /**
+   * Boot a cold plan from `booting`: `Machine.launch`, prove readiness by
+   * DIALING studioboxd over vsock (M5), transition `booting → ready`, and track
+   * the live machine + credential. This is the byte-identical cold path — it is
+   * ALSO the snapshot fallback target (§5.3), so a template problem resolves to
+   * exactly today's cold create with no divergence. Caller owns the
+   * staging→booting commit and the `#parkFailedLaunch` on throw.
+   */
+  async #bootColdPlan(
+    validated: SupervisorLaunchRequest,
+    plan: ColdSupervisorLaunchPlan,
+  ): Promise<SupervisorMachineStatus> {
+    const machine = await this.#adapter.launch({
+      sandboxId: validated.sandboxId,
+      executionId: validated.executionId,
+      jailer: plan.jailer,
+      stage: plan.stage,
+      config: plan.config,
+      ...(plan.readinessTimeoutMs === undefined
+        ? {}
+        : { readinessTimeoutMs: plan.readinessTimeoutMs }),
+    });
+    try {
+      // Readiness is real when configured: dial studioboxd over vsock so
+      // "ready" means the guest agent answered, not just that the VMM is
+      // journaled and live (M5). The dial retries across the guest's boot
+      // + studioboxd startup window.
+      if (plan.agentVsockPort !== undefined) {
+        const probe = await machine.connectVsock(plan.agentVsockPort);
+        probe.close();
+      }
+      await this.#ownedTransition(
+        validated.sandboxId,
+        validated.executionId,
+        ["booting"],
+        "ready",
+      );
+    } catch (error) {
+      // The agent never answered, or the journal refused the move
+      // (typically SBX_SUP_STALE: a sweep or a newer execution owns the
+      // record now). Put the fresh VMM down instead of tracking a phantom
+      // machine.
+      await machine.kill().catch(() => {});
+      await machine[Symbol.asyncDispose]().catch(() => {});
+      throw error;
+    }
+    this.#track(machine);
+    if (plan.agentVsockPort !== undefined) {
+      this.#agentPorts.set(validated.executionId, plan.agentVsockPort);
+    }
+    if (plan.agentCredential !== undefined) {
+      this.#agentCredentials.set(
+        validated.executionId,
+        plan.agentCredential.slice(),
+      );
+    }
+    return {
+      sandboxId: validated.sandboxId,
+      executionId: validated.executionId,
+      state: "running",
+      pid: machine.pid,
+    };
+  }
+
+  /**
+   * Restore a warm-template snapshot from `booting` (snapshot-restore §4):
+   * `Machine.restore` → dial the restored vsock → `personalize(credential,
+   * bootNonce, sandboxId, network)` → `booting → ready`. The credential/bootNonce
+   * are freshly minted per restore exactly as cold. On a restore-specific
+   * failure — the `Machine.restore` API errored, or the dial/personalize failed
+   * or timed out — the restored VMM (if any) is put down CLEANLY and the create
+   * FALLS BACK to a cold boot reusing the already-provisioned network (§5.3),
+   * so a template problem never fails a create. A journal race at the
+   * `booting → ready` flip (a sweep / newer execution took the record) is NOT a
+   * template problem: kill and rethrow exactly like cold, never fall back.
+   */
+  async #launchRestore(
+    validated: SupervisorLaunchRequest,
+    plan: RestoreSupervisorLaunchPlan,
+  ): Promise<SupervisorMachineStatus> {
+    let machine: FirecrackerMachine;
+    try {
+      machine = await this.#adapter.restore({
+        sandboxId: validated.sandboxId,
+        executionId: validated.executionId,
+        jailer: plan.jailer,
+        stage: plan.stage,
+        snapshot: plan.snapshot,
+        ...(plan.readinessTimeoutMs === undefined
+          ? {}
+          : { readinessTimeoutMs: plan.readinessTimeoutMs }),
+      });
+    } catch (error) {
+      // Restore itself failed. The adapter scoped-reconciled ONLY this
+      // execution's jail — but if that reconcile reported cleanup-incomplete
+      // (SBX_FC_CLEANUP), an orphan VMM survives. Falling back to cold would
+      // double-boot beside the orphan and strip the jail binding a later
+      // reconcile needs, so RETHROW: #parkFailedLaunch then QUARANTINES the
+      // record with its machine/jailRecord binding intact, exactly as the cold
+      // path quarantines an adapter cleanup-incomplete (§5.3). Only fall back
+      // when the restore's jail is CONFIRMED reclaimed (no orphan).
+      if (isCleanupIncomplete(error)) throw error;
+      return await this.#fallbackToCold(validated, plan);
+    }
+
+    try {
+      await this.#personalizeRestored(machine, plan);
+    } catch {
+      // A restore-specific failure (dial refused, personalize rejected or timed
+      // out): put the restored VMM DOWN before falling back. If kill/dispose
+      // signals cleanup-incomplete (SBX_FC_CLEANUP), the VMM could NOT be
+      // confirmed down — an orphan the scoped reconcile can no longer reach if
+      // we clear the binding. So RETHROW to QUARANTINE (preserving the
+      // machine/jailRecord binding for a later reconcile) instead of orphaning
+      // it in a cold fallback (FINDING 2). Only fall back when the restored VMM
+      // is CONFIRMED down. Kill+dispose reclaims this jail and closes the dialed
+      // vsock; the network stays journaled for the fallback.
+      const cleanupError = await this.#putRestoredVmmDown(machine);
+      if (cleanupError !== undefined) throw cleanupError;
+      return await this.#fallbackToCold(validated, plan);
+    }
+
+    try {
+      await this.#ownedTransition(
+        validated.sandboxId,
+        validated.executionId,
+        ["booting"],
+        "ready",
+      );
+    } catch (error) {
+      // A journal race (SBX_SUP_STALE) — a sweep or newer execution owns the
+      // record now. Re-launching cold would double-boot against a record being
+      // reclaimed, so do NOT fall back: put the VMM down and rethrow like cold.
+      await machine.kill().catch(() => {});
+      await machine[Symbol.asyncDispose]().catch(() => {});
+      throw error;
+    }
+
+    this.#track(machine);
+    this.#agentPorts.set(validated.executionId, plan.agentVsockPort);
+    this.#agentCredentials.set(
+      validated.executionId,
+      plan.agentCredential.slice(),
+    );
+    return {
+      sandboxId: validated.sandboxId,
+      executionId: validated.executionId,
+      state: "running",
+      pid: machine.pid,
+    };
+  }
+
+  /**
+   * Cold-boot fallback for a failed restore (§5.3): a template problem never
+   * fails a create. The restore VMM (if any) is already down and the network is
+   * still provisioned + journaled. The create-only jail registry keeps this
+   * record's `machine` binding after a restore VMM's jail was reclaimed (it is
+   * left `reclaiming`, not cleared), so the fallback's journal-before-spawn would
+   * conflict — RESET the binding to unbound first, then cold-boot on the SAME
+   * record + executionId reusing the provisioned network (no re-provision).
+   */
+  async #fallbackToCold(
+    validated: SupervisorLaunchRequest,
+    plan: RestoreSupervisorLaunchPlan,
+  ): Promise<SupervisorMachineStatus> {
+    await this.#update(validated.sandboxId, (current) => {
+      // Ownership guard: a sweep / newer execution that took the record makes
+      // this throw SBX_SUP_STALE, which aborts the fallback (parkFailedLaunch
+      // then leaves the winner's record alone) rather than double-booting.
+      this.#assertWriterOwns(
+        current,
+        validated.executionId,
+        "restore fallback",
+      );
+      return { ...current, machine: undefined };
+    });
+    return await this.#bootColdPlan(validated, plan.fallback);
+  }
+
+  /**
+   * Dial the restored guest vsock and inject its per-restore identity over the
+   * one-shot `personalize` (snapshot-restore §2.3). The personalizer OWNS
+   * closing the dialed conn; a failure here is caught by {@linkcode
+   * SupervisorCore.#launchRestore} and drives the cold fallback.
+   */
+  async #personalizeRestored(
+    machine: FirecrackerMachine,
+    plan: RestoreSupervisorLaunchPlan,
+  ): Promise<void> {
+    const conn = await machine.connectVsock(plan.agentVsockPort, {
+      ...(plan.readinessTimeoutMs === undefined
+        ? {}
+        : { retryTimeoutMs: plan.readinessTimeoutMs }),
+    });
+    await this.#personalizer.personalize({
+      conn,
+      credential: plan.agentCredential,
+      bootNonce: plan.personalize.bootNonce,
+      sandboxId: plan.personalize.sandboxId,
+      network: plan.personalize.network,
+      ...(plan.personalize.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: plan.personalize.timeoutMs }),
+    });
+  }
+
+  /**
+   * Put a restored VMM down before a cold fallback (FINDING 2). Returns the
+   * cleanup-incomplete error when kill OR dispose signals `SBX_FC_CLEANUP` (the
+   * scoped reconcile could not confirm the VMM dead) — the caller then throws it
+   * so the record is QUARANTINED with its jail binding intact rather than
+   * orphaning the VMM in a fallback. Returns `undefined` when the VMM is
+   * CONFIRMED down (kill + dispose clean), so the fallback is safe. Both steps
+   * always run — a kill fault must not skip the disposal that reclaims the jail.
+   */
+  async #putRestoredVmmDown(
+    machine: FirecrackerMachine,
+  ): Promise<FirecrackerAdapterError | undefined> {
+    let cleanupError: FirecrackerAdapterError | undefined;
+    try {
+      await machine.kill();
+    } catch (error) {
+      if (isCleanupIncomplete(error)) cleanupError = error;
+    }
+    try {
+      await machine[Symbol.asyncDispose]();
+    } catch (error) {
+      if (isCleanupIncomplete(error)) cleanupError = error;
+    }
+    return cleanupError;
   }
 
   async status(executionId: string): Promise<SupervisorMachineStatus> {
@@ -925,8 +1246,7 @@ export class SupervisorCore implements SupervisorApi {
       // since the journaled resources now belong to whoever won the record.
       return;
     }
-    const cleanupIncomplete = error instanceof FirecrackerAdapterError &&
-      error.code === "SBX_FC_CLEANUP";
+    const cleanupIncomplete = isCleanupIncomplete(error);
     const detail = `launch failed: ${boundedReason(error)}`;
     try {
       // Reap any studiobox-owned resources the (post-resolve) failure may have
@@ -1233,6 +1553,20 @@ function journaledState(
       // orphan awaiting the destructive restart sweep.
       return "cleanupPending";
   }
+}
+
+/**
+ * Does a Firecracker boundary error signal cleanup-incomplete — the scoped
+ * reconcile / disposal could NOT confirm the VMM dead (an orphan requiring a
+ * later reconcile)? This is exactly how the cold path detects+quarantines it
+ * (`#parkFailedLaunch`: `error.code === "SBX_FC_CLEANUP"`), reused so the restore
+ * fallback quarantines an orphan instead of leaking it (FINDING 2).
+ */
+function isCleanupIncomplete(
+  error: unknown,
+): error is FirecrackerAdapterError {
+  return error instanceof FirecrackerAdapterError &&
+    error.code === "SBX_FC_CLEANUP";
 }
 
 /** Swallow only the typed stale-writer signal; anything else propagates. */

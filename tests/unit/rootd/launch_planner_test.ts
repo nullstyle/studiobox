@@ -81,6 +81,8 @@ Deno.test("planner: resolve emits the boot recipe and acquires the refcount", as
     const planner = plannerFor(cacheRoot, workDir);
 
     const plan = await planner.resolve(request());
+    // The default "cold" strategy resolves a cold plan (with a VmConfig).
+    assert(plan.kind !== "restore");
 
     // The artifact belt is held before the plan is ever journaled.
     assertEquals(await cache.refcount(HASH), 1, "acquire-before-journal");
@@ -132,10 +134,12 @@ Deno.test("planner: request.vcpus overrides the static default in machine_config
 
     // The request's vcpus (validated 1..64 upstream) reaches the guest.
     const plan = await planner.resolve(request({ vcpus: 4 }));
+    assert(plan.kind !== "restore");
     assertEquals(plan.config.machine_config?.vcpu_count, 4);
 
     // Absent vcpus falls back to the planner's static default (1).
     const dflt = await planner.resolve(request({ executionId: "e-plan-2" }));
+    assert(dflt.kind !== "restore");
     assertEquals(dflt.config.machine_config?.vcpu_count, 1);
   });
 });

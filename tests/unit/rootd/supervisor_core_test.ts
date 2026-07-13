@@ -1,9 +1,17 @@
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertExists,
+  assertRejects,
+  assertThrows,
+} from "@std/assert";
 import { join } from "@std/path";
 import type {
+  JailedRestoreOptions,
   JailRecord,
   MachineOptions,
   ReconcileResult,
+  RestoreOptions,
   VmmExit,
   VmRegistry,
   VsockConn,
@@ -19,7 +27,10 @@ import {
 import {
   type PortForwardInstaller,
   type ReclaimHook,
+  type RestorePersonalizeInput,
+  type RestorePersonalizer,
   SupervisorCore,
+  type SupervisorLaunchPlan,
   type SupervisorLaunchPlanner,
 } from "../../../src/rootd/supervisor_core.ts";
 import {
@@ -238,11 +249,133 @@ class FakeMachine implements RuntimeMachine {
   }
 }
 
+/**
+ * A restored VMM whose DISPOSAL fails (cleanup-incomplete): the kill lands but
+ * the jail record is NOT removed — an orphan the scoped reconcile could not
+ * reap. `FirecrackerMachine[Symbol.asyncDispose]` normalizes this to
+ * `SBX_FC_CLEANUP`, the signal that must QUARANTINE (preserving the jail
+ * binding) rather than fall back to cold (FINDING 2).
+ */
+class CleanupIncompleteMachine extends FakeMachine {
+  override [Symbol.asyncDispose](): Promise<void> {
+    this.disposed = true;
+    return Promise.reject(new Error("dispose failed: jail still busy"));
+  }
+}
+
 interface Harness {
   readonly core: SupervisorCore;
   readonly store: JsonFileSandboxStore;
   readonly machines: Map<string, FakeMachine>;
   launches: number;
+  restores: number;
+}
+
+/**
+ * A restore plan fixture (snapshot-restore §5.2): `kind: "restore"` carrying the
+ * `SnapshotLoadParams`, the personalize inputs, and a cold `fallback` recipe.
+ * The `fallback` reuses the SAME network the restore's `resources` journal (no
+ * re-provision), exactly as the real planner emits (§5.3).
+ */
+function restorePlan(
+  overrides: Partial<SupervisorLaunchPlan> = {},
+): SupervisorLaunchPlan {
+  const jailer = {
+    jailerBin: "/usr/bin/jailer",
+    firecrackerBin: "/usr/bin/firecracker",
+    uid: 10_001,
+    gid: 10_001,
+    newPidNs: true,
+  };
+  const credential = new Uint8Array(32).fill(0xc0);
+  return {
+    kind: "restore",
+    jailer,
+    stage: [
+      { hostPath: "/templates/h/snapshot", jailPath: "/snapshot" },
+      { hostPath: "/templates/h/mem", jailPath: "/mem" },
+      { hostPath: "/artifacts/rootfs", jailPath: "/rootfs.ext4" },
+      {
+        hostPath: "/templates/h/overlay.ext4",
+        jailPath: "/overlay.ext4",
+        readWrite: true,
+      },
+    ],
+    snapshot: {
+      snapshot_path: "/snapshot",
+      mem_backend: { backend_type: "File", backend_path: "/mem" },
+      resume_vm: true,
+      clock_realtime: true,
+      network_overrides: [{ iface_id: "eth0", host_dev_name: "sbxtap3" }],
+      vsock_override: { uds_path: "v.sock" },
+    },
+    readinessTimeoutMs: 5_000,
+    agentVsockPort: 1024,
+    agentCredential: credential.slice(),
+    artifact: { manifestHash: "a".repeat(64), arch: "aarch64" },
+    resources: {
+      tapName: "sbxtap3",
+      hostIp: "10.201.0.1",
+      guestIp: "10.201.0.2",
+      subnet: "10.201.0.0/30",
+    },
+    personalize: {
+      network: {
+        guestCidr: "10.201.0.2/30",
+        gateway: "10.201.0.1",
+        dns: "10.201.0.1",
+        iface: "eth0",
+      },
+      bootNonce: new Uint8Array(32).fill(0x0b),
+      sandboxId: "sbx-restore",
+    },
+    fallback: {
+      kind: "cold",
+      jailer,
+      stage: [{ hostPath: "/artifacts/kernel", jailPath: "/vmlinux" }],
+      config: { boot_source: { kernel_image_path: "/vmlinux" } },
+      readinessTimeoutMs: 5_000,
+      agentVsockPort: 1024,
+      agentCredential: credential.slice(),
+    },
+    ...overrides,
+  } as SupervisorLaunchPlan;
+}
+
+/** A planner that resolves a restore plan and counts its resolutions. */
+function restorePlanner(
+  plan: SupervisorLaunchPlan = restorePlan(),
+): SupervisorLaunchPlanner & { resolves: number } {
+  const state = { resolves: 0 };
+  return {
+    get resolves() {
+      return state.resolves;
+    },
+    resolve: () => {
+      state.resolves++;
+      return Promise.resolve(plan);
+    },
+  };
+}
+
+/** A personalizer that records every call and (optionally) rejects. */
+class FakePersonalizer implements RestorePersonalizer {
+  readonly calls: RestorePersonalizeInput[] = [];
+  /** When set, `personalize` rejects with it (a restore-specific failure). */
+  failure?: Error;
+
+  personalize(input: RestorePersonalizeInput): Promise<void> {
+    this.calls.push(input);
+    // The real personalizer OWNS closing the dialed conn — mirror that so a
+    // leaked-conn regression surfaces the same way here.
+    try {
+      input.conn.close();
+    } catch {
+      // Already closed.
+    }
+    if (this.failure !== undefined) return Promise.reject(this.failure);
+    return Promise.resolve();
+  }
 }
 
 /**
@@ -255,17 +388,37 @@ function makeHarness(
   dir: string,
   overrides: {
     launch?: (options: MachineOptions) => Promise<RuntimeMachine>;
+    restore?: (options: RestoreOptions) => Promise<RuntimeMachine>;
     reconcile?: (registry: VmRegistry) => Promise<ReconcileResult>;
     reclaimHooks?: readonly ReclaimHook[];
     store?: JsonFileSandboxStore;
     planner?: SupervisorLaunchPlanner;
     portForward?: PortForwardInstaller;
+    personalizer?: RestorePersonalizer;
   } = {},
 ): Harness {
   const store = overrides.store ??
     new JsonFileSandboxStore(join(dir, "state.json"));
   const machines = new Map<string, FakeMachine>();
-  const counter = { launches: 0 };
+  const counter = { launches: 0, restores: 0 };
+  // Journal-before-spawn against the injected registry, exactly like the real
+  // package: put the jail record, learn the pid, hand back a machine whose
+  // disposal removes the record. Shared by the cold `launch` and the
+  // snapshot-restore `restore` seam so a restored VMM is driven identically.
+  const spawn = async (options: {
+    jailer?: { id: string };
+    registry?: VmRegistry;
+    metadata?: Readonly<Record<string, string>>;
+  }): Promise<FakeMachine> => {
+    const vmId = options.jailer!.id;
+    const registry = options.registry!;
+    await registry.put(jailRecord(vmId, options.metadata));
+    await registry.update(vmId, { pid: 4242 });
+    const machine = new FakeMachine(vmId);
+    machine.registry = registry;
+    machines.set(vmId, machine);
+    return machine;
+  };
   const runtime: FirecrackerRuntime = {
     compatibility: { pinned: "v1.16.1", min: "v1.15.0" },
     launch: async (options) => {
@@ -273,19 +426,20 @@ function makeHarness(
       if (overrides.launch !== undefined) {
         return await overrides.launch(options);
       }
-      const vmId = options.jailer!.id;
-      const registry = options.registry!;
-      await registry.put(jailRecord(vmId, options.metadata));
-      await registry.update(vmId, { pid: 4242 });
-      const machine = new FakeMachine(vmId);
-      machine.registry = registry;
-      machines.set(vmId, machine);
-      return machine;
+      return await spawn(options);
     },
-    // The snapshot-restore path (WI-6) is not exercised by these cold-path
-    // core tests; the seam only needs to satisfy the widened runtime type.
-    restore: () => {
-      throw new Error("restore is not exercised by this cold-path test");
+    restore: async (options) => {
+      counter.restores++;
+      if (overrides.restore !== undefined) {
+        return await overrides.restore(options);
+      }
+      return await spawn(
+        options as unknown as {
+          jailer?: { id: string };
+          registry?: VmRegistry;
+          metadata?: Readonly<Record<string, string>>;
+        },
+      );
     },
     reconcile: async (registry) => {
       if (overrides.reconcile !== undefined) {
@@ -303,6 +457,9 @@ function makeHarness(
     store,
     planner: overrides.planner ?? PLANNER,
     runtime,
+    ...(overrides.personalizer === undefined
+      ? {}
+      : { personalizer: overrides.personalizer }),
     ...(overrides.reclaimHooks === undefined
       ? {}
       : { reclaimHooks: overrides.reclaimHooks }),
@@ -317,6 +474,9 @@ function makeHarness(
     machines,
     get launches() {
       return counter.launches;
+    },
+    get restores() {
+      return counter.restores;
     },
   };
 }
@@ -1262,5 +1422,233 @@ Deno.test("exposeHttp surfaces a PortForwardError and journals nothing", async (
     assertEquals(error.code, "SBX_SUP_STATE");
     const record = await harness.store.get("sbx-pe");
     assertEquals(record?.resources.exposedPorts, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Snapshot-restore (WI-6): restore → dial → personalize → ready, with a cold
+// fallback that a template problem never fails a create.
+// ---------------------------------------------------------------------------
+
+Deno.test("restore strategy: restores, dials, personalizes, and reaches ready", async () => {
+  await withDir(async (dir) => {
+    const personalizer = new FakePersonalizer();
+    const planner = restorePlanner();
+    const harness = makeHarness(dir, { planner, personalizer });
+
+    const status = await harness.core.launch(
+      launchRequest("sbx-restore", "exec-r1"),
+    );
+
+    // The restore path (not cold) produced a running, ready sandbox.
+    assertEquals(status, {
+      sandboxId: "sbx-restore",
+      executionId: "exec-r1",
+      state: "running",
+      pid: 4242,
+    });
+    assertEquals(harness.restores, 1, "restore was used");
+    assertEquals(harness.launches, 0, "no cold boot");
+    assertEquals((await harness.store.get("sbx-restore"))?.phase, "ready");
+
+    // personalize ran exactly once with the minted credential + the plan's
+    // bootNonce/sandboxId/network (the identity a later authenticate checks).
+    assertEquals(personalizer.calls.length, 1);
+    const call = personalizer.calls[0];
+    assertEquals(call.credential, new Uint8Array(32).fill(0xc0));
+    assertEquals(call.bootNonce, new Uint8Array(32).fill(0x0b));
+    assertEquals(call.sandboxId, "sbx-restore");
+    assertEquals(call.network.guestCidr, "10.201.0.2/30");
+    assertEquals(call.network.iface, "eth0");
+
+    // The network the restore journaled is intact, and openBridge returns the
+    // SAME injected credential the guest was personalized with (PLAN.md §M8).
+    const record = await harness.store.get("sbx-restore");
+    assertEquals(record?.resources.tapName, "sbxtap3");
+    const grant = await harness.core.openBridge(
+      bridgeRequest("sbx-restore", "exec-r1"),
+    );
+    assertEquals(grant.agentCredential, new Uint8Array(32).fill(0xc0));
+  });
+});
+
+Deno.test("restore failure falls back to cold, reusing the SAME network (no re-provision)", async () => {
+  await withDir(async (dir) => {
+    const personalizer = new FakePersonalizer();
+    const planner = restorePlanner();
+    const harness = makeHarness(dir, {
+      planner,
+      personalizer,
+      // Machine.restore itself fails (a template / snapshot-load problem).
+      restore: () => Promise.reject({ code: "FC_API", status: 400 }),
+    });
+
+    const status = await harness.core.launch(
+      launchRequest("sbx-fb1", "exec-fb1"),
+    );
+
+    // A template problem NEVER fails a create: the cold fallback booted this
+    // same create to ready.
+    assertEquals(status.state, "running");
+    assertEquals(status.pid, 4242);
+    assertEquals((await harness.store.get("sbx-fb1"))?.phase, "ready");
+    assertEquals(harness.restores, 1, "restore was attempted");
+    assertEquals(harness.launches, 1, "then a single cold fallback boot");
+
+    // The network was provisioned ONCE (one resolve, no re-resolve) and reused:
+    // the fallback did not re-provision or leak the TAP/egress/dnsmasq. The
+    // journaled resources are the ones the restore plan carried.
+    assertEquals(
+      planner.resolves,
+      1,
+      "no second planner.resolve → no re-provision",
+    );
+    const record = await harness.store.get("sbx-fb1");
+    assertEquals(record?.resources.tapName, "sbxtap3");
+    // Personalize is never reached on a restore-API failure.
+    assertEquals(personalizer.calls.length, 0);
+  });
+});
+
+Deno.test("personalize failure kills the restored VMM and falls back to cold", async () => {
+  await withDir(async (dir) => {
+    const personalizer = new FakePersonalizer();
+    personalizer.failure = new SupervisorError(
+      "SBX_SUP_UNAVAILABLE",
+      "studioboxd rejected personalize",
+    );
+    const planner = restorePlanner();
+    let restored: FakeMachine | undefined;
+    const harness = makeHarness(dir, {
+      planner,
+      personalizer,
+      // The restore SUCCEEDS (journal + machine); personalize then fails.
+      restore: async (options) => {
+        const jailed = options as JailedRestoreOptions;
+        const vmId = jailed.jailer.id;
+        const registry = jailed.registry as unknown as VmRegistry;
+        await registry.put(jailRecord(vmId, jailed.metadata));
+        await registry.update(vmId, { pid: 4242 });
+        restored = new FakeMachine(vmId);
+        restored.registry = registry;
+        return restored;
+      },
+    });
+
+    const status = await harness.core.launch(
+      launchRequest("sbx-fb2", "exec-fb2"),
+    );
+
+    // The restored VMM was put DOWN cleanly (no orphan) before the fallback.
+    assertExists(restored);
+    assertEquals(restored!.killCalls, 1, "restored VMM killed");
+    assert(restored!.disposed, "restored VMM disposed");
+    // personalize was attempted, then the cold fallback carried the create.
+    assertEquals(personalizer.calls.length, 1);
+    assertEquals(harness.launches, 1, "cold fallback boot");
+    assertEquals(status.state, "running");
+    assertEquals((await harness.store.get("sbx-fb2"))?.phase, "ready");
+  });
+});
+
+Deno.test("a cold plan (default strategy) never calls restore — byte-identical to today", async () => {
+  await withDir(async (dir) => {
+    const personalizer = new FakePersonalizer();
+    // PLANNER (default) resolves a COLD plan (no `kind`). The core must take the
+    // cold path — never restore, never personalize — proving fc<v1.16 / missing
+    // template (both resolve to a cold plan) never touch the restore surface.
+    const harness = makeHarness(dir, { personalizer });
+
+    const status = await harness.core.launch(
+      launchRequest("sbx-cold", "exec-cold"),
+    );
+
+    assertEquals(status.state, "running");
+    assertEquals(harness.launches, 1);
+    assertEquals(harness.restores, 0, "restore never called for a cold plan");
+    assertEquals(personalizer.calls.length, 0, "personalize never called");
+    assertEquals((await harness.store.get("sbx-cold"))?.phase, "ready");
+  });
+});
+
+Deno.test("FINDING 2: personalize failure + cleanup-incomplete kill/dispose QUARANTINES with the jail binding intact (no fallback, no orphan)", async () => {
+  await withDir(async (dir) => {
+    const personalizer = new FakePersonalizer();
+    personalizer.failure = new SupervisorError(
+      "SBX_SUP_UNAVAILABLE",
+      "studioboxd rejected personalize",
+    );
+    const planner = restorePlanner();
+    let restored: CleanupIncompleteMachine | undefined;
+    const harness = makeHarness(dir, {
+      planner,
+      personalizer,
+      // The restore SUCCEEDS (journals the jail record + pid); personalize then
+      // fails, and putting the VMM down reports cleanup-incomplete (dispose
+      // rejects WITHOUT removing the jail record → an orphan).
+      restore: async (options) => {
+        const jailed = options as JailedRestoreOptions;
+        const vmId = jailed.jailer.id;
+        const registry = jailed.registry as unknown as VmRegistry;
+        await registry.put(jailRecord(vmId, jailed.metadata));
+        await registry.update(vmId, { pid: 4242 });
+        restored = new CleanupIncompleteMachine(vmId);
+        restored.registry = registry;
+        return restored;
+      },
+    });
+
+    // The create REJECTS with the cleanup-incomplete signal (not a silent
+    // fallback) — a template problem falls back, but an unreapable orphan must
+    // surface for a later reconcile.
+    const error = await assertRejects(
+      () => harness.core.launch(launchRequest("sbx-fb3", "exec-fb3")),
+      FirecrackerAdapterError,
+    );
+    assertEquals(error.code, "SBX_FC_CLEANUP");
+
+    // No cold fallback booted beside the orphan.
+    assertEquals(harness.launches, 0, "no cold fallback beside the orphan");
+    assertEquals(personalizer.calls.length, 1, "personalize was attempted");
+    assertEquals(restored!.killCalls, 1, "the restored VMM was kill-attempted");
+
+    // The record is QUARANTINED with its machine/jailRecord binding PRESERVED so
+    // a later reconcile can still reach the orphan — never cleared into a
+    // fallback (the cold path quarantines an adapter cleanup-incomplete the same
+    // way, §5.3).
+    const record = await harness.store.get("sbx-fb3");
+    assertEquals(record?.phase, "quarantined");
+    assertExists(record?.machine?.jailRecord, "jail binding preserved");
+    assertEquals(record?.machine?.jailRecord?.pid, 4242);
+  });
+});
+
+Deno.test("FINDING 2: a restore-API failure whose scoped reconcile is cleanup-incomplete QUARANTINES (no fallback)", async () => {
+  await withDir(async (dir) => {
+    const personalizer = new FakePersonalizer();
+    const planner = restorePlanner();
+    const harness = makeHarness(dir, {
+      planner,
+      personalizer,
+      // Machine.restore fails, and the adapter's scoped reconcile CANNOT confirm
+      // the orphan reaped (reports a failure) → SBX_FC_CLEANUP.
+      restore: () => Promise.reject({ code: "FC_API", status: 400 }),
+      reconcile: () =>
+        Promise.resolve({
+          reclaimed: [],
+          stillRunning: [],
+          failures: [{ vmId: "exec-fb4", error: new Error("busy") }],
+        }),
+    });
+
+    const error = await assertRejects(
+      () => harness.core.launch(launchRequest("sbx-fb4", "exec-fb4")),
+      FirecrackerAdapterError,
+    );
+    assertEquals(error.code, "SBX_FC_CLEANUP");
+    // A cleanup-incomplete restore never double-boots beside the orphan.
+    assertEquals(harness.launches, 0, "no cold fallback");
+    assertEquals((await harness.store.get("sbx-fb4"))?.phase, "quarantined");
+    assertEquals(personalizer.calls.length, 0, "personalize never reached");
   });
 });
