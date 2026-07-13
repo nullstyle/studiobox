@@ -38,6 +38,14 @@ import {
   DEFAULT_AGENT_VSOCK_PORT,
   DEFAULT_OVERLAY_SIZE_BYTES,
 } from "../../src/rootd/launch_planner.ts";
+import {
+  connectSupervisorSession,
+  type SupervisorSession,
+} from "../../src/hostd/supervisor_client.ts";
+import {
+  buildSupervisorContractIdentity,
+  type SupervisorCompatIdentitySource,
+} from "../../src/rootd/service.ts";
 import { denoConfigArgs, readVmConfig, type VmSuiteConfig } from "./support.ts";
 
 const REPO_ROOT = fromFileUrl(new URL("../../", import.meta.url)).replace(
@@ -53,6 +61,23 @@ const TUNNEL_PORT = 40001;
 const READY_TIMEOUT_MS = 20_000;
 /** Per-call budget for the provider (a cold microVM boot fits comfortably). */
 const PROVIDER_CALL_TIMEOUT_MS = 60_000;
+
+/**
+ * Graceful-drain budget for {@linkcode drainRootd}: after hostd is stopped, poll
+ * rootd's `health()` for up to this long, waiting for it to report quiescent (no
+ * live executions, not reconciling) before SIGTERM. This keeps rootd's shutdown
+ * sweep from racing an in-flight teardown/reclaim into the "operations in flight"
+ * refusal, which would LEAK the VMM + its refcounts (a real host reconciles on
+ * restart; a test process never restarts rootd). The hard-kill backstop in
+ * {@linkcode stopDaemon} still bounds the total teardown.
+ */
+const ROOTD_DRAIN_TIMEOUT_MS = 10_000;
+/** Poll cadence while draining rootd toward quiescence. */
+const ROOTD_DRAIN_POLL_INTERVAL_MS = 250;
+/** Per handshake/health-call bound during the drain (a stuck rootd can't stall it). */
+const ROOTD_DRAIN_CALL_TIMEOUT_MS = 2_000;
+/** Build id the drain session offers rootd's `negotiate` (informational only). */
+const ROOTD_DRAIN_BUILD_ID = "studiobox/m8-parity-drain";
 
 function toHexToken(bytes: Uint8Array): string {
   let out = "";
@@ -259,6 +284,82 @@ async function stopDaemon(daemon: Daemon | undefined): Promise<void> {
   await daemon.drained.catch(() => {});
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Gracefully drain rootd before it is SIGTERMed on dispose.
+ *
+ * rootd's SIGTERM handler runs one destructive reconcile sweep, but that sweep
+ * REFUSES (`SBX_SUP_UNAVAILABLE`, logging "shutdown sweep refused (operations in
+ * flight)") while any launch/shutdown/kill is still settling — and on a test the
+ * refusal LEAKS the VMM + its refcounts, because unlike a real host the process
+ * never restarts to reconcile them. hostd's own SIGTERM only revokes leases
+ * locally (it fires no rootd kills), so a teardown that the test had in flight
+ * keeps settling on rootd after hostd is gone.
+ *
+ * So, once hostd is stopped, open a fresh supervisor session and poll rootd's
+ * `health()` until it reports quiescent — `activeMachines === 0` (every tracked
+ * VMM has exited; a teardown observed at that instant has already put its VMM
+ * down) and `reconciling === false` — or the bounded budget lapses. On a clean
+ * run this returns in one poll (the test's own teardown already settled), so the
+ * subsequent SIGTERM sweep is a no-op and dispose leaks zero firecracker/jailer.
+ *
+ * Best-effort and fully bounded: an unreachable rootd, a build-identity failure,
+ * an error arm, or a lapsed budget all just return so the SIGTERM + hard-kill
+ * backstop in {@linkcode stopDaemon} takes over.
+ */
+async function drainRootd(
+  supervisorSock: string,
+  compatPath: string,
+  credential: Uint8Array,
+): Promise<void> {
+  let session: SupervisorSession;
+  try {
+    const compat = JSON.parse(
+      await Deno.readTextFile(compatPath),
+    ) as SupervisorCompatIdentitySource;
+    const identity = await buildSupervisorContractIdentity(compat, {
+      buildId: ROOTD_DRAIN_BUILD_ID,
+    });
+    session = await connectSupervisorSession(supervisorSock, {
+      identity,
+      credential,
+      timeoutMs: ROOTD_DRAIN_CALL_TIMEOUT_MS,
+    });
+  } catch {
+    // rootd is unreachable, or the drain identity could not be built: there is
+    // nothing to gracefully drain, so let the SIGTERM path reap it.
+    return;
+  }
+  try {
+    const deadline = performance.now() + ROOTD_DRAIN_TIMEOUT_MS;
+    while (true) {
+      let quiesced: boolean;
+      try {
+        const health = await session.supervisor.health({
+          timeoutMs: ROOTD_DRAIN_CALL_TIMEOUT_MS,
+        });
+        // An error arm, or a success arm reporting no live executions and no
+        // running sweep, both end the drain: the first because we can't observe
+        // quiescence, the second because rootd is already quiescent.
+        quiesced = health.which !== "health" || health.health === undefined ||
+          (health.health.activeMachines === 0 && !health.health.reconciling);
+      } catch {
+        // rootd stopped answering (closing, or the session dropped): stop
+        // draining and let SIGTERM + the hard-kill backstop finish teardown.
+        return;
+      }
+      if (quiesced) return;
+      if (performance.now() >= deadline) return;
+      await sleep(ROOTD_DRAIN_POLL_INTERVAL_MS);
+    }
+  } finally {
+    await session.close().catch(() => {});
+  }
+}
+
 /**
  * Boot rootd + hostd as real processes against the golden set named by the
  * `SBX_VM_*` contract and return a provider dialing hostd over loopback.
@@ -282,7 +383,11 @@ export async function startRealStack(
   const compatPath = join(REPO_ROOT, "compat", "wire.json");
 
   // Two independent 32-byte bootstrap credentials: hostd↔rootd, and client↔hostd.
-  const rootdToken = toHexToken(crypto.getRandomValues(new Uint8Array(32)));
+  // Keep the rootd credential's raw bytes: the hex form is written to
+  // `rootdTokenPath` for the daemons, and the bytes authenticate the dispose-time
+  // drain session that waits for rootd to quiesce (see `drainRootd`).
+  const rootdCredential = crypto.getRandomValues(new Uint8Array(32));
+  const rootdToken = toHexToken(rootdCredential);
   const hostdToken = crypto.getRandomValues(new Uint8Array(32));
   await Deno.writeTextFile(rootdTokenPath, rootdToken);
   await Deno.writeTextFile(hostdTokenPath, toHexToken(hostdToken));
@@ -409,9 +514,13 @@ export async function startRealStack(
     rootdStderr: capturedRootd.stderrLines,
     async [Symbol.asyncDispose]() {
       // hostd first (it drives rootd); its SIGTERM revokes leases + tickets and
-      // tears the tunnel router down. Then rootd, whose shutdown sweep reclaims
-      // any still-live jailed VM.
+      // tears the tunnel router down. Then, BEFORE SIGTERMing rootd, gracefully
+      // drain it: wait (bounded) for it to report no live executions / no
+      // in-flight teardown, so its own shutdown sweep never refuses "operations
+      // in flight" and leaks a VMM. Finally SIGTERM rootd, whose sweep reclaims
+      // any still-live jailed VM (a no-op on a clean, drained run).
       await stopDaemon(capturedHostd);
+      await drainRootd(supervisorSock, compatPath, rootdCredential);
       await stopDaemon(capturedRootd);
       await Deno.remove(runDir, { recursive: true }).catch(() => {});
     },

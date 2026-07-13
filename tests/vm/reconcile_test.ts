@@ -94,16 +94,27 @@ Deno.test({
     prefix: "r-",
   });
   try {
+    // The artifact belt for this manifest hash may already carry a NON-ZERO
+    // refcount from an EARLIER in-VM test that leaked a VM in this SAME process
+    // (exactly what bit the full suite: an absolute `refcount === 1` assertion
+    // breaks the moment anything upstream leaks a hold). So capture a BASELINE
+    // before this drill's launch and assert a DELTA against it — never an
+    // absolute count. The crash rootd reads the same `SBX_VM_*` contract as the
+    // suite, so its cache root + manifest hash are the suite's own and knowable
+    // before the spawn (they equal `ready.cacheRoot` / `ready.manifestHash`).
+    const cache = new ArtifactCache({ root: config.cacheRoot });
+    const beltBefore = await cache.refcount(config.manifestHash);
+
     const { child, ready } = await spawnCrashRootd(workDir);
 
     // The real VMM is live and jailed before the crash.
     assert(pidAlive(ready.pid), "VMM alive pre-crash");
     assert(await pathExists(ready.jailExecDir), "jail exists pre-crash");
-    const cache = new ArtifactCache({ root: ready.cacheRoot });
+    // The journaled launch pins the belt: exactly one MORE hold than baseline.
     assertEquals(
       await cache.refcount(ready.manifestHash),
-      1,
-      "artifact belt held while the launch is journaled",
+      beltBefore + 1,
+      "journaled launch pins the artifact belt (+1 over any baseline)",
     );
 
     // kill -9 the rootd-equivalent mid-life: the VMM is orphaned, not reaped.
@@ -140,10 +151,14 @@ Deno.test({
       false,
       "the per-boot overlay was reclaimed",
     );
+    // Reconcile reaps the orphan and releases its hold, returning the belt to
+    // exactly the pre-launch baseline (a leaked baseline, if any, is left as-is
+    // — this drill only proves ITS launch's hold is released, not that the belt
+    // reaches zero).
     assertEquals(
       await cache.refcount(ready.manifestHash),
-      0,
-      "the artifact belt was released on reconcile",
+      beltBefore,
+      "reconcile released the launch's belt (back to the baseline)",
     );
 
     const record = await new JsonFileSandboxStore(ready.stateFile).get(
