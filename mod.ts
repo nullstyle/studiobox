@@ -1,151 +1,29 @@
 /**
- * Local, Firecracker-backed implementation of the declared
- * `@deno/sandbox` execution surface.
+ * `@nullstyle/studiobox` — a Deno-native, source-compatible substitute for
+ * [`@deno/sandbox`](https://jsr.io/@deno/sandbox), backed by Firecracker
+ * microVMs on hosts you control.
  *
- * The upstream-parity SDK surface (the `@deno/sandbox` API shape) is
- * re-exported wholesale from `src/mod.ts`. Below it, the package also
- * surfaces the runtime daemon seams — the `studiobox-hostd` tunnel
- * authorization boundary and the `studiobox-rootd` Firecracker adapter —
- * for embedders that assemble a local host.
+ * This root export is the **client SDK surface**: the same shape as
+ * `@deno/sandbox` (`Sandbox.create`/`connect`, `sh`, `spawn`, `fs`, `env`,
+ * `deno`, `exposeHttp`, …) plus the studiobox error taxonomy. Swap the import
+ * and existing `@deno/sandbox` code runs against local microVMs unchanged:
+ *
+ * ```ts
+ * // import { Sandbox } from "@deno/sandbox";
+ * import { Sandbox } from "@nullstyle/studiobox";
+ *
+ * await using sandbox = await Sandbox.create();
+ * await sandbox.sh`echo hello`;
+ * ```
+ *
+ * Two companion exports sit beside this one:
+ * - [`@nullstyle/studiobox/testing`](./testing/mod.ts) — `FakeSandboxHost`, to
+ *   test a studiobox-consuming app with no VM;
+ * - `@nullstyle/studiobox/unstable-host` — the (pre-1.0, unstable) daemon
+ *   assembly seams for embedders that stand up a local host.
  *
  * @module
  */
 
-// Public SDK surface (upstream `@deno/sandbox` parity barrel).
+// The client SDK surface — the `@deno/sandbox` parity barrel.
 export * from "./src/mod.ts";
-
-// studiobox-hostd seam: ticket-gated tunnel authorization.
-export { TunnelAuthorizer } from "./src/hostd/tunnel_authorizer.ts";
-export type {
-  PrivilegedBridgeFactory,
-  PrivilegedBridgeRequest,
-} from "./src/hostd/tunnel_authorizer.ts";
-// The domain grant shape `HostSandbox.openTunnel` returns and the E2E/SDK
-// client consumes (ticket + loopback endpoint + agent binding).
-export type { TunnelGrant } from "./src/hostd/control_core.ts";
-
-// Client tunnel dial (the external leg of the ticketed tunnel): present the
-// `SBXTUN1` preface carrying a single-use ticket and, on `SBXACK1(Ok)`, get
-// back the raw duplex to the guest agent's capnp `SandboxAgent` plane.
-export {
-  DEFAULT_TUNNEL_DIAL_TIMEOUT_MS,
-  dialTunnel,
-  TunnelDialError,
-} from "./src/transports/tunnel_client.ts";
-export type { TunnelEndpoint } from "./src/transports/tunnel_client.ts";
-
-// studiobox-rootd seam: Firecracker adapter surface (root-side daemon
-// boundary; not part of the upstream-parity SDK surface).
-export {
-  assertExecutionId,
-  createExecutionId,
-  CreateOnlyVmRegistry,
-  EXECUTION_ID_METADATA,
-  ExecutionIdConflictError,
-  FirecrackerAdapter,
-  FirecrackerAdapterError,
-  FirecrackerMachine,
-  normalizeFirecrackerError,
-  SANDBOX_ID_METADATA,
-  SandboxStateJailRecordStore,
-  scopeRegistry,
-  StaleExecutionIdError,
-} from "./src/rootd/firecracker/mod.ts";
-export type {
-  AdapterShutdownOptions,
-  AtomicJailRecordStore,
-  CopyStageEntry,
-  FirecrackerAdapterErrorCode,
-  FirecrackerCompatibility,
-  FirecrackerRuntime,
-  JailedLaunchRequest,
-  RuntimeMachine,
-} from "./src/rootd/firecracker/mod.ts";
-
-// studiobox-rootd supervisor domain core: journal-driven machine lifecycle
-// (capnp wire adapter attaches on top of `SupervisorApi` in a later
-// milestone; this surface is transport-free).
-export {
-  NOOP_RECLAIM_HOOKS,
-  SupervisorCore,
-} from "./src/rootd/supervisor_core.ts";
-export type {
-  ReclaimHook,
-  SupervisorCoreOptions,
-  SupervisorLaunchPlan,
-  SupervisorLaunchPlanner,
-} from "./src/rootd/supervisor_core.ts";
-export { SupervisorError } from "./src/rootd/supervisor_core_api.ts";
-export { JournalArtifactReferenceReader } from "./src/rootd/artifact_refs.ts";
-export type { SandboxRecordSource } from "./src/rootd/artifact_refs.ts";
-export type { ArtifactReference } from "./src/state/model.ts";
-export type {
-  SupervisorApi,
-  SupervisorErrorCode,
-  SupervisorHealth,
-  SupervisorMachineState,
-  SupervisorMachineStatus,
-  SupervisorMachineUsage,
-  SupervisorReconcileFailure,
-  SupervisorReconcileSummary,
-} from "./src/rootd/supervisor_core_api.ts";
-
-// studioboxd guest-agent domain core: the transport-free `AgentApi`
-// contract mirroring `schema/sandbox_agent.capnp` (the capnp wire
-// adapter attaches on top in a later milestone). Only the Agent*
-// vocabulary is surfaced here — the agent barrel's carried convenience
-// re-exports (`Signal`, `SeekMode`, `FileInfo`, ...) already reach the
-// package root through the upstream-parity SDK barrel above.
-export { AgentError } from "./src/agent/mod.ts";
-export type {
-  AgentApi,
-  AgentDenoRepl,
-  AgentDenoReplOptions,
-  AgentDenoRunSpec,
-  AgentDenoRuntime,
-  AgentEnvironment,
-  AgentErrorCode,
-  AgentFileSystem,
-  AgentFsFile,
-  AgentInfo,
-  AgentKillSignal,
-  AgentMakeTempOptions,
-  AgentOomAnnotator,
-  AgentProcess,
-  AgentProcessSpawner,
-  AgentProcessStatus,
-  AgentRootConfig,
-  AgentSpawnSpec,
-  AgentStdioMode,
-  AgentSymlinkOptions,
-} from "./src/agent/mod.ts";
-
-// studiobox-rootd supervisor wire plane: the capnp `supervisor.capnp`
-// adapter over `SupervisorApi` plus the UDS server assembly, surfaced
-// for hostd embedders (M6/M7).
-export {
-  buildSupervisorContractIdentity,
-  contractIdentityFromWire,
-  contractIdentityToWire,
-  createSupervisorWireConnection,
-  protocolOfferToWire,
-  SUPERVISOR_FEATURE_BITS,
-  supervisorFaultToWire,
-  transportLimitsFromWire,
-  transportLimitsToWire,
-} from "./src/rootd/service.ts";
-export type {
-  SupervisorCompatIdentitySource,
-  SupervisorIdentityOptions,
-  SupervisorWireConnection,
-  SupervisorWireOptions,
-} from "./src/rootd/service.ts";
-export {
-  startSupervisorServer,
-  UdsSupervisorAcceptSource,
-} from "./src/rootd/main.ts";
-export type {
-  SupervisorServerHandle,
-  SupervisorServerOptions,
-  SupervisorServerStats,
-} from "./src/rootd/main.ts";

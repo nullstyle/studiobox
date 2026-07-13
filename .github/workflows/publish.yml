@@ -1,0 +1,51 @@
+name: Publish
+
+# Publish to JSR on a `v*` tag. The tag must match `deno.json`'s version, and
+# CI (ci.yml) must already be green on the tagged commit — this workflow adds
+# the release-readiness guards + `deno publish` with OIDC/Sigstore provenance.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # required for JSR OIDC provenance
+
+jobs:
+  publish:
+    name: Publish to JSR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: 2.9.1
+          cache: true
+
+      - name: Tag matches deno.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(deno eval 'const c = JSON.parse(await Deno.readTextFile("deno.json")); console.log(c.version)')"
+          echo "tag=$tag deno.json=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag v$tag does not match deno.json version $version" >&2
+            exit 1
+          fi
+
+      - name: Format, lint, and type-check
+        run: deno task check
+
+      - name: Dependency provenance gate
+        run: deno task compat:check
+
+      - name: Publish-readiness guard
+        run: deno task publish:check
+
+      - name: Publish to JSR (with provenance)
+        run: deno publish

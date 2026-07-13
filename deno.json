@@ -1,13 +1,14 @@
 {
   "name": "@nullstyle/studiobox",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./mod.ts",
     "./cli": "./src/cli/main.ts",
     "./images": "./images/mod.ts",
     "./testing": "./testing/mod.ts",
-    "./sdk": "./src/sdk/mod.ts"
+    "./sdk": "./src/sdk/mod.ts",
+    "./unstable-host": "./unstable-host.ts"
   },
   "imports": {
     "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.4",
@@ -27,6 +28,9 @@
     "fmt": "deno fmt",
     "lint": "deno lint",
     "check": "deno fmt --check && deno lint && deno check .",
+    "publish:check": "deno run --allow-read tools/check_publish.ts",
+    "publish:dry": "deno publish --dry-run",
+    "doc:lint": "deno doc --lint mod.ts unstable-host.ts src/cli/main.ts images/mod.ts testing/mod.ts src/sdk/mod.ts",
     "test": "deno task test:unit && deno task test:fake && deno task test:parity && deno task test:soak",
     "test:unit": "deno test --allow-read --allow-write --allow-net=127.0.0.1,unix:/tmp/studiobox-unit-uds.sock tests/unit/",
     "test:fake": "deno test --allow-read --allow-write --allow-net --allow-run --allow-env --allow-sys=uid,gid tests/fake/",
@@ -54,12 +58,14 @@
   "publish": {
     "include": [
       "mod.ts",
+      "unstable-host.ts",
       "src/**",
       "testing/**",
       "images/**",
       "schema/**",
       "compat/**",
       "README.md",
+      "CHANGELOG.md",
       "LICENSE",
       "deno.json"
     ],

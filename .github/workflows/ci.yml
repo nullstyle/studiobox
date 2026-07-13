@@ -79,6 +79,10 @@ jobs:
         # regeneration-reproduction leg skips loudly without the
         # ../capnp-deno toolchain checkout (not present in CI).
         run: deno task wire:check
+      - name: Publish-readiness guard
+        run: deno task publish:check
+      - name: Publish dry-run (slow-types + exports)
+        run: deno publish --dry-run
 
   test:
     name: Test (${{ matrix.os }}, Deno ${{ matrix.deno }})

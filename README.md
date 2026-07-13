@@ -27,9 +27,34 @@ layers.
 
 ## Status
 
-**Design stage.** This repository currently holds the founding design and plan;
-the M0 foundation (transplanted from the earlier `limabox` prototype) is next.
-Not usable yet.
+**0.1.0 — early release, working end-to-end.** The `@deno/sandbox` client
+surface runs against real jailed Firecracker microVMs: `sh`, `spawn`, `fs`,
+`env`, `deno.eval`/`repl`/`run`, `allowNet` egress policy, and `exposeHttp`. It
+is validated on real hardware — the M3 parity suite passes against real in-VM
+sandboxes, the Tier-B networking suite reaches the internet / enforces
+`allowNet` / forwards `exposeHttp`, and a 200-cycle create/use/terminate +
+`kill-9`-reconcile soak drill runs with **zero leaks** across 11 resource
+classes.
+
+As a pre-1.0 release the client API mirrors `@deno/sandbox` (stable-shaped), but
+the host/daemon internals (`@nullstyle/studiobox/unstable-host`) may change
+between minor versions, and snapshot-restore / pre-warm-pool fast-create are
+still fast-follow work (cold boot is ~a few seconds per create).
+
+### Getting started
+
+```sh
+deno add jsr:@nullstyle/studiobox
+
+# One-time: provision + start the local host (Lima VM on macOS, native on Linux).
+deno run -A jsr:@nullstyle/studiobox/cli host up
+```
+
+Then `import { Sandbox } from "@nullstyle/studiobox"` and use it exactly as the
+quickstart above. The SDK reads `STUDIOBOX_HOST` / `STUDIOBOX_TUNNEL` /
+`STUDIOBOX_TOKEN` from the environment (or call `installStudiobox(...)` from
+`@nullstyle/studiobox/sdk`); `studiobox host status` and `studiobox host doctor`
+report and diagnose the host. Requires macOS + Lima, or a Linux + KVM host.
 
 - [DESIGN.md](DESIGN.md) — architecture, API fidelity tiers, state and security
   model
