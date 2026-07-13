@@ -9,12 +9,16 @@
 //   3. a factory (id/boot-nonce) throw during create must not leak a committed
 //      capacity reservation.
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   type CreateSandboxInput,
+  FORWARD_PORT_MAX,
+  FORWARD_PORT_MIN,
+  ForwardPortAllocator,
   HostControlCore,
   HostControlError,
 } from "../../../src/hostd/control_core.ts";
+import { SupervisorError } from "../../../src/rootd/supervisor_core_api.ts";
 import { CapacityLedger } from "../../../src/hostd/capacity.ts";
 import type { Clock, ClockTimer } from "../../../src/hostd/leases.ts";
 import type { RootdGateway } from "../../../src/hostd/supervisor_client.ts";
@@ -77,8 +81,23 @@ class FakeClock implements Clock {
 class FakeGateway implements RootdGateway {
   readonly launched: SupervisorLaunchRequest[] = [];
   readonly killed: string[] = [];
+  readonly exposed: Array<
+    { executionId: string; guestPort: number; hostPort: number }
+  > = [];
   /** Optional interception run inside launch(), after the request is recorded. */
   onLaunch?: (request: SupervisorLaunchRequest) => Promise<void> | void;
+  /** When set, `exposeHttp` rejects with it (rootd DNAT-install failure). */
+  exposeError?: Error;
+  /**
+   * Optional interception run inside `exposeHttp()`, after the call is recorded.
+   * Returning a pending promise parks the in-flight rootd install so a test can
+   * terminate the sandbox mid-await.
+   */
+  onExpose?: (
+    executionId: string,
+    guestPort: number,
+    hostPort: number,
+  ) => Promise<void> | void;
 
   async launch(
     request: SupervisorLaunchRequest,
@@ -114,6 +133,21 @@ class FakeGateway implements RootdGateway {
 
   kill(executionId: string): Promise<void> {
     this.killed.push(executionId);
+    return Promise.resolve();
+  }
+
+  exposeHttp(
+    executionId: string,
+    guestPort: number,
+    hostPort: number,
+  ): Promise<void> {
+    if (this.exposeError !== undefined) {
+      return Promise.reject(this.exposeError);
+    }
+    this.exposed.push({ executionId, guestPort, hostPort });
+    if (this.onExpose !== undefined) {
+      return Promise.resolve(this.onExpose(executionId, guestPort, hostPort));
+    }
     return Promise.resolve();
   }
 
@@ -284,4 +318,191 @@ Deno.test("control-core: a boot-nonce factory throw during create leaks no capac
   assertEquals(after.vcpusCommitted, before.vcpusCommitted);
   assertEquals(after.diskCommittedBytes, before.diskCommittedBytes);
   assertEquals(after.sandboxCount, 0, "no leaked reservation");
+});
+
+// ---------------------------------------------------------------------------
+// M10 W6: exposeHttp host-port lease lifecycle
+// ---------------------------------------------------------------------------
+
+Deno.test("ForwardPortAllocator: lowest-free, release-then-reuse, exhaustion", () => {
+  const alloc = new ForwardPortAllocator();
+  // Lowest-free hands out the range's floor first, then ascends.
+  assertEquals(alloc.allocate(), FORWARD_PORT_MIN);
+  assertEquals(alloc.allocate(), FORWARD_PORT_MIN + 1);
+  assertEquals(alloc.allocate(), FORWARD_PORT_MIN + 2);
+  assertEquals(alloc.inUse, 3);
+  // Releasing a middle port frees exactly it; the next allocate reuses it
+  // (lowest-free), not a fresh higher port.
+  alloc.release(FORWARD_PORT_MIN + 1);
+  assertEquals(alloc.inUse, 2);
+  assertEquals(alloc.allocate(), FORWARD_PORT_MIN + 1);
+  // A double-free is a no-op.
+  alloc.release(FORWARD_PORT_MIN + 1);
+  alloc.release(FORWARD_PORT_MIN + 1);
+  assertEquals(alloc.inUse, 2);
+});
+
+Deno.test("ForwardPortAllocator: exhausting the range throws a host-state error", () => {
+  // A tiny range makes exhaustion cheap to prove.
+  const alloc = new ForwardPortAllocator(40_100, 40_101);
+  assertEquals(alloc.allocate(), 40_100);
+  assertEquals(alloc.allocate(), 40_101);
+  const error = assertThrows(() => alloc.allocate(), HostControlError);
+  assertEquals(error.code, "SBX_HOST_STATE");
+  // After releasing one, a fresh allocate succeeds again.
+  alloc.release(40_100);
+  assertEquals(alloc.allocate(), 40_100);
+});
+
+Deno.test("control-core: exposeHttp leases a host port, records the rootd install, and returns the loopback URL", async () => {
+  const { core, gateway } = makeCore();
+  const created = await core.create(durationInput());
+  const id = created.sandbox.id;
+
+  const first = await core.exposeHttp(id, 8080);
+  assertEquals(first.guestPort, 8080);
+  assert(
+    first.hostPort >= FORWARD_PORT_MIN && first.hostPort <= FORWARD_PORT_MAX,
+    `host port ${first.hostPort} in reserved range`,
+  );
+  assertEquals(first.hostPort, FORWARD_PORT_MIN);
+  assertEquals(first.url, `http://127.0.0.1:${FORWARD_PORT_MIN}`);
+  // rootd received the (executionId, guestPort, allocated hostPort) install.
+  assertEquals(gateway.exposed.length, 1);
+  assertEquals(gateway.exposed[0].guestPort, 8080);
+  assertEquals(gateway.exposed[0].hostPort, FORWARD_PORT_MIN);
+  assert(gateway.exposed[0].executionId.startsWith("exec-"));
+
+  // A second exposeHttp gets a DISTINCT host port.
+  const second = await core.exposeHttp(id, 9090);
+  assertEquals(second.hostPort, FORWARD_PORT_MIN + 1);
+  assertEquals(core.exposedPortCount, 2);
+});
+
+Deno.test("control-core: exposeHttp releases the host port when the sandbox terminates, so a later sandbox reuses it", async () => {
+  const { core } = makeCore();
+  const a = await core.create(durationInput());
+  const first = await core.exposeHttp(a.sandbox.id, 8080);
+  assertEquals(first.hostPort, FORWARD_PORT_MIN);
+  assertEquals(core.exposedPortCount, 1);
+
+  // Terminating the sandbox releases its host port back to the pool.
+  core.killSandbox(a.sandbox.id);
+  assertEquals(core.exposedPortCount, 0);
+
+  // A later sandbox reuses the freed (lowest-free) port.
+  const b = await core.create(durationInput());
+  const reused = await core.exposeHttp(b.sandbox.id, 8080);
+  assertEquals(reused.hostPort, FORWARD_PORT_MIN);
+});
+
+Deno.test("control-core: one sandbox's termination never frees another's exposed port", async () => {
+  const { core } = makeCore();
+  const a = await core.create(durationInput());
+  const b = await core.create(durationInput());
+  const portA = (await core.exposeHttp(a.sandbox.id, 8080)).hostPort;
+  const portB = (await core.exposeHttp(b.sandbox.id, 8080)).hostPort;
+  assertEquals(portA, FORWARD_PORT_MIN);
+  assertEquals(portB, FORWARD_PORT_MIN + 1);
+
+  // Terminate A only: B's port stays leased, so a fresh expose skips both.
+  core.killSandbox(a.sandbox.id);
+  assertEquals(core.exposedPortCount, 1);
+  const c = await core.create(durationInput());
+  const portC = (await core.exposeHttp(c.sandbox.id, 8080)).hostPort;
+  // A's port (the floor) is reusable; B's (floor+1) is NOT.
+  assertEquals(portC, FORWARD_PORT_MIN);
+});
+
+Deno.test("control-core: a rootd exposeHttp failure releases the just-leased host port", async () => {
+  const { core, gateway } = makeCore();
+  const created = await core.create(durationInput());
+  gateway.exposeError = new SupervisorError(
+    "SBX_SUP_STATE",
+    "rootd could not install the forward",
+  );
+
+  await assertRejects(
+    () => core.exposeHttp(created.sandbox.id, 8080),
+    SupervisorError,
+  );
+  // The host port was released — no leak — so the next expose reuses the floor.
+  assertEquals(core.exposedPortCount, 0);
+  gateway.exposeError = undefined;
+  const retry = await core.exposeHttp(created.sandbox.id, 8080);
+  assertEquals(retry.hostPort, FORWARD_PORT_MIN);
+});
+
+Deno.test("control-core: a lease that expires DURING an in-flight exposeHttp leaks ZERO forward ports", async () => {
+  const gateway = new FakeGateway();
+  const { core, clock } = makeCore({ gateway });
+  const created = await core.create(durationInput());
+  const id = created.sandbox.id;
+
+  // Park the rootd install in flight so the sandbox can terminate WHILE the
+  // exposeHttp RPC is still awaiting (the leak window).
+  const reached = Promise.withResolvers<void>();
+  const gate = Promise.withResolvers<void>();
+  gateway.onExpose = () => {
+    reached.resolve();
+    return gate.promise; // stays pending until the test releases it
+  };
+
+  const pending = core.exposeHttp(id, 8080);
+  await reached.promise;
+  // The host port is leased while the install is in flight.
+  assertEquals(core.exposedPortCount, 1);
+
+  // The sandbox's duration deadline fires mid-await (single kill path). The
+  // in-flight forward-port lease MUST be released even though the install has
+  // not returned — with the pre-fix record-after-await ordering this port would
+  // leak permanently (nothing recorded for #releaseForwardPorts to free).
+  clock.advance(120_000);
+  assertEquals(core.metadata(id).state, "terminated");
+  assertEquals(
+    core.exposedPortCount,
+    0,
+    "in-flight lease freed by termination",
+  );
+
+  // Let the install SUCCEED after the sandbox is already gone: the idempotent
+  // release path must not re-record or double-free the port.
+  gate.resolve();
+  await pending;
+  await core.drain();
+  assertEquals(core.exposedPortCount, 0, "no port leaked after the race");
+
+  // The whole reserved pool is free again: the next sandbox reuses the floor.
+  const next = await core.create(durationInput());
+  const reused = await core.exposeHttp(next.sandbox.id, 8080);
+  assertEquals(reused.hostPort, FORWARD_PORT_MIN);
+});
+
+Deno.test("control-core: exposeHttp rejects a terminated sandbox, an out-of-range guest port, and an unknown id", async () => {
+  const { core } = makeCore();
+  const created = await core.create(durationInput());
+  const id = created.sandbox.id;
+
+  // Out-of-range guest port is a validation fault (no lease taken).
+  const bad = await assertRejects(
+    () => core.exposeHttp(id, 0),
+    HostControlError,
+  );
+  assertEquals(bad.code, "SBX_HOST_VALIDATION");
+  assertEquals(core.exposedPortCount, 0);
+
+  // Unknown id is not-found.
+  const missing = await assertRejects(
+    () => core.exposeHttp("sbx_loc_missing", 8080),
+    HostControlError,
+  );
+  assertEquals(missing.code, "SBX_HOST_NOT_FOUND");
+
+  // A terminated sandbox is a state fault.
+  core.killSandbox(id);
+  const dead = await assertRejects(
+    () => core.exposeHttp(id, 8080),
+    HostControlError,
+  );
+  assertEquals(dead.code, "SBX_HOST_STATE");
 });

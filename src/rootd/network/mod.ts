@@ -120,6 +120,7 @@ export {
 } from "./dnsmasq.ts";
 
 export {
+  type PortForward,
   PortForwardController,
   type PortForwardControllerOptions,
   PortForwardError,

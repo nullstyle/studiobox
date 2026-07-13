@@ -72,6 +72,63 @@ const OWNER_SECRET_BYTES = 32;
 const BOOT_NONCE_BYTES = 32;
 const IDEMPOTENCY_KEY_BYTES = 16;
 
+/** Lowest host port in the reserved exposeHttp forward range (DESIGN §6, §9). */
+export const FORWARD_PORT_MIN = 40100;
+/** Highest host port in the reserved exposeHttp forward range (100 ports). */
+export const FORWARD_PORT_MAX = 40199;
+
+/**
+ * Lowest-free host-port allocator over the reserved exposeHttp forward range
+ * `40100..40199` (DESIGN §6, §9). hostd leases one port per `exposeHttp` call,
+ * keyed to the requesting sandbox, and releases it when the sandbox terminates
+ * so the port is reusable. Pure in-memory: lowest-free selection, release, and
+ * exhaustion are asserted with no host access.
+ */
+export class ForwardPortAllocator {
+  readonly #min: number;
+  readonly #max: number;
+  readonly #used = new Set<number>();
+
+  constructor(min: number = FORWARD_PORT_MIN, max: number = FORWARD_PORT_MAX) {
+    if (
+      !Number.isInteger(min) || !Number.isInteger(max) || min < 1 ||
+      max > 65_535 || max < min
+    ) {
+      throw new RangeError(`invalid forward port range ${min}..${max}`);
+    }
+    this.#min = min;
+    this.#max = max;
+  }
+
+  /** Ports currently leased. */
+  get inUse(): number {
+    return this.#used.size;
+  }
+
+  /**
+   * Lease the lowest free host port. Throws {@linkcode HostControlError}
+   * `SBX_HOST_STATE` when every port in the range is leased (DESIGN §6:
+   * exhaustion is host-state pressure, not a client validation fault).
+   */
+  allocate(): number {
+    for (let port = this.#min; port <= this.#max; port++) {
+      if (!this.#used.has(port)) {
+        this.#used.add(port);
+        return port;
+      }
+    }
+    throw new HostControlError(
+      "SBX_HOST_STATE",
+      `no free exposeHttp host port in ${this.#min}..${this.#max}`,
+    );
+  }
+
+  /** Return a leased port to the pool (idempotent; a double-free is a no-op). */
+  release(port: number): void {
+    this.#used.delete(port);
+  }
+}
+
 /** One label pair (mirrors the wire `KeyValue`). */
 export interface Label {
   readonly key: string;
@@ -151,6 +208,16 @@ export interface AttachSandboxResult {
   readonly lease: LeaseSnapshot;
 }
 
+/** Result of {@linkcode HostControlCore.exposeHttp} (maps to the wire `Exposure`). */
+export interface ExposeHttpResult {
+  /** The guest port the forward targets (echoed from the request). */
+  readonly guestPort: number;
+  /** The leased host port dialed on loopback (40100..40199). */
+  readonly hostPort: number;
+  /** The URL the caller dials on the host: `http://127.0.0.1:<hostPort>`. */
+  readonly url: string;
+}
+
 /**
  * Result of {@linkcode HostControlCore.openTunnel}: the single-use ticket, the
  * loopback endpoint it is spent against, and the binding the client echoes
@@ -228,6 +295,12 @@ export interface HostControlCoreOptions {
   readonly capacity?: CapacityLedger;
   /** The single-use tunnel-ticket store (defaults to a fresh store). */
   readonly tickets?: SingleUseTicketStore;
+  /**
+   * The exposeHttp host-port allocator over the reserved 40100..40199 range
+   * (DESIGN §6). Defaults to a fresh {@link ForwardPortAllocator}; injectable so
+   * a test can assert the lease/release lifecycle.
+   */
+  readonly forwardPorts?: ForwardPortAllocator;
   /** Injected time source; defaults to {@link systemClock}. */
   readonly clock?: Clock;
   /** Sandbox-id suffix source (default: 20 random Crockford-ish chars). */
@@ -295,6 +368,7 @@ export class HostControlCore {
   readonly #gateway: RootdGateway;
   readonly #capacity: CapacityLedger;
   readonly #tickets: SingleUseTicketStore;
+  readonly #forwardPorts: ForwardPortAllocator;
   readonly #clock: Clock;
   readonly #leases: LeaseManager;
   readonly #idFactory: () => string;
@@ -314,6 +388,13 @@ export class HostControlCore {
   readonly #sandboxes = new Map<string, SandboxEntry>();
   /** Lease id -> sandbox id, so a Lease capability resolves its sandbox. */
   readonly #leaseToSandbox = new Map<string, string>();
+  /**
+   * Leased exposeHttp host ports per sandbox id. Each sandbox owns its own
+   * entries; they are released back to the {@link ForwardPortAllocator} only
+   * when THAT sandbox terminates (the single kill path), so one sandbox's
+   * termination never frees another's exposed port (DESIGN §6 port isolation).
+   */
+  readonly #forwardLeases = new Map<string, Set<number>>();
   /** In-flight terminal-reclaim promises, awaitable via {@link drain}. */
   readonly #pending = new Set<Promise<void>>();
   /**
@@ -328,6 +409,7 @@ export class HostControlCore {
     this.#gateway = options.gateway;
     this.#capacity = options.capacity ?? new CapacityLedger();
     this.#tickets = options.tickets ?? new SingleUseTicketStore();
+    this.#forwardPorts = options.forwardPorts ?? new ForwardPortAllocator();
     this.#clock = options.clock ?? systemClock;
     this.#idFactory = options.idFactory ?? defaultIdSuffix;
     this.#secretFactory = options.secretFactory ??
@@ -363,6 +445,11 @@ export class HostControlCore {
     let count = 0;
     for (const set of this.#tunnels.values()) count += set.size;
     return count;
+  }
+
+  /** Leased exposeHttp host-port count (lease-lifecycle assertion seam). */
+  get exposedPortCount(): number {
+    return this.#forwardPorts.inUse;
   }
 
   /**
@@ -566,6 +653,73 @@ export class HostControlCore {
   }
 
   /**
+   * Expose a guest TCP port on the host (DESIGN §6; PLAN.md §M10 W6). hostd owns
+   * the host-port lease: it allocates the lowest free port in the reserved
+   * 40100..40199 range, RECORDS the `(sandboxId, hostPort)` lease immediately
+   * (BEFORE the rootd RPC, so a termination landing mid-await frees it too), then
+   * asks rootd to install the per-sandbox loopback DNAT/SNAT
+   * (`RootdGateway.exposeHttp`). The lease is released when the sandbox
+   * terminates (the single `#onLeaseExpire` kill path). On rootd failure the
+   * just-allocated host port is released (idempotently — a no-op if the sandbox
+   * already terminated mid-await) before the error surfaces, so a failed expose
+   * leaks nothing.
+   *
+   * Rejects a terminated / no-live-lease sandbox with `SBX_HOST_STATE` and an
+   * out-of-range guest port with `SBX_HOST_VALIDATION`; a full forward range
+   * surfaces as `SBX_HOST_STATE` (host capacity pressure).
+   */
+  async exposeHttp(
+    id: string,
+    guestPort: number,
+  ): Promise<ExposeHttpResult> {
+    const entry = this.#requireEntry(id);
+    if (isTerminal(entry.state)) {
+      throw new HostControlError(
+        "SBX_HOST_STATE",
+        `sandbox ${id} is terminated`,
+      );
+    }
+    // A live sandbox owns a live lease; without one it was orphaned by a hostd
+    // restart (state stays 'running' while rootd reconciles it away) — reject
+    // rather than lease a port for a VM that is going away.
+    if (this.#leases.get(entry.currentLeaseId) === undefined) {
+      throw new HostControlError(
+        "SBX_HOST_STATE",
+        `sandbox ${id} has no live lease`,
+      );
+    }
+    if (!Number.isInteger(guestPort) || guestPort < 1 || guestPort > 65_535) {
+      throw new HostControlError(
+        "SBX_HOST_VALIDATION",
+        "guestPort must be an integer in 1..65535",
+      );
+    }
+
+    // Lease the host port AND record it under this sandbox BEFORE the rootd RPC,
+    // with no await between the two: if the sandbox's lease expires DURING the
+    // in-flight install, the single kill path (#onLeaseExpire ->
+    // #releaseForwardPorts) sees this port and frees it, so it can never leak.
+    // allocate() picks the lowest free port, which is what rootd then targets.
+    const hostPort = this.#forwardPorts.allocate();
+    this.#recordForwardLease(id, hostPort);
+    try {
+      await this.#gateway.exposeHttp(entry.executionId, guestPort, hostPort);
+    } catch (error) {
+      // Idempotent release: a no-op if the sandbox already terminated mid-await
+      // (#onLeaseExpire released this port and dropped the lease record), so a
+      // failed install never double-frees or corrupts the allocator.
+      this.#releaseForwardLease(id, hostPort);
+      throw error;
+    }
+
+    return {
+      guestPort,
+      hostPort,
+      url: `http://127.0.0.1:${hostPort}`,
+    };
+  }
+
+  /**
    * Open a ticketed tunnel to the sandbox's guest agent (DESIGN.md §4; PLAN.md
    * §M7/§M8). Issues a single-use ticket bound to the sandbox + current lease and
    * REGISTERS A ROUTE (keyed by the ticket's verifier) on the SHARED tunnel
@@ -760,6 +914,7 @@ export class HostControlCore {
     for (const entry of this.#sandboxes.values()) {
       this.#tickets.revokeSandbox(entry.id);
       this.#closeTunnels(entry.id);
+      this.#releaseForwardPorts(entry.id);
     }
     this.#leaseToSandbox.clear();
   }
@@ -789,6 +944,9 @@ export class HostControlCore {
     // Free every live tunnel endpoint: the ticket is gone, so an in-flight
     // splice is now unbound and must be torn down with the sandbox.
     this.#closeTunnels(entry.id);
+    // Release this sandbox's exposeHttp host ports back to the pool (reusable);
+    // only ITS ports, so another sandbox's exposed port is untouched (§6).
+    this.#releaseForwardPorts(entry.id);
     const reclaim = (async () => {
       await this.#capacity.release(entry.reservation).catch(() => {});
       await this.#gateway.kill(entry.executionId).catch(() => {});
@@ -830,6 +988,39 @@ export class HostControlCore {
     if (set === undefined) return;
     this.#tunnels.delete(sandboxId);
     for (const handle of set) void handle.close();
+  }
+
+  /** Release one sandbox's leased exposeHttp host ports — a reclaim-path step. */
+  #releaseForwardPorts(sandboxId: string): void {
+    const ports = this.#forwardLeases.get(sandboxId);
+    if (ports === undefined) return;
+    this.#forwardLeases.delete(sandboxId);
+    for (const port of ports) this.#forwardPorts.release(port);
+  }
+
+  /** Record a leased host port under its sandbox (creating the set on first use). */
+  #recordForwardLease(sandboxId: string, hostPort: number): void {
+    let leased = this.#forwardLeases.get(sandboxId);
+    if (leased === undefined) {
+      leased = new Set();
+      this.#forwardLeases.set(sandboxId, leased);
+    }
+    leased.add(hostPort);
+  }
+
+  /**
+   * Release ONE leased host port idempotently: free it back to the allocator and
+   * drop it from the sandbox's lease set (pruning an emptied set). A no-op when
+   * the port is no longer this sandbox's lease — e.g. the sandbox terminated
+   * mid-await and {@link #releaseForwardPorts} already freed it — so a failed
+   * install never double-frees or corrupts the allocator.
+   */
+  #releaseForwardLease(sandboxId: string, hostPort: number): void {
+    const leased = this.#forwardLeases.get(sandboxId);
+    if (leased === undefined || !leased.has(hostPort)) return;
+    leased.delete(hostPort);
+    if (leased.size === 0) this.#forwardLeases.delete(sandboxId);
+    this.#forwardPorts.release(hostPort);
   }
 
   /** Bind (once) the shared tunnel router the whole core multiplexes onto. */

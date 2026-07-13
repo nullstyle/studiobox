@@ -291,6 +291,16 @@ export interface StatusResult {
   error?: SbxError;
 }
 
+export interface ExposeHttpParams {
+  executionId: string;
+  guestPort: number;
+  hostPort: number;
+}
+
+export interface ExposeHttpResults {
+  result: EmptyResult;
+}
+
 export interface HealthParams {
 }
 
@@ -1101,6 +1111,68 @@ export const StatusResultCodec: StructCodec<StatusResult> = {
     decodeStructMessage(StatusResultStruct, bytes),
 };
 
+export const ExposeHttpParamsStruct: StructDescriptor<ExposeHttpParams> = {
+  kind: "struct",
+  name: "ExposeHttpParams",
+  dataWordCount: 1,
+  pointerCount: 1,
+  createDefault: () => ({
+    executionId: "",
+    guestPort: 0,
+    hostPort: 0,
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "executionId",
+      offset: 0,
+      type: TYPE_TEXT,
+    },
+    {
+      kind: "slot",
+      name: "guestPort",
+      offset: 0,
+      type: TYPE_UINT16,
+    },
+    {
+      kind: "slot",
+      name: "hostPort",
+      offset: 1,
+      type: TYPE_UINT16,
+    },
+  ],
+};
+export const ExposeHttpParamsCodec: StructCodec<ExposeHttpParams> = {
+  encode: (value: ExposeHttpParams): Uint8Array =>
+    encodeStructMessage(ExposeHttpParamsStruct, value),
+  decode: (bytes: Uint8Array): ExposeHttpParams =>
+    decodeStructMessage(ExposeHttpParamsStruct, bytes),
+};
+
+export const ExposeHttpResultsStruct: StructDescriptor<ExposeHttpResults> = {
+  kind: "struct",
+  name: "ExposeHttpResults",
+  dataWordCount: 0,
+  pointerCount: 1,
+  createDefault: () => ({
+    result: EmptyResultStruct.createDefault(),
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "result",
+      offset: 0,
+      type: { kind: "struct", get: () => EmptyResultStruct },
+    },
+  ],
+};
+export const ExposeHttpResultsCodec: StructCodec<ExposeHttpResults> = {
+  encode: (value: ExposeHttpResults): Uint8Array =>
+    encodeStructMessage(ExposeHttpResultsStruct, value),
+  decode: (bytes: Uint8Array): ExposeHttpResults =>
+    decodeStructMessage(ExposeHttpResultsStruct, bytes),
+};
+
 export const HealthParamsStruct: StructDescriptor<HealthParams> = {
   kind: "struct",
   name: "HealthParams",
@@ -1787,6 +1859,7 @@ export const SupervisorMethodOrdinals = {
   reconcile: 7,
   health: 8,
   ping: 9,
+  exposeHttp: 10,
 } as const;
 
 export interface SupervisorClient {
@@ -1800,6 +1873,7 @@ export interface SupervisorClient {
   reconcile(params: ReconcileParams, options?: RpcCallOptions): Promise<ReconcileResults>;
   health(params: HealthParams, options?: RpcCallOptions): Promise<HealthResults>;
   ping(params: PingParams, options?: RpcCallOptions): Promise<PingResults>;
+  exposeHttp(params: ExposeHttpParams, options?: RpcCallOptions): Promise<ExposeHttpResults>;
 }
 
 export interface SupervisorServer {
@@ -1813,6 +1887,7 @@ export interface SupervisorServer {
   reconcile(params: ReconcileParams, ctx: RpcCallContext): Promise<ReconcileResults> | ReconcileResults;
   health(params: HealthParams, ctx: RpcCallContext): Promise<HealthResults> | HealthResults;
   ping(params: PingParams, ctx: RpcCallContext): Promise<PingResults> | PingResults;
+  exposeHttp(params: ExposeHttpParams, ctx: RpcCallContext): Promise<ExposeHttpResults> | ExposeHttpResults;
 }
 
 export function createSupervisorClient(transport: RpcClientTransport, capability: CapabilityPointer): SupervisorClient {
@@ -2227,6 +2302,47 @@ export function createSupervisorClient(transport: RpcClientTransport, capability
         }, "Supervisor.ping failed");
       }
     },
+    exposeHttp: async (params: ExposeHttpParams, options?: RpcCallOptions): Promise<ExposeHttpResults> => {
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(ExposeHttpParamsStruct, params);
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xe96c6d88ab1cfeden,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(capability, SupervisorMethodOrdinals["exposeHttp"], encoded.content, callOptions);
+          try {
+            return decodeStructMessageWithCaps(ExposeHttpResultsStruct, raw.contentBytes, raw.capTable) as ExposeHttpResults;
+          } finally {
+            if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(capability, SupervisorMethodOrdinals["exposeHttp"], encoded.content, callOptions);
+        try {
+          return decodeStructMessageWithCaps(ExposeHttpResultsStruct, response, []) as ExposeHttpResults;
+        } finally {
+          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+            await transport.finish(questionId, options?.finish);
+          }
+        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "Supervisor",
+          interfaceId: 0xe96c6d88ab1cfeden,
+          methodName: "exposeHttp",
+          methodId: 10,
+        }, "Supervisor.exposeHttp failed");
+      }
+    },
   };
 }
 
@@ -2336,6 +2452,15 @@ export function createSupervisorServer(server: SupervisorServer): RpcServerDispa
           const decoded = decodeStructMessageWithCaps(PingParamsStruct, params, ctx.paramsCapTable ?? []) as PingParams;
           const result = await server["ping"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(PingResultsStruct, result);
+          if (encoded.capTable.length > 0) {
+            return { content: encoded.content, capTable: encoded.capTable };
+          }
+          return encoded.content;
+        }
+        case 10: {
+          const decoded = decodeStructMessageWithCaps(ExposeHttpParamsStruct, params, ctx.paramsCapTable ?? []) as ExposeHttpParams;
+          const result = await server["exposeHttp"](decoded, ctx);
+          const encoded = encodeStructMessageWithCaps(ExposeHttpResultsStruct, result);
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
@@ -2649,6 +2774,14 @@ export interface Supervisor {
    * @returns Resolves with the decoded call result.
    */
   ping(value: PingParams["nonce"], options?: RpcCallOptions): Promise<PingResults["nonce"]>;
+  /**
+   * Call `Supervisor.exposeHttp`.
+   *
+   * @param params - Generated method parameter struct.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
+  exposeHttp(params: ExposeHttpParams, options?: RpcCallOptions): Promise<ExposeHttpResults["result"]>;
 }
 
 /**
@@ -2810,6 +2943,21 @@ export function createSupervisorServiceClient(
           methodName: "ping",
           methodId: 9,
         }, "Supervisor.ping failed");
+      }
+    },
+    exposeHttp: async (params: ExposeHttpParams, options?: RpcCallOptions) => {
+      try {
+        const result = await client.exposeHttp(params, options);
+        return result.result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "Supervisor",
+          interfaceName: "Supervisor",
+          interfaceId: SupervisorInterfaceId,
+          methodName: "exposeHttp",
+          methodId: 10,
+        }, "Supervisor.exposeHttp failed");
       }
     },
   };
@@ -2979,6 +3127,22 @@ function createSupervisorServiceServer(
         }, "Supervisor.ping handler failed");
       }
     },
+    exposeHttp: async (params: ExposeHttpParams, _ctx: RpcCallContext) => {
+      try {
+        const result = await server.exposeHttp(params);
+        return { result: result };
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "Supervisor",
+          interfaceName: "Supervisor",
+          interfaceId: SupervisorInterfaceId,
+          methodName: "exposeHttp",
+          methodId: 10,
+          questionId: _ctx.questionId,
+        }, "Supervisor.exposeHttp handler failed");
+      }
+    },
   };
 }
 
@@ -3052,6 +3216,13 @@ export const SupervisorDebugMethods = [
     serviceName: "Supervisor",
     methodId: SupervisorMethodOrdinals["ping"],
     methodName: "ping",
+  },
+  {
+    interfaceId: SupervisorInterfaceId,
+    interfaceName: "Supervisor",
+    serviceName: "Supervisor",
+    methodId: SupervisorMethodOrdinals["exposeHttp"],
+    methodName: "exposeHttp",
   },
 ] as const satisfies readonly RpcDebugSchemaMethod[];
 

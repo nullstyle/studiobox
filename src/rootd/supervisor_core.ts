@@ -58,6 +58,9 @@ import {
   type SupervisorReconcileFailure,
   type SupervisorReconcileSummary,
 } from "./supervisor_core_api.ts";
+import { type SubnetAllocation, subnetForSlot } from "./network/allocator.ts";
+import { slotOfTapName } from "./network/reclaim_hook.ts";
+import { PortForwardError } from "./network/port_forward.ts";
 
 /**
  * Everything host-specific a launch needs, resolved from logical ids.
@@ -126,6 +129,34 @@ export interface ReclaimHook {
 /** The default studiobox-layer reclaimer set: nothing to reclaim yet. */
 export const NOOP_RECLAIM_HOOKS: readonly ReclaimHook[] = Object.freeze([]);
 
+/**
+ * The port-forward installer seam {@linkcode SupervisorCore.exposeHttp} drives
+ * (the M10 `PortForwardController`, or a fake). Structurally satisfied by the
+ * real controller (`src/rootd/network/port_forward.ts`). Absent from the core
+ * options ⇒ no dataplane is configured ⇒ `exposeHttp` is unsupported (§6).
+ */
+export interface PortForwardInstaller {
+  /**
+   * Install the sandbox's `sbx_pf_<id>` loopback DNAT/SNAT table holding the
+   * COMPLETE set of `forwards` (one DNAT + one SNAT rule per forward); returns
+   * the installed table name. The table is a full replace (`add;delete;add`), so
+   * the caller must pass every current forward — a subset would wipe the omitted
+   * ones' DNAT. Atomic, so a throw leaves nothing installed.
+   */
+  expose(
+    alloc: SubnetAllocation,
+    request: {
+      readonly sandboxId: string;
+      readonly forwards: readonly {
+        readonly hostPort: number;
+        readonly guestPort: number;
+      }[];
+    },
+  ): Promise<string>;
+  /** Remove the sandbox's forward table by exact name (idempotent). */
+  reclaim(sandboxId: string): Promise<void>;
+}
+
 export interface SupervisorCoreOptions {
   /** The one authoritative journal (shared with the nested jail registry). */
   readonly store: SandboxStateStore;
@@ -134,6 +165,12 @@ export interface SupervisorCoreOptions {
   /** Injection seam; defaults to the real `@nullstyle/firecracker` runtime. */
   readonly runtime?: FirecrackerRuntime;
   readonly reclaimHooks?: readonly ReclaimHook[];
+  /**
+   * Installs the per-sandbox host→guest port forward for
+   * {@linkcode SupervisorApi.exposeHttp} (M10 §6). Absent ⇒ no network
+   * dataplane is configured, and `exposeHttp` fails typed-unavailable.
+   */
+  readonly portForward?: PortForwardInstaller;
   readonly buildId?: string;
   /** Clock seam (unix milliseconds). */
   readonly now?: () => number;
@@ -177,6 +214,7 @@ export class SupervisorCore implements SupervisorApi {
   readonly #planner: SupervisorLaunchPlanner;
   readonly #adapter: FirecrackerAdapter;
   readonly #hooks: readonly ReclaimHook[];
+  readonly #portForward: PortForwardInstaller | undefined;
   readonly #buildId: string;
   readonly #now: () => number;
   readonly #startedAtUnixMs: number;
@@ -192,6 +230,15 @@ export class SupervisorCore implements SupervisorApi {
   readonly #exits = new Map<string, ObservedExit>();
   readonly #bridges = new Map<string, BridgeGrantEntry>();
   readonly #inflight = new Set<InflightOperation>();
+  /**
+   * Per-execution serialization chain for {@linkcode SupervisorCore.exposeHttp}.
+   * exposeHttp is a read-modify-write over the sandbox's forward set (read the
+   * journaled `exposedPorts`, install the full table, journal the new port), so
+   * two concurrent calls on the SAME sandbox must not both read a stale snapshot
+   * and race the atomic `add;delete;add` install (the later would replace the
+   * earlier's DNAT). Chaining per execution makes them strictly sequential.
+   */
+  readonly #exposeChain = new Map<string, Promise<void>>();
   #reconciling = false;
 
   constructor(options: SupervisorCoreOptions) {
@@ -205,6 +252,7 @@ export class SupervisorCore implements SupervisorApi {
       ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
     });
     this.#hooks = options.reclaimHooks ?? NOOP_RECLAIM_HOOKS;
+    this.#portForward = options.portForward;
     this.#buildId = options.buildId ?? "dev";
     this.#now = options.now ?? Date.now;
     this.#startedAtUnixMs = this.#now();
@@ -362,6 +410,143 @@ export class SupervisorCore implements SupervisorApi {
     const machine = this.#machines.get(executionId)!;
     const conn = await machine.connectVsock(port, { retryTimeoutMs: 5_000 });
     conn.close();
+  }
+
+  async exposeHttp(
+    executionId: string,
+    guestPort: number,
+    hostPort: number,
+  ): Promise<void> {
+    this.#rejectDuringReconcile("exposeHttp");
+    const portForward = this.#portForward;
+    if (portForward === undefined) {
+      // No dataplane configured (vsock-only deploy): there is no host on which
+      // to install a forward. Typed-unavailable so hostd surfaces it cleanly.
+      throw new SupervisorError(
+        "SBX_SUP_UNAVAILABLE",
+        "exposeHttp is unavailable: no network dataplane is configured",
+      );
+    }
+    // Serialize per execution: the read (journaled exposedPorts) → install →
+    // journal sequence below must be atomic w.r.t. another exposeHttp on the
+    // same sandbox, or two concurrent calls both read a stale set and the later
+    // atomic install replaces the earlier's DNAT (§6). The record is fetched
+    // INSIDE the lock so each call sees the prior call's journaled ports.
+    return await this.#withExposeLock(
+      executionId,
+      () => this.#doExposeHttp(portForward, executionId, guestPort, hostPort),
+    );
+  }
+
+  /** Run `fn` after any in-flight exposeHttp for `executionId` settles. */
+  async #withExposeLock<T>(
+    executionId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const prior = this.#exposeChain.get(executionId) ?? Promise.resolve();
+    const run = prior.then(() => fn());
+    const tail = run.then(() => {}, () => {});
+    this.#exposeChain.set(executionId, tail);
+    try {
+      return await run;
+    } finally {
+      // Drop the entry only if no newer exposeHttp chained after us, so the map
+      // does not grow unboundedly across executions.
+      if (this.#exposeChain.get(executionId) === tail) {
+        this.#exposeChain.delete(executionId);
+      }
+    }
+  }
+
+  async #doExposeHttp(
+    portForward: PortForwardInstaller,
+    executionId: string,
+    guestPort: number,
+    hostPort: number,
+  ): Promise<void> {
+    const record = await this.#byExecution(executionId);
+    this.#requireReadyAndLive(record, executionId, "exposeHttp");
+    // A netless / not-network-provisioned sandbox journaled no TAP or
+    // gateway/guest addresses, so it cannot expose a port (§7). Require all
+    // three: the alloc is reconstructed from the TAP slot, and guestIp/hostIp
+    // are the anti-spoof addresses the DNAT/SNAT target (§12).
+    const { tapName, guestIp, hostIp } = record.resources;
+    if (
+      tapName === undefined || guestIp === undefined || hostIp === undefined
+    ) {
+      throw new SupervisorError(
+        "SBX_SUP_STATE",
+        `exposeHttp requires a network-provisioned sandbox; ${record.id} journaled no TAP/addresses`,
+      );
+    }
+    // Reconstruct the SubnetAllocation from the journaled slot. subnetForSlot is
+    // deterministic, so the alloc's guestIp/hostIp equal the journaled ones (the
+    // allocator is the single source of truth for all three, §12).
+    const alloc = subnetForSlot(slotOfTapName(tapName));
+
+    // Re-materialize the sandbox's COMPLETE forward table: the sbx_pf_<id> table
+    // is a full replace (add;delete;add), so it must carry ALL of this sandbox's
+    // forwards — the ones already journaled PLUS the new one — or this install
+    // would wipe the prior forwards' DNAT while hostd still leases them (§6).
+    // Dedupe by hostPort so a retry of the same lease re-installs the same set.
+    const existing = record.resources.exposedPorts;
+    const forwards = existing.some((port) => port.hostPort === hostPort)
+      ? existing
+      : [...existing, { hostPort, guestPort }];
+
+    // Install the DNAT/SNAT. The install is atomic (add;delete;add), so a throw
+    // leaves nothing behind — no half-installed table to unwind here.
+    try {
+      await portForward.expose(alloc, {
+        sandboxId: record.id,
+        forwards,
+      });
+    } catch (error) {
+      if (error instanceof PortForwardError) {
+        throw new SupervisorError(
+          "SBX_SUP_STATE",
+          `exposeHttp could not install the forward for ${record.id}: ${error.message}`,
+          error,
+        );
+      }
+      throw error;
+    }
+
+    // Journal the forward (ownership-guarded CAS, deduped by hostPort) so a cold
+    // reconcile reaps `sbx_pf_<id>` from the journal alone (§6, §9). The table is
+    // already installed, so a journal failure here would strand it: reclaim by
+    // exact name before rethrowing (the install is atomic; the reclaim is
+    // idempotent) so exposeHttp never leaves a forward the journal does not
+    // record.
+    try {
+      await this.#update(record.id, (current) => {
+        this.#assertWriterOwns(current, executionId, "exposeHttp journal");
+        const existing = current.resources.exposedPorts;
+        if (existing.some((port) => port.hostPort === hostPort)) {
+          // A retry of the same lease: the atomic re-install above is a no-op
+          // replace, and the journal already records it — leave it unchanged.
+          return current;
+        }
+        return {
+          ...current,
+          resources: {
+            ...current.resources,
+            exposedPorts: [...existing, { hostPort, guestPort }],
+          },
+        };
+      });
+    } catch (error) {
+      // The install is live but the journal doesn't record the new forward.
+      // Reclaim the whole `sbx_pf_<id>` table by exact name so the dataplane
+      // never carries a forward the journal doesn't own. This deletes any
+      // prior journaled forwards too, but with exposeHttp serialized per
+      // execution (#withExposeLock) a journal failure here can only come from a
+      // concurrent TERMINATE / reconcile taking writer ownership (SBX_SUP_STALE)
+      // — i.e. the sandbox is going away and NetworkReclaimHook reaps the table
+      // regardless — so the over-broad delete is harmless.
+      await portForward.reclaim(record.id).catch(() => {});
+      throw error;
+    }
   }
 
   /**

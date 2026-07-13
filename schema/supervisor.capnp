@@ -155,4 +155,9 @@ interface Supervisor {
   reconcile @7 () -> (result :ReconcileResult);
   health @8 () -> (result :HealthResult);
   ping @9 (nonce :UInt64) -> (nonce :UInt64);
+  # hostd owns the host-port lease (40100..40199) and passes the allocated
+  # hostPort; rootd installs the per-sandbox loopback DNAT/SNAT (sbx_pf_<id>)
+  # and journals resources.exposedPorts. Logical ids only, as everywhere else.
+  exposeHttp @10 (executionId :Text, guestPort :UInt16, hostPort :UInt16)
+      -> (result :Common.EmptyResult);
 }

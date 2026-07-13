@@ -10,6 +10,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 
 import { FakeSandboxHost } from "../../testing/mod.ts";
 import { AgentError } from "../../src/agent/api.ts";
+import { UnsupportedFeatureError } from "../../src/api/errors.ts";
 
 /** Count temp dirs the fake host provisions, by its fixed prefix. */
 async function countFakeRoots(): Promise<number> {
@@ -79,6 +80,40 @@ Deno.test(
     assert(
       listed.some((meta) => meta.id === sandbox.id),
       "the created sandbox is observable via list()",
+    );
+  },
+);
+
+Deno.test(
+  "FakeSandbox.exposeHttp: returns a plausible loopback URL and leases distinct ports",
+  async () => {
+    await using host = new FakeSandboxHost();
+    await using sandbox = await host.create();
+
+    const first = await sandbox.exposeHttp({ port: 8080 });
+    const match = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(first);
+    assert(match !== null, `unexpected exposeHttp url: ${first}`);
+    const firstPort = Number(match[1]);
+    // The fake leases from the same reserved 40100..40199 range as the real host.
+    assert(
+      firstPort >= 40_100 && firstPort <= 40_199,
+      `host port ${firstPort} in reserved range`,
+    );
+
+    // A second exposeHttp resolves a DISTINCT url.
+    const second = await sandbox.exposeHttp({ port: 9090 });
+    assert(second !== first, "the second exposeHttp url is distinct");
+  },
+);
+
+Deno.test(
+  "FakeSandbox.exposeHttp: by pid is unsupported",
+  async () => {
+    await using host = new FakeSandboxHost();
+    await using sandbox = await host.create();
+    await assertRejects(
+      () => sandbox.exposeHttp({ pid: 4321 }),
+      UnsupportedFeatureError,
     );
   },
 );

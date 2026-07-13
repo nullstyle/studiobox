@@ -109,6 +109,18 @@ export const schemaNodes = [
     scopeId: 0xd4a63f0d047f5cean,
   },
   {
+    id: 0xf61bc0a19b8c7158n,
+    kind: "struct",
+    displayName: "schema/supervisor.capnp:Supervisor.exposeHttp$Params",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xa9d0695c45b91002n,
+    kind: "struct",
+    displayName: "schema/supervisor.capnp:Supervisor.exposeHttp$Results",
+    scopeId: 0x0n,
+  },
+  {
     id: 0x8741083c587ba60dn,
     kind: "struct",
     displayName: "schema/supervisor.capnp:Supervisor.health$Params",
@@ -358,6 +370,14 @@ export const interfaceMethods = [
     codeOrder: 9,
     paramStructTypeId: 0xe989521ce9a99516n,
     resultStructTypeId: 0xd1b061e94e96e132n,
+  },
+  {
+    interfaceId: 0xe96c6d88ab1cfeden,
+    interfaceName: "Supervisor",
+    methodName: "exposeHttp",
+    codeOrder: 10,
+    paramStructTypeId: 0xf61bc0a19b8c7158n,
+    resultStructTypeId: 0xa9d0695c45b91002n,
   },
   {
     interfaceId: 0x992ee29bbde5c98cn,

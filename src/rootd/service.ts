@@ -61,6 +61,8 @@
 
 import type {
   BridgeRequest as WireBridgeRequest,
+  ExposeHttpParams,
+  ExposeHttpResults,
   Health as WireHealth,
   HealthResults,
   LaunchResults,
@@ -562,6 +564,14 @@ function requireBoundedExecutionId(executionId: string): string {
   return executionId;
 }
 
+/** Bound a wire `UInt16` port to a usable 1..65535 (rejects 0/garbage). */
+function requireWirePort(port: number, field: string): number {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new WireValidationError(`${field} must be an integer in 1..65535`);
+  }
+  return port;
+}
+
 // ---------------------------------------------------------------------------
 // The wire services
 // ---------------------------------------------------------------------------
@@ -711,6 +721,24 @@ export function createSupervisorWireAdapter(
       // corrupt nonces above 2^53).
       gate.assertAuthorized();
       return await api.ping(nonce);
+    },
+    exposeHttp: async (
+      params: ExposeHttpParams,
+    ): Promise<ExposeHttpResults["result"]> => {
+      try {
+        gate.assertAuthorized();
+        // hostd owns the host-port lease and passes an allocated 40100..40199
+        // hostPort; bound both ports at the wire before touching the core (the
+        // core resolves the execution + installs the DNAT).
+        await api.exposeHttp(
+          requireBoundedExecutionId(params.executionId),
+          requireWirePort(params.guestPort, "guestPort"),
+          requireWirePort(params.hostPort, "hostPort"),
+        );
+        return { which: "ok", ok: {} };
+      } catch (error) {
+        return { which: "error", error: supervisorFaultToWire(error) };
+      }
     },
   };
 }

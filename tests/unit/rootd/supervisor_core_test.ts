@@ -17,10 +17,19 @@ import {
   StaleExecutionIdError,
 } from "../../../src/rootd/firecracker/mod.ts";
 import {
+  type PortForwardInstaller,
   type ReclaimHook,
   SupervisorCore,
   type SupervisorLaunchPlanner,
 } from "../../../src/rootd/supervisor_core.ts";
+import {
+  type SubnetAllocation,
+  subnetForSlot,
+} from "../../../src/rootd/network/allocator.ts";
+import {
+  PortForwardError,
+  portForwardTableName,
+} from "../../../src/rootd/network/port_forward.ts";
 import {
   type SupervisorBridgeRequest,
   SupervisorError,
@@ -114,6 +123,80 @@ const PLANNER: SupervisorLaunchPlanner = {
     }),
 };
 
+/**
+ * A planner that journals the network resources a `slot`'s launch would (the
+ * TAP + `/30` addresses), so `exposeHttp` can reconstruct the allocation from
+ * `resources.tapName` exactly as the real dataplane path does (§9).
+ */
+function networkPlanner(slot: number): SupervisorLaunchPlanner {
+  const alloc = subnetForSlot(slot);
+  return {
+    resolve: () =>
+      Promise.resolve({
+        jailer: {
+          jailerBin: "/usr/bin/jailer",
+          firecrackerBin: "/usr/bin/firecracker",
+          uid: 10_001,
+          gid: 10_001,
+          newPidNs: true,
+        },
+        stage: [{ hostPath: "/artifacts/kernel", jailPath: "/vmlinux" }],
+        config: { boot_source: { kernel_image_path: "/vmlinux" } },
+        resources: {
+          tapName: alloc.tapName,
+          hostIp: alloc.hostIp,
+          guestIp: alloc.guestIp,
+          subnet: alloc.subnet,
+        },
+      }),
+  };
+}
+
+/**
+ * A fake port-forward installer that records `expose` / `reclaim` (§6). It
+ * MODELS the full-table replace: each `expose` records the COMPLETE `forwards`
+ * list it was handed (a snapshot), so a test can prove a later call carried
+ * every forward, not just the newest one.
+ */
+class FakePortForward implements PortForwardInstaller {
+  readonly exposeCalls: Array<{
+    alloc: SubnetAllocation;
+    sandboxId: string;
+    forwards: ReadonlyArray<{ hostPort: number; guestPort: number }>;
+  }> = [];
+  readonly reclaimed: string[] = [];
+  /** When set, `expose` rejects with it (a real nftables install failure). */
+  exposeError?: Error;
+
+  expose(
+    alloc: SubnetAllocation,
+    request: {
+      readonly sandboxId: string;
+      readonly forwards: readonly {
+        readonly hostPort: number;
+        readonly guestPort: number;
+      }[];
+    },
+  ): Promise<string> {
+    if (this.exposeError !== undefined) return Promise.reject(this.exposeError);
+    this.exposeCalls.push({
+      alloc,
+      sandboxId: request.sandboxId,
+      // Snapshot the full set as passed, so a later mutation cannot rewrite it.
+      forwards: request.forwards.map((f) => ({
+        hostPort: f.hostPort,
+        guestPort: f.guestPort,
+      })),
+    });
+    return Promise.resolve(portForwardTableName(request.sandboxId));
+  }
+
+  reclaim(sandboxId: string): Promise<void> {
+    this.reclaimed.push(sandboxId);
+    return Promise.resolve();
+  }
+}
+
 class FakeMachine implements RuntimeMachine {
   readonly vmId: string;
   readonly pid = 4242;
@@ -176,6 +259,7 @@ function makeHarness(
     reclaimHooks?: readonly ReclaimHook[];
     store?: JsonFileSandboxStore;
     planner?: SupervisorLaunchPlanner;
+    portForward?: PortForwardInstaller;
   } = {},
 ): Harness {
   const store = overrides.store ??
@@ -217,6 +301,9 @@ function makeHarness(
     ...(overrides.reclaimHooks === undefined
       ? {}
       : { reclaimHooks: overrides.reclaimHooks }),
+    ...(overrides.portForward === undefined
+      ? {}
+      : { portForward: overrides.portForward }),
     buildId: "test-build",
   });
   return {
@@ -994,5 +1081,181 @@ Deno.test("health and ping are trivial", async () => {
     assertEquals(health.activeBridges, 0);
     assertEquals(health.reconciling, false);
     assert(Number.isSafeInteger(health.startedAtUnixMs));
+  });
+});
+
+Deno.test("exposeHttp installs the forward with the reconstructed alloc and journals exposedPorts", async () => {
+  await withDir(async (dir) => {
+    const portForward = new FakePortForward();
+    const harness = makeHarness(dir, {
+      planner: networkPlanner(7),
+      portForward,
+    });
+    await harness.core.launch(launchRequest("sbx-xp", "exec-xp"));
+
+    await harness.core.exposeHttp("exec-xp", 8080, 40_100);
+
+    // The forward was installed with the allocation reconstructed from the
+    // journaled TAP slot (guestIp/hostIp come from the allocator, §12) and the
+    // hostd-leased host port. The first install carries just the one forward.
+    assertEquals(portForward.exposeCalls.length, 1);
+    const call = portForward.exposeCalls[0];
+    const alloc = subnetForSlot(7);
+    assertEquals(call.sandboxId, "sbx-xp");
+    assertEquals(call.forwards, [{ hostPort: 40_100, guestPort: 8080 }]);
+    assertEquals(call.alloc.guestIp, alloc.guestIp);
+    assertEquals(call.alloc.hostIp, alloc.hostIp);
+    assertEquals(call.alloc.tapName, "sbxtap7");
+
+    // The forward is journaled so a cold reconcile reaps it from the journal.
+    const record = await harness.store.get("sbx-xp");
+    assertEquals(record?.resources.exposedPorts, [
+      { hostPort: 40_100, guestPort: 8080 },
+    ]);
+
+    // A second exposeHttp appends a distinct forward; a repeat host port dedupes.
+    await harness.core.exposeHttp("exec-xp", 9090, 40_101);
+    const after = await harness.store.get("sbx-xp");
+    assertEquals(after?.resources.exposedPorts, [
+      { hostPort: 40_100, guestPort: 8080 },
+      { hostPort: 40_101, guestPort: 9090 },
+    ]);
+    // The 2nd install re-materialized the COMPLETE table: BOTH forwards, so the
+    // first forward's DNAT is not wiped by the replace.
+    assertEquals(portForward.exposeCalls.length, 2);
+    assertEquals(portForward.exposeCalls[1].forwards, [
+      { hostPort: 40_100, guestPort: 8080 },
+      { hostPort: 40_101, guestPort: 9090 },
+    ]);
+
+    await harness.core.exposeHttp("exec-xp", 8080, 40_100);
+    const deduped = await harness.store.get("sbx-xp");
+    assertEquals(deduped?.resources.exposedPorts.length, 2);
+    // A repeat lease re-installs the same full set (no duplicate rule).
+    assertEquals(portForward.exposeCalls.length, 3);
+    assertEquals(portForward.exposeCalls[2].forwards, [
+      { hostPort: 40_100, guestPort: 8080 },
+      { hostPort: 40_101, guestPort: 9090 },
+    ]);
+    // Nothing was reclaimed on any success path.
+    assertEquals(portForward.reclaimed, []);
+  });
+});
+
+Deno.test("exposeHttp re-materializes the full forward table so a 2nd port never wipes the 1st", async () => {
+  await withDir(async (dir) => {
+    const portForward = new FakePortForward();
+    const harness = makeHarness(dir, {
+      planner: networkPlanner(4),
+      portForward,
+    });
+    await harness.core.launch(launchRequest("sbx-mp", "exec-mp"));
+
+    // Two exposeHttp calls on the SAME sandbox (distinct host ports).
+    await harness.core.exposeHttp("exec-mp", 8080, 40_100);
+    await harness.core.exposeHttp("exec-mp", 9090, 40_101);
+
+    // The KEY regression guard: the 2nd install() was called with BOTH forwards
+    // (so both DNAT rules are present), not just the newest — the full-table
+    // replace never destroys the prior forward.
+    assertEquals(portForward.exposeCalls.length, 2);
+    assertEquals(portForward.exposeCalls[0].forwards, [
+      { hostPort: 40_100, guestPort: 8080 },
+    ]);
+    assertEquals(portForward.exposeCalls[1].forwards, [
+      { hostPort: 40_100, guestPort: 8080 },
+      { hostPort: 40_101, guestPort: 9090 },
+    ]);
+
+    // And the journal lists both, so a cold reconcile reaps the whole table.
+    const record = await harness.store.get("sbx-mp");
+    assertEquals(record?.resources.exposedPorts, [
+      { hostPort: 40_100, guestPort: 8080 },
+      { hostPort: 40_101, guestPort: 9090 },
+    ]);
+  });
+});
+
+Deno.test("exposeHttp serializes concurrent calls on the same sandbox (no lost forward)", async () => {
+  await withDir(async (dir) => {
+    const portForward = new FakePortForward();
+    const harness = makeHarness(dir, {
+      planner: networkPlanner(4),
+      portForward,
+    });
+    await harness.core.launch(launchRequest("sbx-cc", "exec-cc"));
+
+    // Fire both exposeHttp CONCURRENTLY. The per-execution lock serializes them,
+    // so the second install re-materializes BOTH forwards; without it, both read
+    // an empty snapshot and the later atomic install wipes the earlier's DNAT.
+    await Promise.all([
+      harness.core.exposeHttp("exec-cc", 8080, 40_100),
+      harness.core.exposeHttp("exec-cc", 9090, 40_101),
+    ]);
+
+    assertEquals(portForward.exposeCalls.length, 2);
+    // The LAST install carries both forwards — the live table holds both DNATs.
+    const last = portForward.exposeCalls[portForward.exposeCalls.length - 1];
+    assertEquals(
+      last.forwards.map((f) => f.hostPort).sort(),
+      [40_100, 40_101],
+    );
+    const record = await harness.store.get("sbx-cc");
+    assertEquals(record?.resources.exposedPorts.length, 2);
+  });
+});
+
+Deno.test("exposeHttp on a netless / not-network-provisioned sandbox fails failedPrecondition", async () => {
+  await withDir(async (dir) => {
+    const portForward = new FakePortForward();
+    // The default PLANNER journals NO network resources (a netless / vsock-only
+    // launch), so the record is ready + live but has no TAP to expose against.
+    const harness = makeHarness(dir, { portForward });
+    await harness.core.launch(launchRequest("sbx-nl", "exec-nl"));
+
+    const error = await assertRejects(
+      () => harness.core.exposeHttp("exec-nl", 8080, 40_100),
+      SupervisorError,
+    );
+    assertEquals(error.code, "SBX_SUP_STATE");
+    // Nothing was installed or journaled.
+    assertEquals(portForward.exposeCalls, []);
+    const record = await harness.store.get("sbx-nl");
+    assertEquals(record?.resources.exposedPorts, []);
+  });
+});
+
+Deno.test("exposeHttp with no dataplane configured fails unavailable", async () => {
+  await withDir(async (dir) => {
+    // No portForward option ⇒ no dataplane: exposeHttp cannot install anything.
+    const harness = makeHarness(dir, { planner: networkPlanner(3) });
+    await harness.core.launch(launchRequest("sbx-nd", "exec-nd"));
+    const error = await assertRejects(
+      () => harness.core.exposeHttp("exec-nd", 8080, 40_100),
+      SupervisorError,
+    );
+    assertEquals(error.code, "SBX_SUP_UNAVAILABLE");
+  });
+});
+
+Deno.test("exposeHttp surfaces a PortForwardError and journals nothing", async () => {
+  await withDir(async (dir) => {
+    const portForward = new FakePortForward();
+    portForward.exposeError = new PortForwardError("nft install failed");
+    const harness = makeHarness(dir, {
+      planner: networkPlanner(9),
+      portForward,
+    });
+    await harness.core.launch(launchRequest("sbx-pe", "exec-pe"));
+
+    const error = await assertRejects(
+      () => harness.core.exposeHttp("exec-pe", 8080, 40_100),
+      SupervisorError,
+    );
+    // A failed nftables install is surfaced (not swallowed); an atomic install
+    // leaves nothing behind, so nothing is journaled.
+    assertEquals(error.code, "SBX_SUP_STATE");
+    const record = await harness.store.get("sbx-pe");
+    assertEquals(record?.resources.exposedPorts, []);
   });
 });

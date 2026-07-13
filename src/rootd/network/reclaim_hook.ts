@@ -37,6 +37,7 @@ import {
 } from "./allocator.ts";
 import type { NetworkController } from "./dataplane.ts";
 import type { DnsmasqController } from "./dnsmasq.ts";
+import type { PortForwardController } from "./port_forward.ts";
 
 export interface EgressReclaimHookOptions {
   /**
@@ -110,6 +111,13 @@ export interface NetworkReclaimHookDeps {
   readonly dnsmasq: DnsmasqController;
   /** Removes the per-sandbox nftables egress table by exact name. */
   readonly egress: EgressController;
+  /**
+   * Removes the per-sandbox exposeHttp forward table (`sbx_pf_<id>`) by exact
+   * name (§6, §8 step 3). Absent when the dataplane predates M10 W6 wiring;
+   * then the port-forward step is skipped (a sandbox with no exposeHttp never
+   * installed one, so this is a clean nothing-to-do).
+   */
+  readonly portForward?: PortForwardController;
 }
 
 /**
@@ -120,8 +128,11 @@ export interface NetworkReclaimHookDeps {
  *
  * 1. reap the per-sandbox dnsmasq (`resources.dnsmasqPidfile`);
  * 2. remove the nftables egress table (`sbx_eg_<id>`, derived from `record.id`);
- * 3. tear the TAP down (slot parsed from `resources.tapName`);
- * 4. release the allocation slot.
+ * 3. remove the exposeHttp forward table (`sbx_pf_<id>`, id-derived — reaped
+ *    unconditionally: an id owns its whole `sbx_pf_` namespace whether or not a
+ *    forward was ever installed, and the reclaim is gone-tolerant, §6);
+ * 4. tear the TAP down (slot parsed from `resources.tapName`);
+ * 5. release the allocation slot.
  *
  * It reclaims from the JOURNAL alone — no live in-memory map — so a cold
  * reconcile after a supervisor crash reaps fully. A throw (a genuine, not
@@ -134,12 +145,14 @@ export class NetworkReclaimHook implements ReclaimHook {
   readonly #network: NetworkController;
   readonly #dnsmasq: DnsmasqController;
   readonly #egress: EgressController;
+  readonly #portForward: PortForwardController | undefined;
 
   constructor(deps: NetworkReclaimHookDeps) {
     this.#allocator = deps.allocator;
     this.#network = deps.network;
     this.#dnsmasq = deps.dnsmasq;
     this.#egress = deps.egress;
+    this.#portForward = deps.portForward;
   }
 
   async reclaim(record: SandboxRecord): Promise<void> {
@@ -155,9 +168,14 @@ export class NetworkReclaimHook implements ReclaimHook {
     }
     // 2. egress table: delete `sbx_eg_<idtoken>` by exact name (id-derived).
     await this.#egress.reclaim({ sandboxId: record.id });
-    // 3. TAP: `ip link del dev sbxtap<slot>` (removes addr + link).
+    // 3. port-forward table: delete `sbx_pf_<idtoken>` by exact name so an
+    //    exposeHttp forward is reaped on terminate + cold reconcile (§6, §8).
+    if (this.#portForward !== undefined) {
+      await this.#portForward.reclaim(record.id);
+    }
+    // 4. TAP: `ip link del dev sbxtap<slot>` (removes addr + link).
     await this.#network.teardown(alloc);
-    // 4. slot: return it to the pool for reuse (idempotent).
+    // 5. slot: return it to the pool for reuse (idempotent).
     this.#allocator.release(slot);
   }
 }

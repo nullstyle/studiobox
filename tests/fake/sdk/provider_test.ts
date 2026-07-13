@@ -26,6 +26,7 @@ import {
   MissingTokenError,
   SandboxCommandError,
   SandboxKillError,
+  UnsupportedFeatureError,
 } from "../../../src/api/errors.ts";
 import { installSandboxProvider } from "../../../src/api/provider.ts";
 import { Sandbox } from "../../../src/api/sandbox.ts";
@@ -55,6 +56,8 @@ interface AssembledStack extends AsyncDisposable {
   readonly identity: ContractIdentity;
   readonly controlSocket: string;
   readonly tunnelSocket: string;
+  /** The fake rootd gateway (records exposeHttp installs for assertions). */
+  readonly gateway: BridgeWireGateway;
 }
 
 /** Stand up the whole in-process hostd+rootd+agent+tunnel stack. */
@@ -96,6 +99,7 @@ async function startStack(): Promise<AssembledStack> {
     identity,
     controlSocket,
     tunnelSocket,
+    gateway,
     async [Symbol.asyncDispose]() {
       await server.close();
       await core.closeAllTunnels();
@@ -200,6 +204,59 @@ Deno.test("StudioboxProvider: extendTimeout returns a later deadline", async () 
       assert(
         deadline.getTime() > Date.now(),
         "the extended deadline is in the future",
+      );
+    } finally {
+      await sandbox.close();
+    }
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("StudioboxProvider: exposeHttp returns a reserved-range loopback URL and leases distinct ports", async () => {
+  await using stack = await startStack();
+  const restore = installSandboxProvider(stack.provider);
+  try {
+    const sandbox = await Sandbox.create();
+    try {
+      const first = await sandbox.exposeHttp({ port: 8080 });
+      // The URL is a reserved-range loopback forward (40100..40199).
+      const match = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(first);
+      assert(match !== null, `unexpected exposeHttp url: ${first}`);
+      const firstPort = Number(match[1]);
+      assert(
+        firstPort >= 40_100 && firstPort <= 40_199,
+        `host port ${firstPort} in reserved range`,
+      );
+      assertEquals(first, "http://127.0.0.1:40100");
+
+      // rootd received the install with the guest port and the leased host port
+      // (the reserve-on-close / reuse lifecycle is proven deterministically in
+      // the hostd control-core test, where server-side settlement is sync).
+      assertEquals(stack.gateway.exposed.length, 1);
+      assertEquals(stack.gateway.exposed[0].guestPort, 8080);
+      assertEquals(stack.gateway.exposed[0].hostPort, 40_100);
+
+      // A second exposeHttp on the same sandbox gets a DISTINCT host port.
+      const second = await sandbox.exposeHttp({ port: 9090 });
+      assertEquals(second, "http://127.0.0.1:40101");
+    } finally {
+      await sandbox.close();
+    }
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("StudioboxProvider: exposeHttp by pid is unsupported", async () => {
+  await using stack = await startStack();
+  const restore = installSandboxProvider(stack.provider);
+  try {
+    const sandbox = await Sandbox.create();
+    try {
+      await assertRejects(
+        () => sandbox.exposeHttp({ pid: 4321 }),
+        UnsupportedFeatureError,
       );
     } finally {
       await sandbox.close();

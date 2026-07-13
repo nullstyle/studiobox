@@ -54,6 +54,9 @@ const ZERO_USAGE: SupervisorMachineUsage = {
 class FakeSupervisorApi implements SupervisorApi {
   readonly machines = new Map<string, SupervisorMachineStatus>();
   readonly killed: string[] = [];
+  readonly exposed: Array<
+    { executionId: string; guestPort: number; hostPort: number }
+  > = [];
 
   launch(request: SupervisorLaunchRequest): Promise<SupervisorMachineStatus> {
     if (this.machines.has(request.executionId)) {
@@ -107,6 +110,20 @@ class FakeSupervisorApi implements SupervisorApi {
   kill(executionId: string): Promise<void> {
     this.machines.delete(executionId);
     this.killed.push(executionId);
+    return Promise.resolve();
+  }
+
+  exposeHttp(
+    executionId: string,
+    guestPort: number,
+    hostPort: number,
+  ): Promise<void> {
+    if (!this.machines.has(executionId)) {
+      return Promise.reject(
+        new SupervisorError("SBX_SUP_NOT_FOUND", "no such execution"),
+      );
+    }
+    this.exposed.push({ executionId, guestPort, hostPort });
     return Promise.resolve();
   }
 
@@ -219,6 +236,28 @@ Deno.test("hostd supervisor client: launch/status/usage/kill/reconcile/ping roun
       const summary = await session.reconcile();
       assertEquals(summary.examined, 0);
       assertEquals(summary.killed, 0);
+    } finally {
+      await session.close();
+    }
+  });
+});
+
+Deno.test("hostd supervisor client: exposeHttp round-trips (executionId, guestPort, hostPort) over the wire", async () => {
+  await withHarness(async (h) => {
+    const session = await open(h);
+    try {
+      await session.launch(launchRequest("xp"));
+      await session.exposeHttp("exec-xp", 8080, 40_100);
+      assertEquals(h.api.exposed, [
+        { executionId: "exec-xp", guestPort: 8080, hostPort: 40_100 },
+      ]);
+
+      // A rootd error arm decodes back to the typed SupervisorError.
+      const error = await assertRejects(
+        () => session.exposeHttp("exec-missing", 8080, 40_101),
+        SupervisorError,
+      );
+      assertEquals(error.code, "SBX_SUP_NOT_FOUND");
     } finally {
       await session.close();
     }

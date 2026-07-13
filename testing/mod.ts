@@ -832,6 +832,8 @@ class FakeSandbox extends Sandbox {
   readonly #closed: Promise<void>;
   #resolveClosed!: () => void;
   #teardown: Promise<void> | undefined;
+  /** Next fake exposeHttp host port (reserved forward range, DESIGN §6). */
+  #nextExposedPort = 40_100;
 
   constructor(internals: FakeSandboxInternals) {
     super();
@@ -907,9 +909,22 @@ class FakeSandbox extends Sandbox {
     );
   }
 
-  /** Port exposure is tunnel (M7) surface. */
-  exposeHttp(): Promise<string> {
-    return Promise.reject(new ImplementationPendingError("Sandbox.exposeHttp"));
+  /**
+   * Expose a guest TCP port and resolve a plausible loopback URL. The fake host
+   * runs no real forwarder, so it leases a distinct port from the same reserved
+   * 40100..40199 range the real host uses (each call gets a new one), letting
+   * host-safe SDK tests exercise the `exposeHttp` -> URL contract. Only
+   * `{ port }` is supported (the wire takes a guest port); `{ pid }` is not.
+   */
+  exposeHttp(target: { port: number } | { pid: number }): Promise<string> {
+    this.#state.assertOpen();
+    if (!("port" in target)) {
+      return Promise.reject(
+        new UnsupportedFeatureError("Sandbox.exposeHttp by pid"),
+      );
+    }
+    const hostPort = this.#nextExposedPort++;
+    return Promise.resolve(`http://127.0.0.1:${hostPort}`);
   }
 
   exposeSsh(): Promise<{ hostname: string; username: string }> {

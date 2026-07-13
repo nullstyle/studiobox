@@ -91,10 +91,12 @@ import {
   EgressController,
   NetworkController,
   type NetworkOrphanSweepResult,
+  PortForwardController,
   reserveLiveSlots,
   type SubnetAllocator,
   sweepNetworkOrphans,
 } from "./network/mod.ts";
+import type { PortForwardInstaller } from "./supervisor_core.ts";
 import type { SandboxRecord } from "../state/model.ts";
 import { BridgeServer } from "./bridge_server.ts";
 import { DEFAULT_BRIDGE_DIAL_TIMEOUT_MS } from "./bridge.ts";
@@ -418,6 +420,14 @@ interface LoadedLaunchPlanner {
    */
   readonly allocator?: SubnetAllocator;
   /**
+   * Installs the per-sandbox exposeHttp DNAT/SNAT for
+   * {@linkcode import("./supervisor_core.ts").SupervisorCore.exposeHttp} (§6),
+   * or `undefined` when no dataplane is configured (exposeHttp then fails
+   * typed-unavailable). The SAME instance backs the {@linkcode NetworkReclaimHook}
+   * so a forward is reclaimed by the exact name it was installed under.
+   */
+  readonly portForward?: PortForwardInstaller;
+  /**
    * Installs the shared NAT / isolation / host-guard seal once before launches
    * are accepted (§3, §12), or `undefined` when no dataplane is configured.
    */
@@ -553,6 +563,11 @@ async function loadLaunchPlanner(path: string): Promise<LoadedLaunchPlanner> {
   const network = new NetworkController(poolOptions);
   const dnsmasq = new DnsmasqController();
   const egress = new EgressController();
+  // ONE port-forward controller: it INSTALLS exposeHttp forwards for the
+  // SupervisorCore and RECLAIMS them from the NetworkReclaimHook, so an
+  // exposed port is torn down by the exact `sbx_pf_<id>` name it was installed
+  // under (§6, §8).
+  const portForward = new PortForwardController();
   const planner = new GoldenArtifactLaunchPlanner({
     ...rest,
     cache,
@@ -561,6 +576,7 @@ async function loadLaunchPlanner(path: string): Promise<LoadedLaunchPlanner> {
       network,
       dnsmasq,
       egress,
+      portForward,
       upstreamDns: resolvedUpstream,
     },
   });
@@ -574,6 +590,7 @@ async function loadLaunchPlanner(path: string): Promise<LoadedLaunchPlanner> {
     planner,
     reclaimHooks,
     allocator,
+    portForward,
     ensureGlobal: () => network.ensureGlobal(),
     sweepNetworkOrphans: (records) =>
       sweepNetworkOrphans({
@@ -651,6 +668,11 @@ async function main(): Promise<void> {
     ...(launch.reclaimHooks.length === 0
       ? {}
       : { reclaimHooks: launch.reclaimHooks }),
+    // exposeHttp installs the per-sandbox DNAT through this controller; absent
+    // when no dataplane is configured (exposeHttp then fails typed-unavailable).
+    ...(launch.portForward === undefined
+      ? {}
+      : { portForward: launch.portForward }),
     buildId: flags.buildId,
   });
 

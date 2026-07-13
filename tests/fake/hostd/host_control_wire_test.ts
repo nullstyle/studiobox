@@ -115,6 +115,9 @@ class FakeClock implements Clock {
 class FakeGateway implements RootdGateway {
   readonly launched: SupervisorLaunchRequest[] = [];
   readonly killed: string[] = [];
+  readonly exposed: Array<
+    { executionId: string; guestPort: number; hostPort: number }
+  > = [];
 
   launch(request: SupervisorLaunchRequest): Promise<SupervisorMachineStatus> {
     this.launched.push(request);
@@ -147,6 +150,15 @@ class FakeGateway implements RootdGateway {
 
   kill(executionId: string): Promise<void> {
     this.killed.push(executionId);
+    return Promise.resolve();
+  }
+
+  exposeHttp(
+    executionId: string,
+    guestPort: number,
+    hostPort: number,
+  ): Promise<void> {
+    this.exposed.push({ executionId, guestPort, hostPort });
     return Promise.resolve();
   }
 

@@ -473,6 +473,15 @@ export class StudioboxProvider implements SandboxProvider {
         );
         return new Date(Number(result.deadline!.deadlineUnixMs));
       },
+      exposeHttp: async (guestPort: number): Promise<string> => {
+        // hostd leases a host port and asks rootd to install the DNAT; the
+        // `exposure` arm carries the loopback URL to dial (M10 §6).
+        const result = expectArm(
+          await sandboxStub.exposeHttp(guestPort, { timeoutMs }),
+          "exposure",
+        );
+        return result.exposure!.url;
+      },
     });
   }
 

@@ -88,6 +88,16 @@ export interface RootdGateway {
   /** Immediate SIGKILL + full reclaim of one execution. */
   kill(executionId: string): Promise<void>;
   /**
+   * Install a host→guest port forward for a ready execution (M10 §6): rootd
+   * installs the per-sandbox loopback DNAT/SNAT from the hostd-leased `hostPort`
+   * to `<guestIp>:<guestPort>` and journals it. hostd owns the host-port lease.
+   */
+  exposeHttp(
+    executionId: string,
+    guestPort: number,
+    hostPort: number,
+  ): Promise<void>;
+  /**
    * Authorize one guest-agent bridge for a live execution: rootd mints a
    * one-shot grant naming a per-bridge loopback UDS + a 32-byte
    * `bridgeCredential`, and stands up the bridge splice server behind it (the
@@ -267,6 +277,13 @@ function buildSession(
     },
     kill: async (executionId) => {
       const result = await supervisor.kill(executionId, { timeoutMs });
+      if (result.which === "error") throw wireErrorToSupervisor(result.error);
+    },
+    exposeHttp: async (executionId, guestPort, hostPort) => {
+      const result = await supervisor.exposeHttp(
+        { executionId, guestPort, hostPort },
+        { timeoutMs },
+      );
       if (result.which === "error") throw wireErrorToSupervisor(result.error);
     },
     openBridge: async (request) => {

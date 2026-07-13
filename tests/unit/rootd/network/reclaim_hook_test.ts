@@ -1,9 +1,10 @@
 /**
  * Host-safe coverage of the composed {@link NetworkReclaimHook} (M10 §8): from
  * the JOURNAL alone (no live in-memory state) it reaps dnsmasq, removes the
- * egress table, tears the TAP down, and releases the slot — in that order, each
- * by exact name — so a cold reconcile after a crash reclaims fully. A record
- * with no journaled TAP is a clean no-op (netless / never-provisioned).
+ * egress table, removes the exposeHttp forward table, tears the TAP down, and
+ * releases the slot — in that order, each by exact name — so a cold reconcile
+ * after a crash reclaims fully. A record with no journaled TAP is a clean no-op
+ * (netless / never-provisioned).
  */
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -24,6 +25,10 @@ import {
   NetworkReclaimHook,
   slotOfTapName,
 } from "../../../../src/rootd/network/reclaim_hook.ts";
+import {
+  PortForwardController,
+  portForwardTableName,
+} from "../../../../src/rootd/network/port_forward.ts";
 import { egressTableName } from "../../../../src/rootd/network/ruleset.ts";
 import type { SandboxRecord } from "../../../../src/state/model.ts";
 
@@ -97,6 +102,7 @@ function makeHook(): {
   hook: NetworkReclaimHook;
   networkRunner: FakeRunner;
   egressRunner: FakeRunner;
+  portForwardRunner: FakeRunner;
   reader: FakeReader;
   remover: FakeRemover;
   signaller: FakeSignaller;
@@ -104,6 +110,7 @@ function makeHook(): {
 } {
   const networkRunner = new FakeRunner();
   const egressRunner = new FakeRunner();
+  const portForwardRunner = new FakeRunner();
   const reader = new FakeReader({ "/run/studiobox/dns/5.pid": "9182\n" });
   const remover = new FakeRemover();
   const signaller = new FakeSignaller();
@@ -113,11 +120,13 @@ function makeHook(): {
     network: new NetworkController({ runner: networkRunner }),
     dnsmasq: new DnsmasqController({ reader, remover, signaller }),
     egress: new EgressController({ runner: egressRunner }),
+    portForward: new PortForwardController({ runner: portForwardRunner }),
   });
   return {
     hook,
     networkRunner,
     egressRunner,
+    portForwardRunner,
     reader,
     remover,
     signaller,
@@ -125,7 +134,7 @@ function makeHook(): {
   };
 }
 
-Deno.test("NetworkReclaimHook.reclaim reaps dnsmasq, egress, TAP, and slot from the journal", async () => {
+Deno.test("NetworkReclaimHook.reclaim reaps dnsmasq, egress, port-forward, TAP, and slot from the journal", async () => {
   const h = makeHook();
   // The slot the journal cites is currently reserved (the cold-start rebuild).
   h.allocator.reserve(5);
@@ -145,11 +154,20 @@ Deno.test("NetworkReclaimHook.reclaim reaps dnsmasq, egress, TAP, and slot from 
     h.egressRunner.calls[0].stdin.includes(egressTableName("sbx-reclaim")),
     h.egressRunner.calls[0].stdin,
   );
-  // 3. TAP: ip link del dev sbxtap5.
+  // 3. port-forward: delete the id-derived `sbx_pf_<id>` table by exact name.
+  assertEquals(h.portForwardRunner.calls.length, 1);
+  assertEquals(h.portForwardRunner.calls[0].bin, "nft");
+  assert(
+    h.portForwardRunner.calls[0].stdin.includes(
+      portForwardTableName("sbx-reclaim"),
+    ),
+    h.portForwardRunner.calls[0].stdin,
+  );
+  // 4. TAP: ip link del dev sbxtap5.
   assertEquals(h.networkRunner.calls, [
     { bin: "ip", args: ["link", "del", "dev", "sbxtap5"], stdin: "" },
   ]);
-  // 4. slot: released back to the pool.
+  // 5. slot: released back to the pool.
   assertEquals(h.allocator.inUse, 0);
 });
 
@@ -159,6 +177,7 @@ Deno.test("NetworkReclaimHook.reclaim is a clean no-op when no TAP is journaled"
   assertEquals(h.signaller.calls, []);
   assertEquals(h.remover.removes, []);
   assertEquals(h.egressRunner.calls, []);
+  assertEquals(h.portForwardRunner.calls, []);
   assertEquals(h.networkRunner.calls, []);
 });
 
@@ -170,6 +189,10 @@ Deno.test("NetworkReclaimHook.reclaim tolerates a record with a TAP but no dnsma
   await h.hook.reclaim(record({ dnsmasqPidfile: undefined }));
   assertEquals(h.signaller.calls, []);
   assertEquals(h.egressRunner.calls.length, 1);
+  // The port-forward table is reaped unconditionally (§8 step 3): a sandbox
+  // that never called exposeHttp still owns its `sbx_pf_<id>` namespace, and
+  // the reclaim is gone-tolerant.
+  assertEquals(h.portForwardRunner.calls.length, 1);
   assertEquals(h.networkRunner.calls.length, 1);
   assertEquals(h.allocator.inUse, 0);
 });

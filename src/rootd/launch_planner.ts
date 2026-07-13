@@ -57,6 +57,7 @@ import type {
   DnsmasqController,
   EgressController,
   NetworkController,
+  PortForwardController,
   SubnetAllocation,
   SubnetAllocator,
 } from "./network/mod.ts";
@@ -91,6 +92,14 @@ export interface LaunchPlannerDataplane {
   readonly dnsmasq: DnsmasqController;
   /** Applies / reclaims the per-sandbox nftables egress table. */
   readonly egress: EgressController;
+  /**
+   * Reclaims the per-sandbox exposeHttp forward table (`sbx_pf_<id>`) on
+   * terminate + cold reconcile (§6, §8). exposeHttp itself INSTALLS forwards
+   * through {@linkcode import("./supervisor_core.ts").SupervisorCore} (which
+   * holds the same controller); the planner only needs it to compose the
+   * {@linkcode NetworkReclaimHook}. Absent ⇒ no port-forward reclaim step.
+   */
+  readonly portForward?: PortForwardController;
   /** Upstream resolver the per-sandbox dnsmasq forwards to (`--server`). */
   readonly upstreamDns: string;
 }
@@ -544,6 +553,11 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
       network: this.#dataplane.network,
       dnsmasq: this.#dataplane.dnsmasq,
       egress: this.#dataplane.egress,
+      // The exposeHttp forward table (`sbx_pf_<id>`) is reaped alongside the
+      // rest of the dataplane (§8 step 3). Absent ⇒ pre-W6 config, no step.
+      ...(this.#dataplane.portForward === undefined
+        ? {}
+        : { portForward: this.#dataplane.portForward }),
     });
   }
 }

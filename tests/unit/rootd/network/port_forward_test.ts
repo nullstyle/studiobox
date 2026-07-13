@@ -71,13 +71,32 @@ const EXPECTED_APPLY = [
   "",
 ].join("\n");
 
+// Two forwards share the sandbox's guestIp/hostIp: one DNAT + one SNAT rule
+// PER forward, so a second exposeHttp never wipes the first's DNAT.
+const EXPECTED_APPLY_MULTI = [
+  "add table ip sbx_pf_sbx_2daudit",
+  "delete table ip sbx_pf_sbx_2daudit",
+  "table ip sbx_pf_sbx_2daudit {",
+  "\tchain output {",
+  "\t\ttype nat hook output priority -100; policy accept;",
+  "\t\tip daddr 127.0.0.1 tcp dport 40100 dnat to 10.201.0.2:8080",
+  "\t\tip daddr 127.0.0.1 tcp dport 40101 dnat to 10.201.0.2:9090",
+  "\t}",
+  "\tchain postrouting {",
+  "\t\ttype nat hook postrouting priority 100; policy accept;",
+  "\t\tip daddr 10.201.0.2 tcp dport 8080 snat to 10.201.0.1",
+  "\t\tip daddr 10.201.0.2 tcp dport 9090 snat to 10.201.0.1",
+  "\t}",
+  "}",
+  "",
+].join("\n");
+
 Deno.test("expose installs the per-sandbox sbx_pf_ table with the exact nft script", async () => {
   const runner = new FakeRunner();
   const controller = new PortForwardController({ runner });
   const tableName = await controller.expose(subnetForSlot(0), {
     sandboxId: "sbx-audit",
-    hostPort: 40100,
-    guestPort: 8080,
+    forwards: [{ hostPort: 40100, guestPort: 8080 }],
   });
 
   assertEquals(tableName, "sbx_pf_sbx_2daudit");
@@ -85,6 +104,28 @@ Deno.test("expose installs the per-sandbox sbx_pf_ table with the exact nft scri
   assertEquals(runner.calls[0].bin, "nft");
   assertEquals(runner.calls[0].args, ["-f", "-"]);
   assertEquals(runner.calls[0].stdin, EXPECTED_APPLY);
+});
+
+Deno.test("expose installs one DNAT+SNAT rule per forward (multi-port replace)", async () => {
+  const runner = new FakeRunner();
+  const controller = new PortForwardController({ runner });
+  const tableName = await controller.expose(subnetForSlot(0), {
+    sandboxId: "sbx-audit",
+    forwards: [
+      { hostPort: 40100, guestPort: 8080 },
+      { hostPort: 40101, guestPort: 9090 },
+    ],
+  });
+
+  assertEquals(tableName, "sbx_pf_sbx_2daudit");
+  assertEquals(runner.calls.length, 1);
+  // The table carries BOTH forwards' DNAT + SNAT — the full replace re-renders
+  // the complete set, so neither forward is dropped.
+  assertEquals(runner.calls[0].stdin, EXPECTED_APPLY_MULTI);
+  const dnats = runner.calls[0].stdin.split("\n").filter((l) =>
+    l.includes("dnat to")
+  );
+  assertEquals(dnats.length, 2);
 });
 
 Deno.test("expose surfaces an nft failure as PortForwardError", async () => {
@@ -96,8 +137,7 @@ Deno.test("expose surfaces an nft failure as PortForwardError", async () => {
     () =>
       controller.expose(subnetForSlot(0), {
         sandboxId: "sbx-audit",
-        hostPort: 40100,
-        guestPort: 8080,
+        forwards: [{ hostPort: 40100, guestPort: 8080 }],
       }),
     PortForwardError,
   );

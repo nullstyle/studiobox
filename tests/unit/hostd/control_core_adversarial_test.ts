@@ -117,6 +117,10 @@ class FakeGateway implements RootdGateway {
     return Promise.resolve();
   }
 
+  exposeHttp(): Promise<void> {
+    return Promise.resolve();
+  }
+
   openBridge(): Promise<never> {
     return Promise.reject(new Error("fake gateway does not open bridges"));
   }

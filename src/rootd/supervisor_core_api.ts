@@ -166,6 +166,20 @@ export interface SupervisorApi {
    */
   openBridge(request: SupervisorBridgeRequest): Promise<SupervisorBridgeGrant>;
 
+  /**
+   * Install a host→guest port forward for a ready, network-provisioned
+   * execution (M10 §6): rootd installs the per-sandbox loopback DNAT/SNAT
+   * (`sbx_pf_<id>`) that maps the hostd-leased `hostPort` to `<guestIp>:<guestPort>`
+   * and journals `resources.exposedPorts`. hostd owns the host-port lease and
+   * passes the allocated `hostPort`. Rejects a netless / not-ready sandbox with
+   * `SBX_SUP_STATE`, and surfaces a failed nftables install as a typed error.
+   */
+  exposeHttp(
+    executionId: string,
+    guestPort: number,
+    hostPort: number,
+  ): Promise<void>;
+
   /** Graceful stop (escalating inside the adapter), then full reclaim. */
   shutdown(executionId: string): Promise<void>;
 

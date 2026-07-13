@@ -520,22 +520,23 @@ function createSandboxCapability(
         return { which: "error", error: hostFaultToWire(error) };
       }
     },
-    exposeHttp: (): Promise<WireExposureResult> => {
+    exposeHttp: async (guestPort): Promise<WireExposureResult> => {
       try {
         gate.assertAuthorized();
-        // Port forwarding + nftables egress land with M10; fail typed.
-        return Promise.resolve({
-          which: "error",
-          error: wireError(
-            "unsupportedFeature",
-            "exposeHttp is not yet wired (M10 egress path)",
-          ),
-        });
+        // hostd leases the host port, asks rootd to install the DNAT, and
+        // returns the loopback URL (M10 §6; see control_core.exposeHttp). The
+        // wire `guestPort` is a UInt16; the core bounds it further.
+        const exposure = await core.exposeHttp(sandboxId, Number(guestPort));
+        return {
+          which: "exposure",
+          exposure: {
+            guestPort: exposure.guestPort,
+            hostPort: exposure.hostPort,
+            url: exposure.url,
+          },
+        };
       } catch (error) {
-        return Promise.resolve({
-          which: "error",
-          error: hostFaultToWire(error),
-        });
+        return { which: "error", error: hostFaultToWire(error) };
       }
     },
     kill: (): Promise<WireEmptyResult> => {

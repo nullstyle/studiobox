@@ -71,6 +71,12 @@ export interface SandboxLifecycle {
   kill(): Promise<void>;
   /** Extend the lease; resolves the new absolute deadline. */
   extendTimeout(milliseconds: number): Promise<Date>;
+  /**
+   * Expose a guest TCP port on the host over the host control plane; resolves
+   * the loopback URL (`http://127.0.0.1:<hostPort>`). Absent when the provider
+   * does not support exposeHttp.
+   */
+  exposeHttp?(guestPort: number): Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -801,9 +807,24 @@ export class AgentBackedSandbox extends Sandbox {
     return await this.#lifecycle.extendTimeout(parseDurationMs(timeout));
   }
 
-  /** Port exposure rides the M10 egress plane. */
-  exposeHttp(): Promise<string> {
-    return Promise.reject(new ImplementationPendingError("Sandbox.exposeHttp"));
+  /**
+   * Expose a guest TCP port on the host and resolve the loopback URL
+   * (`http://127.0.0.1:<hostPort>`). Only `{ port }` is supported (the wire
+   * `HostSandbox.exposeHttp` takes a guest port); `{ pid }` is not.
+   */
+  exposeHttp(target: { port: number } | { pid: number }): Promise<string> {
+    this.#state.assertOpen();
+    if (!("port" in target)) {
+      return Promise.reject(
+        new UnsupportedFeatureError("Sandbox.exposeHttp by pid"),
+      );
+    }
+    if (this.#lifecycle.exposeHttp === undefined) {
+      return Promise.reject(
+        new UnsupportedFeatureError("Sandbox.exposeHttp"),
+      );
+    }
+    return this.#lifecycle.exposeHttp(target.port);
   }
   exposeSsh(): Promise<{ hostname: string; username: string }> {
     return Promise.reject(new UnsupportedFeatureError("Sandbox.exposeSsh"));
