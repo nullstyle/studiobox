@@ -41,6 +41,15 @@ export class FakeHostRunner implements HostCommandRunner {
   readonly daemonActive = new Map<string, string>();
   /** Whether `/dev/kvm` is present in the guest. */
   kvm = true;
+  // --- golden-bake fakes (bake.ts) ---
+  /** `git ls-files` output on the host (non-empty = a real checkout). */
+  gitFiles = "deno.json\ntools/build_golden_set.ts\nsrc/agent/main.ts\n";
+  /** Manifest hash the fake bake "prints" as its final JSON line. */
+  bakeHash = "e".repeat(64);
+  /** Cached golden hash the probe returns (empty = cache miss). */
+  cachedGoldenHash = "";
+  /** When true, the bake command exits nonzero. */
+  bakeFails = false;
 
   run(
     bin: string,
@@ -68,6 +77,10 @@ export class FakeHostRunner implements HostCommandRunner {
       this.guestFiles.add(args[args.length - 1]);
       return ok();
     }
+    // Host-side bake commands (HostEnv.hostExec / no-lima copyFileIn).
+    if (bin === "git" && args.includes("ls-files")) return ok(this.gitFiles);
+    if (bin === "tar") return ok();
+    if (bin === "cp") return ok();
     return ok();
   }
 
@@ -137,6 +150,28 @@ export class FakeHostRunner implements HostCommandRunner {
       inner = sudoWrap[1].replaceAll(`'\\''`, "'");
     }
     inner = inner.replace(/^set -euo pipefail;\s*/, "");
+
+    // --- golden-bake discriminators (order-independent; checked first) ---
+    // Marker write: `printf '%s' <hash> | sudo tee …/golden.hash`. Record the
+    // hash so a subsequent probe on the same runner is a cache hit.
+    if (inner.includes("tee") && inner.includes("golden.hash")) {
+      const m = /printf '%s' ([0-9a-f]{64})/.exec(inner);
+      if (m !== null) this.cachedGoldenHash = m[1];
+      return ok();
+    }
+    // Cache probe: `[ -f …/golden.hash ]; … [ -d …/cache/$h ] && printf …`.
+    if (inner.includes("golden.hash") && inner.includes("[ -d")) {
+      return ok(this.cachedGoldenHash);
+    }
+    // The bake itself: `… deno run … tools/build_golden_set.ts … | tail -n1`.
+    if (inner.includes("build_golden_set.ts")) {
+      return this.bakeFails ? failed(1) : ok(JSON.stringify({
+        hash: this.bakeHash,
+        cacheRoot: "/var/lib/studiobox/cache",
+        created: true,
+        arch: "aarch64",
+      }));
+    }
 
     if (/test -e \/dev\/kvm/.test(inner)) {
       return this.kvm ? ok() : failed();

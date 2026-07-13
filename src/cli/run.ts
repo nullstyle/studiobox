@@ -91,12 +91,14 @@ export async function runCli(
               "run `studiobox host provision` after compiling them.",
           );
         }
-        return 0;
+        // A requested bake that failed leaves a control-plane-only host — honest
+        // nonzero exit even though the daemons are up (warning already printed).
+        return bakeExitCode(result.provision, "host up", out);
       }
       case "provision": {
         const result = await lifecycle.provision(flags.rotateToken);
         formatProvision(result, flags.json, out);
-        return 0;
+        return bakeExitCode(result, "host provision", out);
       }
       case "down": {
         await lifecycle.down();
@@ -144,6 +146,10 @@ function defaultLifecycleFactory(
       ...(flags.manifestHash === undefined
         ? {}
         : { launchConfig: { manifestHash: flags.manifestHash } }),
+      // --bake resolves its source root via HostLifecycle's default
+      // resolveSourceRoot (from-JSR → fails fast). Mutually exclusive with
+      // --manifest-hash (enforced in parseCliArgs).
+      ...(flags.bake ? { bake: flags.rebuild ? { rebuild: true } : {} } : {}),
       ...(flags.controlPort === undefined ? {} : {
         ports: {
           control: flags.controlPort,
@@ -152,6 +158,27 @@ function defaultLifecycleFactory(
         },
       }),
     });
+}
+
+/**
+ * Exit code for a provision-bearing subcommand: `1` when a requested bake
+ * failed (the control plane is up but `Sandbox.create` is unavailable — an
+ * honest CI signal), else `0`. The detailed failure warning is already in the
+ * formatted output; add a one-line pointer.
+ */
+function bakeExitCode(
+  result: ProvisionResult,
+  command: string,
+  out: (line: string) => void,
+): number {
+  if (result.bakeFailed) {
+    out(
+      `${command}: bake FAILED — Sandbox.create unavailable; re-run once the ` +
+        `cause is fixed (see the warning above).`,
+    );
+    return 1;
+  }
+  return 0;
 }
 
 function formatProvision(

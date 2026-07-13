@@ -161,6 +161,43 @@ export class HostEnv {
   }
 
   /**
+   * Run a command on the HOST machine (the mac under `lima`; the local box
+   * under `no-lima`) — NOT in the guest. Used by the golden bake to build the
+   * source tarball with `git` + `tar` before shipping it in. Identical in both
+   * modes because the host IS the CLI machine. Flows through the same runner so
+   * a fake records the argv.
+   */
+  async hostExec(
+    bin: string,
+    args: readonly string[],
+    options: { check?: boolean; uncapped?: boolean } = {},
+  ): Promise<HostCommandResult> {
+    const runOptions = options.uncapped === true ? { uncapped: true } : {};
+    return options.check === true
+      ? await runChecked(this.#runner, bin, args, runOptions)
+      : await this.#runner.run(bin, args, runOptions);
+  }
+
+  /**
+   * Deliver a host file to a USER-WRITABLE guest path with a plain copy — no
+   * `sudo install` staging (unlike {@link copyIn}). Used for the bake tarball,
+   * which lands under `/tmp` (owned by the unprivileged lima user), so a single
+   * `limactl cp` is both correct and trivially assertable. In `no-lima` mode the
+   * host is the guest, so it is a local `cp`.
+   */
+  async copyFileIn(localPath: string, remotePath: string): Promise<void> {
+    if (this.#mode === "no-lima") {
+      await runChecked(this.#runner, "cp", [localPath, remotePath]);
+      return;
+    }
+    await runChecked(this.#runner, this.#limactl, [
+      "cp",
+      localPath,
+      `${this.#name}:${remotePath}`,
+    ]);
+  }
+
+  /**
    * Deliver a host-side file into the target. In lima mode this is
    * `limactl cp <local> <name>:<remote>` — the pinned token-delivery path
    * (DESIGN.md §8), never the forwarded port. In no-lima mode it is a local

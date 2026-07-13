@@ -62,6 +62,18 @@ aims to follow [semantic versioning](https://semver.org/) from 1.0 onward.
   the one per-host input) and wires the rootd unit's `--launch-config`. Without
   it, `host up` still brings up a control-plane-only host and records a warning
   that `Sandbox.create` needs a golden set.
+- **`host up|provision --bake`** — zero-manual golden set. From a local
+  checkout, `--bake` bakes the golden artifact set inside the guest (installs
+  Deno, ships the source tree in as a git-tracked tarball since the host VM is
+  mount-less, runs `tools/build_golden_set.ts` into the cache rootd reads) and
+  auto-wires the resulting manifest hash into the launch config — so
+  `studiobox host up --bake` alone yields a `Sandbox.create()`-capable host,
+  proven end to end on real Firecracker. The bake is cached by manifest hash (a
+  warm re-run skips it in ~2s; `--rebuild` forces a fresh bake), a bake failure
+  degrades to a control-plane-only host (nonzero exit, loud warning with the
+  build-log tail) rather than aborting, and a from-JSR `--bake` fails fast with
+  a clear "needs a local checkout" message. `--bake` and `--manifest-hash` are
+  mutually exclusive.
 
 ### Fixed
 

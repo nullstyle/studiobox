@@ -38,6 +38,10 @@ export interface HostFlags {
   readonly json: boolean;
   /** Re-mint the bootstrap token even if one exists (up/provision). */
   readonly rotateToken: boolean;
+  /** Bake the golden set in-guest, enabling `Sandbox.create` (up/provision). */
+  readonly bake: boolean;
+  /** Force a fresh golden bake, ignoring the cache (with `--bake`). */
+  readonly rebuild: boolean;
   /** Override the Lima instance name (default `studiobox-host-<arch>`). */
   readonly name?: string;
   /** Override the target arch (default `Deno.build.arch`). */
@@ -96,7 +100,9 @@ host flags:
   --build-dir <dir>  directory holding the compiled daemons (default .build)
   --hostd-bin <path> explicit studiobox-hostd binary source
   --rootd-bin <path> explicit studiobox-rootd binary source
-  --manifest-hash <h> golden-set manifest hash (enables Sandbox.create)`;
+  --manifest-hash <h> golden-set manifest hash (enables Sandbox.create)
+  --bake             bake the golden set in-guest, enabling Sandbox.create (needs a local checkout)
+  --rebuild          force a fresh golden bake, ignoring the cache (with --bake)`;
 
 /** Raised on any malformed invocation; carries the usage text. */
 export class CliUsageError extends Error {
@@ -172,6 +178,8 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   let noLima = false;
   let json = false;
   let rotateToken = false;
+  let bake = false;
+  let rebuild = false;
   let name: string | undefined;
   let arch: ArtifactArch | undefined;
   let controlPort: number | undefined;
@@ -198,6 +206,8 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
     else if (arg === "--no-lima") noLima = true;
     else if (arg === "--json") json = true;
     else if (arg === "--rotate-token") rotateToken = true;
+    else if (arg === "--bake") bake = true;
+    else if (arg === "--rebuild") rebuild = true;
     else if (is("--name")) name = take("--name");
     else if (is("--arch")) arch = parseArch(take("--arch"));
     else if (is("--control-port")) {
@@ -210,6 +220,18 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
     } else throw new CliUsageError(`unknown flag: ${arg}`);
   }
 
+  // --bake and --manifest-hash are the two mutually-exclusive ways to populate
+  // the launch config's manifest hash; --rebuild only means anything with --bake.
+  if (bake && manifestHash !== undefined) {
+    throw new CliUsageError(
+      "use either --bake (bake in-guest) or --manifest-hash (supply a " +
+        "pre-baked hash), not both",
+    );
+  }
+  if (rebuild && !bake) {
+    throw new CliUsageError("--rebuild only applies with --bake");
+  }
+
   return {
     kind: "host",
     sub,
@@ -218,6 +240,8 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
       noLima,
       json,
       rotateToken,
+      bake,
+      rebuild,
       ...(name === undefined ? {} : { name }),
       ...(arch === undefined ? {} : { arch }),
       ...(controlPort === undefined ? {} : { controlPort }),

@@ -34,6 +34,8 @@ Deno.test("parseCliArgs: every host subcommand parses with default flags", () =>
       noLima: false,
       json: false,
       rotateToken: false,
+      bake: false,
+      rebuild: false,
     });
   }
 });
@@ -46,12 +48,35 @@ Deno.test("parseCliArgs: boolean flags set on any subcommand", () => {
     "--no-lima",
     "--json",
     "--rotate-token",
+    "--bake",
   ]);
   assert(parsed.kind === "host");
   assertEquals(parsed.flags.recreate, true);
   assertEquals(parsed.flags.noLima, true);
   assertEquals(parsed.flags.json, true);
   assertEquals(parsed.flags.rotateToken, true);
+  assertEquals(parsed.flags.bake, true);
+});
+
+Deno.test("parseCliArgs: --bake and --manifest-hash are mutually exclusive", () => {
+  assertThrows(
+    () =>
+      parseCliArgs(["host", "up", "--bake", "--manifest-hash", "a".repeat(64)]),
+    CliUsageError,
+    "not both",
+  );
+});
+
+Deno.test("parseCliArgs: --rebuild requires --bake", () => {
+  assertThrows(
+    () => parseCliArgs(["host", "up", "--rebuild"]),
+    CliUsageError,
+    "only applies with --bake",
+  );
+  // With --bake it is accepted.
+  const parsed = parseCliArgs(["host", "up", "--bake", "--rebuild"]);
+  assert(parsed.kind === "host");
+  assertEquals(parsed.flags.rebuild, true);
 });
 
 Deno.test("parseCliArgs: value flags (space form)", () => {

@@ -33,6 +33,7 @@ import {
 } from "./lima_template.ts";
 import { DenoLocalFs, type LocalFs } from "./local_fs.ts";
 import {
+  type BakeRequest,
   defaultCompatPath,
   defaultDaemonBinary,
   defaultHostTokenPath,
@@ -40,8 +41,21 @@ import {
   provisionHost,
   type ProvisionResult,
 } from "./provision.ts";
+import { BakeSourceUnavailableError, defaultSourceRoot } from "./bake.ts";
 import { type DoctorReport, type HostProbe, runDoctor } from "./doctor.ts";
 import { createHostProbe } from "./host_client.ts";
+
+/**
+ * Bake inputs a caller supplies WITHOUT the source root — the lifecycle resolves
+ * that itself (via {@linkcode HostLifecycleOptions.resolveSourceRoot}) so it can
+ * fail fast on a from-JSR invocation before touching the VM.
+ */
+export interface HostBakeOptions {
+  /** Ignore the cache and force a fresh bake. @default false */
+  readonly rebuild?: boolean;
+  /** Optional dataplane/strategy fields to fold into the launch config. */
+  readonly launch?: Omit<LaunchConfigInput, "manifestHash">;
+}
 
 /** Options for {@linkcode HostLifecycle}. */
 export interface HostLifecycleOptions {
@@ -71,8 +85,20 @@ export interface HostLifecycleOptions {
    * Enable rootd's launch planner so `Sandbox.create` boots a real microVM.
    * The one required field is the baked golden set's `manifestHash` (printed by
    * `tools/build_golden_set.ts`); omit to bring up a control-plane-only host.
+   * Mutually exclusive with {@linkcode bake}.
    */
   readonly launchConfig?: LaunchConfigInput;
+  /**
+   * Bake the golden set in-guest and auto-wire its hash (the `--bake` path). The
+   * source root is resolved via {@linkcode resolveSourceRoot} (fails fast from
+   * JSR). Mutually exclusive with {@linkcode launchConfig}.
+   */
+  readonly bake?: HostBakeOptions;
+  /**
+   * Resolve the host source-tree root for {@linkcode bake} (test seam).
+   * @default {@linkcode import("./bake.ts").defaultSourceRoot}
+   */
+  readonly resolveSourceRoot?: () => string | undefined;
   /** Overrides passed to {@linkcode renderLimaTemplate}. */
   readonly templateOptions?: LimaTemplateOptions;
   /** Render the template to a path `createVm` consumes. @default temp file */
@@ -137,6 +163,8 @@ export class HostLifecycle {
   readonly #rootdBinarySource: string;
   readonly #compatSource: string;
   readonly #launchConfig: LaunchConfigInput | undefined;
+  readonly #bake: HostBakeOptions | undefined;
+  readonly #resolveSourceRoot: () => string | undefined;
   readonly #templateOptions: LimaTemplateOptions;
   readonly #writeTemplate: (yaml: string) => Promise<string>;
   readonly #tokenFactory: (() => Uint8Array) | undefined;
@@ -158,6 +186,8 @@ export class HostLifecycle {
       defaultDaemonBinary(buildDir, "studiobox-rootd", this.#arch);
     this.#compatSource = options.compatSource ?? defaultCompatPath();
     this.#launchConfig = options.launchConfig;
+    this.#bake = options.bake;
+    this.#resolveSourceRoot = options.resolveSourceRoot ?? defaultSourceRoot;
     this.#templateOptions = options.templateOptions ??
       { ports: this.#ports };
     this.#writeTemplate = options.writeTemplate ?? defaultWriteTemplate;
@@ -191,6 +221,10 @@ export class HostLifecycle {
   async up(
     options: { recreate?: boolean; rotateToken?: boolean } = {},
   ): Promise<HostUpResult> {
+    // Resolve --bake's source root BEFORE any VM create so a from-JSR --bake
+    // fails fast instead of orphaning a half-created host. (Discarded here; the
+    // provision() call below re-resolves and threads it.)
+    this.#resolveBake();
     const recreate = options.recreate ?? false;
     let created = false;
     if (this.#mode === "lima") {
@@ -230,6 +264,7 @@ export class HostLifecycle {
 
   /** Run the ordered, idempotent provisioning sequence. */
   provision(rotateToken = false): Promise<ProvisionResult> {
+    const bake = this.#resolveBake();
     return provisionHost({
       env: this.#env,
       fs: this.#fs,
@@ -239,7 +274,11 @@ export class HostLifecycle {
       hostdBinarySource: this.#hostdBinarySource,
       rootdBinarySource: this.#rootdBinarySource,
       compatSource: this.#compatSource,
-      ...(this.#launchConfig === undefined
+      // bake and launchConfig are mutually exclusive (enforced at the CLI); pass
+      // bake when requested, else the supplied launch config.
+      ...(bake !== undefined
+        ? { bake }
+        : this.#launchConfig === undefined
         ? {}
         : { launchConfig: this.#launchConfig }),
       rotateToken,
@@ -248,6 +287,24 @@ export class HostLifecycle {
         ? {}
         : { tokenFactory: this.#tokenFactory }),
     });
+  }
+
+  /**
+   * Resolve a full {@linkcode BakeRequest} (with source root) when `--bake` was
+   * requested, else `undefined`. Throws {@linkcode BakeSourceUnavailableError}
+   * when there is no local source tree to bake from (a from-JSR invocation).
+   */
+  #resolveBake(): BakeRequest | undefined {
+    if (this.#bake === undefined) return undefined;
+    const sourceRoot = this.#resolveSourceRoot();
+    if (sourceRoot === undefined) throw new BakeSourceUnavailableError();
+    return {
+      sourceRoot,
+      ...(this.#bake.rebuild === undefined
+        ? {}
+        : { rebuild: this.#bake.rebuild }),
+      ...(this.#bake.launch === undefined ? {} : { launch: this.#bake.launch }),
+    };
   }
 
   /** Stop the VM (lima) or the systemd units (`--no-lima`). */

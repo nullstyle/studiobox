@@ -18,7 +18,8 @@
  *   5. `token`        — mint + install the bootstrap tokens, off the forwarded
  *                       port (DESIGN.md §8). Idempotent: a re-run does NOT
  *                       rotate an existing token unless `rotateToken`.
- *   6. `systemd`      — write the units, `daemon-reload`, `enable --now`.
+ *   6. `systemd`      — write the units, `daemon-reload`, `enable`, then
+ *                       `restart` so the live daemons match the written config.
  *
  * Everything runs through the injected {@linkcode HostEnv} (limactl/bash) and
  * {@linkcode LocalFs} seams, so the full sequence is driven and asserted in
@@ -36,6 +37,8 @@ import { fromFileUrl, join } from "@std/path";
 // when the module is fetched from a remote registry).
 import wireCompat from "../../compat/wire.json" with { type: "json" };
 import type { ArtifactArch } from "../../images/pins.ts";
+import { BAKE_LOG, bakeGoldenSet } from "./bake.ts";
+import { GUEST_CACHE_DIR, GUEST_STATE_DIR } from "./guest_layout.ts";
 import type { HostEnv } from "./host_env.ts";
 import type { HostPortConfig } from "./lima_template.ts";
 import type { LocalFs } from "./local_fs.ts";
@@ -50,7 +53,9 @@ export const ROOTD_TOKEN = `${GUEST_ETC}/rootd.token`;
 export const WIRE_JSON = `${GUEST_ETC}/wire.json`;
 /** rootd's `--launch-config`: enables the golden-artifact launch planner. */
 export const LAUNCH_JSON = `${GUEST_ETC}/launch.json`;
-const GUEST_STATE_DIR = "/var/lib/studiobox";
+// GUEST_STATE_DIR + GUEST_CACHE_DIR live in the leaf ./guest_layout.ts so the
+// bake step and the launch-config step agree on where the cache is (and to
+// avoid a provision↔bake import cycle).
 export const JOURNAL_PATH = `${GUEST_STATE_DIR}/journal.json`;
 // Launch-planner guest layout (mirrors the working /etc/studiobox/launch.json).
 // `installFirecrackerScript` installs both bins into GUEST_BIN_DIR; rootd (root)
@@ -58,7 +63,6 @@ export const JOURNAL_PATH = `${GUEST_STATE_DIR}/journal.json`;
 // bake (`tools/build_golden_set.ts`).
 const GUEST_JAILER_BIN = `${GUEST_BIN_DIR}/jailer`;
 const GUEST_FIRECRACKER_BIN = `${GUEST_BIN_DIR}/firecracker`;
-const GUEST_CACHE_DIR = `${GUEST_STATE_DIR}/cache`;
 const GUEST_JAIL_DIR = `${GUEST_STATE_DIR}/jail`;
 const GUEST_OVERLAY_DIR = `${GUEST_STATE_DIR}/overlay`;
 const GUEST_RUN_DIR = "/run/studiobox";
@@ -143,6 +147,7 @@ export type ProvisionStepName =
   | "packages"
   | "firecracker"
   | "directories"
+  | "bake"
   | "binaries"
   | "token"
   | "launch-config"
@@ -153,11 +158,30 @@ export const PROVISION_STEP_ORDER: readonly ProvisionStepName[] = [
   "packages",
   "firecracker",
   "directories",
+  // `bake` runs after `directories` (so /var/lib/studiobox + build deps exist)
+  // and before `binaries`/`token`/`systemd`, so the multi-minute step fails
+  // fast yet the control-plane steps still complete if the bake degrades.
+  "bake",
   "binaries",
   "token",
   "launch-config",
   "systemd",
 ];
+
+/**
+ * Request to bake the golden set in-guest during provisioning (from
+ * `--bake`). Mutually exclusive with {@linkcode ProvisionOptions.launchConfig}
+ * (the two ways to populate the launch config's manifest hash); the CLI
+ * enforces that they never coexist.
+ */
+export interface BakeRequest {
+  /** Host repo root (a git working tree) the source tarball is built from. */
+  readonly sourceRoot: string;
+  /** Ignore the cache and force a fresh bake. @default false */
+  readonly rebuild?: boolean;
+  /** Optional dataplane/strategy fields to fold into the launch config. */
+  readonly launch?: Omit<LaunchConfigInput, "manifestHash">;
+}
 
 /** Aggregate result of {@linkcode provisionHost}. */
 export interface ProvisionResult {
@@ -167,6 +191,8 @@ export interface ProvisionResult {
   readonly tokenRotated: boolean;
   /** Which daemons had their binary installed + unit enabled. */
   readonly installedDaemons: readonly ("hostd" | "rootd")[];
+  /** True when a requested bake failed (host is up but control-plane only). */
+  readonly bakeFailed: boolean;
 }
 
 /** Options for {@linkcode provisionHost}. */
@@ -190,6 +216,13 @@ export interface ProvisionOptions {
    * only host (a warning is recorded and `Sandbox.create` stays unavailable).
    */
   readonly launchConfig?: LaunchConfigInput;
+  /**
+   * When set, bake the golden set in-guest and auto-wire its hash into the
+   * launch config (the `--bake` path). Mutually exclusive with
+   * {@linkcode launchConfig}. A bake failure degrades to a control-plane-only
+   * host (see {@linkcode ProvisionResult.bakeFailed}) rather than aborting.
+   */
+  readonly bake?: BakeRequest;
   /** Re-mint the token even when one already exists. @default false */
   readonly rotateToken?: boolean;
   /** Bootstrap-token source (32 bytes). @default 32 random bytes */
@@ -335,9 +368,9 @@ export async function provisionHost(
   await env.guestExec(
     `(command -v nft >/dev/null && command -v dnsmasq >/dev/null && ` +
       `command -v debootstrap >/dev/null && command -v mke2fs >/dev/null && ` +
-      `command -v unzip >/dev/null) || ` +
+      `command -v curl >/dev/null && command -v unzip >/dev/null) || ` +
       `(apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q ` +
-      `nftables dnsmasq debootstrap e2fsprogs unzip)`,
+      `nftables dnsmasq debootstrap e2fsprogs curl unzip)`,
     { check: true, sudo: true },
   );
   steps.push({ name: "packages", status: "ran", detail: "nftables, dnsmasq" });
@@ -363,6 +396,65 @@ export async function provisionHost(
     status: "ran",
     detail: `${GUEST_ETC}, ${GUEST_STATE_DIR}, user ${SERVICE_USER}`,
   });
+
+  // 3b) bake (optional) — turn the launch config on from a freshly-baked set.
+  // The hash it produces feeds the launch-config step below (via effectiveLaunch).
+  // A bake FAILURE degrades to a control-plane-only host (bakeFailed=true): the
+  // remaining binaries/token/systemd steps still run, so a network hiccup never
+  // leaves a daemon-less host.
+  let effectiveLaunch = options.launchConfig;
+  let bakeFailed = false;
+  if (options.bake !== undefined) {
+    try {
+      const baked = await bakeGoldenSet({
+        env,
+        fs,
+        arch: options.arch,
+        sourceRoot: options.bake.sourceRoot,
+        rebuild: options.bake.rebuild ?? false,
+        log,
+      });
+      effectiveLaunch = {
+        manifestHash: baked.hash,
+        ...(options.bake.launch ?? {}),
+      };
+      steps.push({
+        name: "bake",
+        status: baked.created ? "ran" : "skipped",
+        detail: baked.created
+          ? `baked ${baked.hash.slice(0, 12)}…`
+          : `reused cached ${baked.hash.slice(0, 12)}…`,
+      });
+    } catch (error) {
+      bakeFailed = true;
+      // The build's stderr went to BAKE_LOG (so HostCommandError's own stderr
+      // slice is empty); tail it for a useful diagnostic in the warning.
+      const tail =
+        (await env.guestExec(`tail -n 60 ${BAKE_LOG}`, { sudo: true })
+          .catch(() => ({ stdout: "" }))).stdout;
+      warnings.push(
+        `bake FAILED (${
+          error instanceof Error ? error.message : error
+        }); host ` +
+          `is control-plane only — re-run \`studiobox host up --bake\` once fixed ` +
+          `(the bake needs network: the S3 kernel + the debootstrap mirror).` +
+          (tail.trim() === "" ? "" : `\nLast build log lines:\n${tail}`),
+      );
+      steps.push({
+        name: "bake",
+        status: "skipped",
+        detail: "bake failed (see warning); control-plane only",
+      });
+    }
+  } else {
+    steps.push({
+      name: "bake",
+      status: "skipped",
+      detail: options.launchConfig !== undefined
+        ? "manifest hash supplied (--manifest-hash)"
+        : "no bake requested",
+    });
+  }
 
   // 4) binaries + compat pin ----------------------------------------------
   const installed: ("hostd" | "rootd")[] = [];
@@ -403,12 +495,13 @@ export async function provisionHost(
 
   // 5b) launch-planner config (optional) -----------------------------------
   // Written before the units so the rootd unit that references it can start.
-  // Without it rootd is control-plane only; Sandbox.create needs a golden set.
+  // `effectiveLaunch` is the bake's hash (if --bake succeeded) or the supplied
+  // --manifest-hash; without it rootd is control-plane only.
   let launchConfigPath: string | undefined;
-  if (options.launchConfig !== undefined) {
+  if (effectiveLaunch !== undefined) {
     log("provision: launch-planner config");
     const json = JSON.stringify(
-      buildLaunchConfig(options.arch, options.launchConfig),
+      buildLaunchConfig(options.arch, effectiveLaunch),
       null,
       2,
     );
@@ -420,18 +513,23 @@ export async function provisionHost(
     steps.push({
       name: "launch-config",
       status: "ran",
-      detail: `manifest ${options.launchConfig.manifestHash.slice(0, 12)}…`,
+      detail: `manifest ${effectiveLaunch.manifestHash.slice(0, 12)}…`,
     });
   } else {
-    warnings.push(
-      "no launch config provided; rootd runs control-plane only and " +
-        "Sandbox.create is unavailable — bake a golden set " +
-        "(tools/build_golden_set.ts) and re-run host up with its manifest hash",
-    );
+    // A requested-but-failed bake already logged a detailed warning above.
+    if (!bakeFailed) {
+      warnings.push(
+        "no launch config provided; rootd runs control-plane only and " +
+          "Sandbox.create is unavailable — bake a golden set (host up --bake, " +
+          "or tools/build_golden_set.ts + --manifest-hash)",
+      );
+    }
     steps.push({
       name: "launch-config",
       status: "skipped",
-      detail: "no golden set / manifest hash supplied",
+      detail: bakeFailed
+        ? "bake failed — Sandbox.create unavailable"
+        : "no golden set / manifest hash supplied",
     });
   }
 
@@ -451,12 +549,26 @@ export async function provisionHost(
   });
   await env.guestExec("systemctl daemon-reload", { check: true, sudo: true });
   if (installed.length === 2) {
-    // Enable rootd first (hostd Requires= it); a single enable of both is fine
-    // because hostd's ordering dependency sequences the start.
+    // `enable` (boot symlink) then `restart` — NOT `enable --now`. `--now`'s
+    // `start` is a no-op on an already-running unit, so a re-provision that
+    // rewrote the units or launch.json (e.g. `host up --bake` after a plain
+    // `host up`) would leave the LIVE rootd on its old argv/config and the
+    // launch planner silently off. `restart` starts a stopped unit and re-execs
+    // a running one, so the running daemons always match the just-written
+    // config; rootd's destructive reconcile reclaims any orphaned executions.
+    // rootd first (hostd Requires= it), then hostd.
     await env.guestExec(
-      "systemctl enable --now studiobox-rootd.service studiobox-hostd.service",
+      "systemctl enable studiobox-rootd.service studiobox-hostd.service",
       { check: true, sudo: true },
     );
+    await env.guestExec("systemctl restart studiobox-rootd.service", {
+      check: true,
+      sudo: true,
+    });
+    await env.guestExec("systemctl restart studiobox-hostd.service", {
+      check: true,
+      sudo: true,
+    });
   } else {
     warnings.push(
       "not all daemons installed; units written but not enabled " +
@@ -476,6 +588,7 @@ export async function provisionHost(
     warnings,
     tokenRotated: tokenResult.rotated,
     installedDaemons: installed,
+    bakeFailed,
   };
 }
 

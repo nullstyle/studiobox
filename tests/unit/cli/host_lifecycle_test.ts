@@ -10,6 +10,7 @@ import {
   WIRE_JSON,
 } from "../../../src/cli/provision.ts";
 import { DEFAULT_PORTS } from "../../../src/cli/lima_template.ts";
+import { BakeSourceUnavailableError } from "../../../src/cli/bake.ts";
 import {
   FakeHostRunner,
   FakeLocalFs,
@@ -34,6 +35,8 @@ function makeFixture(
       mode: "lima" | "no-lima";
       daemonsPresent: boolean;
       manifestHash: string;
+      bake: { rebuild?: boolean };
+      resolveSourceRoot: () => string | undefined;
     }
   > = {},
 ): Fixture {
@@ -57,6 +60,10 @@ function makeFixture(
     ...(overrides.manifestHash === undefined
       ? {}
       : { launchConfig: { manifestHash: overrides.manifestHash } }),
+    ...(overrides.bake === undefined ? {} : { bake: overrides.bake }),
+    ...(overrides.resolveSourceRoot === undefined
+      ? {}
+      : { resolveSourceRoot: overrides.resolveSourceRoot }),
   });
   return { runner, fs, lifecycle };
 }
@@ -373,5 +380,104 @@ Deno.test("provision: no manifest hash leaves rootd control-plane only", async (
   assert(
     result.warnings.some((w) => w.includes("Sandbox.create is unavailable")),
     "a warning explains Sandbox.create needs a golden set",
+  );
+  const bakeStep = result.steps.find((s) => s.name === "bake");
+  assertEquals(bakeStep?.status, "skipped");
+  assertEquals(result.bakeFailed, false);
+});
+
+Deno.test("HostLifecycle.up --bake: bakes then wires the launch config from the hash", async () => {
+  const { runner, lifecycle } = makeFixture({
+    bake: {},
+    resolveSourceRoot: () => "/repo",
+  });
+  runner.bakeHash = "c".repeat(64);
+  const result = await lifecycle.up();
+
+  const bakeStep = result.provision.steps.find((s) => s.name === "bake");
+  assertEquals(bakeStep?.status, "ran");
+  assertEquals(result.provision.bakeFailed, false);
+
+  const lines = runner.commandLines();
+  // launch.json is written carrying the BAKED hash, and rootd is wired to it.
+  assert(
+    lines.some((l) => l.includes(LAUNCH_JSON) && l.includes("c".repeat(64))),
+    "launch.json carries the baked manifest hash",
+  );
+  assert(
+    lines.some((l) =>
+      l.includes("studiobox-rootd.service") &&
+      l.includes(`--launch-config ${LAUNCH_JSON}`)
+    ),
+    "the rootd unit is wired with --launch-config",
+  );
+  // Ordering: bake follows the directories mkdir, and the hash it produces is
+  // consumed by the launch-config write, which precedes the rootd unit write.
+  const dirs = lines.findIndex((l) => l.includes("mkdir -p /etc/studiobox"));
+  const build = lines.findIndex((l) => l.includes("build_golden_set.ts"));
+  const launchWrite = lines.findIndex((l) =>
+    l.includes(LAUNCH_JSON) && l.includes("c".repeat(64))
+  );
+  const rootdUnit = lines.findIndex((l) =>
+    l.includes("studiobox-rootd.service") && l.includes("--launch-config")
+  );
+  assert(dirs >= 0 && build > dirs, "bake runs after directories");
+  assert(build < launchWrite, "the baked hash feeds the launch-config write");
+  assert(
+    launchWrite < rootdUnit,
+    "launch.json is written before the rootd unit",
+  );
+});
+
+Deno.test("HostLifecycle.up --bake from JSR fails fast before creating a VM", async () => {
+  const { runner, lifecycle } = makeFixture({
+    bake: {},
+    resolveSourceRoot: () => undefined, // no local checkout (jsr:/https:)
+  });
+  await assertRejects(
+    () => lifecycle.up(),
+    BakeSourceUnavailableError,
+    "needs a local checkout",
+  );
+  const lines = runner.commandLines();
+  assert(
+    !lines.some((l) => l.includes("start --name=")),
+    "no VM is created when --bake cannot resolve a source tree",
+  );
+  assert(
+    !lines.some((l) => l.includes("build_golden_set.ts")),
+    "the bake never runs",
+  );
+});
+
+Deno.test("HostLifecycle.up --bake: a bake failure degrades to a control-plane-only host", async () => {
+  const { runner, lifecycle } = makeFixture({
+    bake: {},
+    resolveSourceRoot: () => "/repo",
+  });
+  runner.bakeFails = true;
+  const result = await lifecycle.up(); // must NOT throw
+
+  assertEquals(result.provision.bakeFailed, true);
+  const bakeStep = result.provision.steps.find((s) => s.name === "bake");
+  assertEquals(bakeStep?.status, "skipped");
+  assert(
+    result.provision.warnings.some((w) => w.includes("bake FAILED")),
+    "a loud warning explains the bake failed",
+  );
+  const launchStep = result.provision.steps.find((s) =>
+    s.name === "launch-config"
+  );
+  assertEquals(launchStep?.status, "skipped");
+  // Degrade, not abort: the control plane still comes up fully.
+  assertEquals(result.provision.installedDaemons, ["hostd", "rootd"]);
+  const systemd = result.provision.steps.find((s) => s.name === "systemd");
+  assertEquals(systemd?.status, "ran");
+  // The failure path tails the build log for diagnostics.
+  assert(
+    runner.commandLines().some((l) =>
+      l.includes("tail -n 60") && l.includes("build.log")
+    ),
+    "the build log is tailed on failure",
   );
 });

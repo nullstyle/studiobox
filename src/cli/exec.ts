@@ -24,6 +24,13 @@ export interface HostCommandResult {
 export interface HostCommandOptions {
   /** Bytes piped to the child's stdin (e.g. a heredoc script). */
   readonly stdin?: string;
+  /**
+   * Skip the {@link MAX_CAPTURE_BYTES} cap on captured stdout. The cap defends
+   * against unbounded GUEST output; a few host commands (e.g. the bake's
+   * `git ls-files` source listing, which grows with the repo) produce output
+   * that is legitimately large and MUST be captured whole. @default false
+   */
+  readonly uncapped?: boolean;
 }
 
 /** The seam: run one command, capture its result. */
@@ -84,12 +91,11 @@ export class DenoHostCommandRunner implements HostCommandRunner {
     }
     const { success, code, stdout, stderr } = await child.output();
     const decoder = new TextDecoder();
-    return {
-      success,
-      code,
-      stdout: decoder.decode(stdout).slice(0, MAX_CAPTURE_BYTES),
-      stderr: decoder.decode(stderr).slice(0, MAX_CAPTURE_BYTES),
-    };
+    const cap = (bytes: Uint8Array): string =>
+      options.uncapped === true
+        ? decoder.decode(bytes)
+        : decoder.decode(bytes).slice(0, MAX_CAPTURE_BYTES);
+    return { success, code, stdout: cap(stdout), stderr: cap(stderr) };
   }
 }
 
