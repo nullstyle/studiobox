@@ -23,9 +23,12 @@ import { HostLifecycle } from "./host_lifecycle.ts";
 import { type DoctorReport, formatDoctorReport } from "./doctor.ts";
 import type { HostStatus } from "./host_lifecycle.ts";
 import type { ProvisionResult } from "./provision.ts";
+// Read the package version straight from the manifest (embedded in the compiled
+// CLI binary) so `studiobox --version` can never drift from the published one.
+import denoJson from "../../deno.json" with { type: "json" };
 
-/** Tracks deno.json's `version`; bump together on release. */
-export const CLI_VERSION = "0.0.0";
+/** The package version reported by `studiobox --version` (from deno.json). */
+export const CLI_VERSION: string = denoJson.version;
 
 /** Injectable dependencies for {@linkcode runCli}. */
 export interface RunCliDeps {

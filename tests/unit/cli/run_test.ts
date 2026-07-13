@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { runCli } from "../../../src/cli/run.ts";
+import { CLI_VERSION, runCli } from "../../../src/cli/run.ts";
 import { HostLifecycle } from "../../../src/cli/host_lifecycle.ts";
 import type { HostFlags } from "../../../src/cli/args.ts";
 import type { HostProbe } from "../../../src/cli/doctor.ts";
@@ -51,11 +51,17 @@ Deno.test("runCli: --help prints usage and exits 0", async () => {
   assertStringIncludes(s.out.join("\n"), "studiobox host <command>");
 });
 
-Deno.test("runCli: --version prints a version and exits 0", async () => {
+Deno.test("runCli: --version prints the package version and exits 0", async () => {
   const s = sink();
   const code = await runCli(["--version"], { stdout: (l) => s.out.push(l) });
   assertEquals(code, 0);
   assertEquals(s.out.length, 1);
+  // Must be the real package version (from deno.json), never a stale "0.0.0".
+  assertEquals(s.out[0], CLI_VERSION);
+  assert(
+    /^\d+\.\d+\.\d+/.test(CLI_VERSION) && CLI_VERSION !== "0.0.0",
+    `CLI_VERSION should be a real semver, got "${CLI_VERSION}"`,
+  );
 });
 
 Deno.test("runCli: a usage error exits 2 and prints usage to stderr", async () => {
