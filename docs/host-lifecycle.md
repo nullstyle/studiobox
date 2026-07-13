@@ -117,30 +117,42 @@ commit that variant because `--no-lima` is the first-class Linux path.
 (`PROVISION_STEP_ORDER`):
 
 1. **`packages`** — `nftables`, `dnsmasq`, and the rootfs-build deps
-   (`debootstrap`, `e2fsprogs`, `unzip`), guarded by `command -v`.
+   (`debootstrap`, `e2fsprogs`, `curl`, `unzip`), guarded by `command -v`.
 2. **`firecracker`** — the pinned Firecracker + jailer from `FIRECRACKER_COMPAT`
    (currently `v1.16.1`, min `v1.15.0`), guarded by a version check.
 3. **`directories`** — `/etc/studiobox`, `/var/lib/studiobox`, `/run/studiobox`,
    and the unprivileged `studiobox` service user that runs hostd (DESIGN.md §3).
-4. **`binaries`** — the compiled `studiobox-hostd` / `studiobox-rootd` binaries
+4. **`bake`** — only with `--bake`: bake the golden set in-guest and capture its
+   manifest hash (skipped otherwise). Cached by hash; a failure degrades to a
+   control-plane-only host rather than aborting the rest of the sequence.
+5. **`binaries`** — the compiled `studiobox-hostd` / `studiobox-rootd` binaries
    into `/usr/local/bin`, plus `compat/wire.json` (the `ContractIdentity` pin)
    into `/etc/studiobox/wire.json`.
-5. **`token`** — mint + install the bootstrap tokens (see below). A re-run does
+6. **`token`** — mint + install the bootstrap tokens (see below). A re-run does
    **not** rotate an existing token unless `--rotate-token` is given.
-6. **`systemd`** — write both units, `daemon-reload`, and `enable --now`.
+7. **`launch-config`** — only when a golden set is wired (`--bake`'s hash or
+   `--manifest-hash`): write `/etc/studiobox/launch.json` and add
+   `--launch-config` to the rootd unit so its launch planner is on. Skipped
+   otherwise (rootd stays control-plane only).
+8. **`systemd`** — write both units, `daemon-reload`, `enable`, then **restart**
+   both daemons so the live processes pick up the freshly-written units +
+   launch.json (a plain `enable --now` would not re-exec an already-running
+   daemon, silently leaving stale config).
 
 The two systemd units (`renderSystemdUnits()`):
 
-- `studiobox-rootd.service` runs as **root** —
+- `studiobox-rootd.service` runs as **root** (with `Group=studiobox`) —
   `studiobox-rootd --socket /run/studiobox/supervisor.sock --state
   /var/lib/studiobox/journal.json --token-file /etc/studiobox/rootd.token
-  --compat /etc/studiobox/wire.json`.
+  --compat /etc/studiobox/wire.json`
+  (plus `--launch-config /etc/studiobox/launch.json` when a golden set is
+  wired).
 - `studiobox-hostd.service` runs as the unprivileged **studiobox** user, ordered
   `After=`/`Requires=` rootd —
-  `studiobox-hostd --listen 0.0.0.0:40000 --rootd-socket
-  /run/studiobox/supervisor.sock --token-file /etc/studiobox/hostd.token
-  --rootd-token-file /etc/studiobox/rootd.token --compat
-  /etc/studiobox/wire.json`.
+  `studiobox-hostd --listen 0.0.0.0:40000 --tunnel-listen 0.0.0.0:40001
+  --rootd-socket /run/studiobox/supervisor.sock --token-file
+  /etc/studiobox/hostd.token --rootd-token-file /etc/studiobox/rootd.token
+  --compat /etc/studiobox/wire.json`.
 
 > The compiled daemon binaries (`deno compile` of `src/hostd/main.ts` and
 > `src/rootd/main.ts`, cross-compiled to the target arch) are an **input** to
