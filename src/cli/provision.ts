@@ -198,6 +198,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
+# rootd runs as root (the jailer needs it) but with the service GROUP, so its
+# RuntimeDirectory (/run/studiobox) and the supervisor UDS it binds there are
+# owned root:${SERVICE_USER} — letting the unprivileged hostd traverse + connect.
+Group=${SERVICE_USER}
 ExecStart=${ROOTD_BIN} --socket ${SUPERVISOR_SOCK} --state ${JOURNAL_PATH} --token-file ${ROOTD_TOKEN} --build-id ${BUILD_ID} --compat ${WIRE_JSON}
 RuntimeDirectory=studiobox
 RuntimeDirectoryMode=0710
@@ -397,12 +401,15 @@ async function installToken(
   const tmpRootd = await fs.makeTempFile(`${rootdToken}\n`);
   try {
     await env.copyIn(tmpHostd, HOSTD_TOKEN, "0640");
-    // hostd runs as the unprivileged service user; let it read its own token.
+    await env.copyIn(tmpRootd, ROOTD_TOKEN, "0640");
+    // hostd runs as the unprivileged service user and reads BOTH its own token
+    // AND rootd's (the shared bootstrap credential it presents to rootd via
+    // `--rootd-token-file`), so both are owned `root:${SERVICE_USER}` 0640 —
+    // rootd, running as root, still reads its own.
     await env.guestExec(
-      `chown root:${SERVICE_USER} ${HOSTD_TOKEN}`,
+      `chown root:${SERVICE_USER} ${HOSTD_TOKEN} ${ROOTD_TOKEN}`,
       { check: true, sudo: true },
     );
-    await env.copyIn(tmpRootd, ROOTD_TOKEN, "0600");
   } finally {
     await fs.remove(tmpHostd).catch(() => {});
     await fs.remove(tmpRootd).catch(() => {});
@@ -429,11 +436,16 @@ function installFirecrackerScript(fc: string): string {
 }
 
 function directoriesScript(): string {
-  return `mkdir -p ${GUEST_ETC} ${GUEST_STATE_DIR}; ` +
-    `chmod 0710 ${GUEST_ETC}; ` +
-    `getent group ${SERVICE_USER} >/dev/null || groupadd --system ${SERVICE_USER}; ` +
+  // Create the service group/user FIRST so the config dir can be group-owned by
+  // it: the unprivileged hostd must TRAVERSE ${GUEST_ETC} to read wire.json + its
+  // tokens, so own it `root:${SERVICE_USER}` 0710 (group may enter, not list;
+  // files inside carry their own modes). ${GUEST_STATE_DIR} stays root — only
+  // rootd (root) writes it.
+  return `getent group ${SERVICE_USER} >/dev/null || groupadd --system ${SERVICE_USER}; ` +
     `id ${SERVICE_USER} >/dev/null 2>&1 || ` +
-    `useradd --system --no-create-home --shell /usr/sbin/nologin -g ${SERVICE_USER} ${SERVICE_USER}`;
+    `useradd --system --no-create-home --shell /usr/sbin/nologin -g ${SERVICE_USER} ${SERVICE_USER}; ` +
+    `mkdir -p ${GUEST_ETC} ${GUEST_STATE_DIR}; ` +
+    `chgrp ${SERVICE_USER} ${GUEST_ETC}; chmod 0710 ${GUEST_ETC}`;
 }
 
 function writeUnitScript(unitName: string, contents: string): string {

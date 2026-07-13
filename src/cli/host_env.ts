@@ -181,16 +181,24 @@ export class HostEnv {
       ]);
       return;
     }
+    // `limactl cp` rsyncs as the unprivileged lima user, which cannot write into
+    // a root-owned destination (e.g. `/etc/studiobox`, created 0710 root by the
+    // directories step). Stage into a user-writable temp path, then sudo-install
+    // it into place with the requested mode (mirroring the no-lima branch); the
+    // caller adjusts ownership afterward where it matters (e.g. the hostd token).
+    const staging = `/tmp/.studiobox-cp-${crypto.randomUUID()}`;
     await runChecked(this.#runner, this.#limactl, [
       "cp",
       localPath,
-      `${this.#name}:${remotePath}`,
+      `${this.#name}:${staging}`,
     ]);
-    // limactl cp lands the file mode 0644; tighten it in the guest.
-    await this.guestExec(`chmod ${mode} ${shellQuote(remotePath)}`, {
-      check: true,
-      sudo: true,
-    });
+    await this.guestExec(
+      `install -m ${mode} ${shellQuote(staging)} ${
+        shellQuote(remotePath)
+      } && ` +
+        `rm -f ${shellQuote(staging)}`,
+      { check: true, sudo: true },
+    );
   }
 }
 

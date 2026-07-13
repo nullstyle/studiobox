@@ -38,7 +38,7 @@
     "test:soak": "deno test --allow-read --allow-write --allow-net --allow-run --allow-env --allow-sys=uid,gid tests/soak/",
     "cli": "deno run -A src/cli/main.ts",
     "lima:template": "deno run --allow-write=tools/lima tools/lima_template_write.ts",
-    "daemons:compile": "deno compile -A --output .build/studiobox-hostd src/hostd/main.ts && deno compile -A --output .build/studiobox-rootd src/rootd/main.ts",
+    "daemons:compile": "deno compile -A --output .build/studiobox-hostd src/hostd/main.ts && deno compile -A --target aarch64-unknown-linux-gnu --output .build/studiobox-hostd-aarch64-unknown-linux-gnu src/hostd/main.ts && deno compile -A --target x86_64-unknown-linux-gnu --output .build/studiobox-hostd-x86_64-unknown-linux-gnu src/hostd/main.ts && deno compile -A --output .build/studiobox-rootd src/rootd/main.ts && deno compile -A --target aarch64-unknown-linux-gnu --output .build/studiobox-rootd-aarch64-unknown-linux-gnu src/rootd/main.ts && deno compile -A --target x86_64-unknown-linux-gnu --output .build/studiobox-rootd-x86_64-unknown-linux-gnu src/rootd/main.ts",
     "soak": "deno run --allow-read --allow-write --allow-net --allow-run --allow-env --allow-sys=uid,gid tools/soak/soak_main.ts",
     "soak:vm": "deno run -A --unstable-vsock tools/soak/soak_vm_main.ts",
     "test:vm": "deno run -A tools/lima_vm_test.ts",

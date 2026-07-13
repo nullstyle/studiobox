@@ -159,8 +159,17 @@ export class UdsSupervisorAcceptSource implements SupervisorAcceptSource {
   constructor(path: string, options: UdsAcceptSourceOptions = {}) {
     this.#path = path;
     this.#options = options;
-    this.#listener = options.listener ??
-      Deno.listen({ transport: "unix", path });
+    if (options.listener !== undefined) {
+      this.#listener = options.listener;
+    } else {
+      this.#listener = Deno.listen({ transport: "unix", path });
+      // The unprivileged hostd connects to this UDS; connecting a Unix socket
+      // needs WRITE permission on the node, so widen the default 0755 to 0660
+      // (owner + group rw). The socket's group is rootd's process group —
+      // `studiobox` on the provisioned host (the systemd unit runs rootd with
+      // `Group=studiobox`) — so hostd, in that group, may connect.
+      Deno.chmodSync(path, 0o660);
+    }
   }
 
   /** Whether {@link close} has been called. */

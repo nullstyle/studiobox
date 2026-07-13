@@ -27,6 +27,24 @@ aims to follow [semantic versioning](https://semver.org/) from 1.0 onward.
   require a local checkout today, so `host up` from a bare `jsr:` invocation
   stops at a clear "no compiled daemon binaries present" warning rather than a
   crash.
+- **`host up` provisioning actually brings the daemons up now.** A series of
+  real bugs surfaced only against a live Lima VM (the path was previously
+  unit-tested against a fake host env):
+  - `copyIn` stages through a temp file then `sudo install`s it into place, so
+    it can write root-owned config dirs (a bare `limactl cp` rsyncs unprivileged
+    and is denied on `/etc/studiobox`);
+  - `daemons:compile` cross-compiles the Linux targets the provisioner expects
+    (it only built the host binary before, so the daemons were never installed);
+  - `/etc/studiobox` is owned `root:studiobox` so the unprivileged hostd can
+    traverse it, and `rootd.token` is `0640 root:studiobox` (hostd reads it via
+    `--rootd-token-file`);
+  - rootd binds its supervisor UDS `0660` and its unit runs `Group=studiobox`,
+    so `/run/studiobox` and the socket are group-reachable and hostd can
+    connect.
+
+  `host up` now reaches a healthy control plane — both daemons active and
+  `host
+  doctor` green on negotiate, capacity, and quarantine.
 
 ## [0.1.1] — 2026-07-12
 

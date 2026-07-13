@@ -63,7 +63,11 @@ Deno.test("HostLifecycle.up (fresh): creates the VM, checks kvm, provisions", as
     l.includes("start --name=studiobox-host-aarch64")
   );
   const kvmIdx = lines.findIndex((l) => l.includes("test -e /dev/kvm"));
-  const tokenCpIdx = lines.findIndex((l) => l.includes(`:${HOSTD_TOKEN}`));
+  // The token now lands via a `sudo install … <dest>` (staged off the wire),
+  // not a colon-prefixed `<vm>:<dest>` cp — detect the install to HOSTD_TOKEN.
+  const tokenCpIdx = lines.findIndex((l) =>
+    l.includes("install") && l.includes(HOSTD_TOKEN)
+  );
   assert(createIdx >= 0, "createVm was issued");
   assert(kvmIdx > createIdx, "kvm check follows create");
   assert(tokenCpIdx > kvmIdx, "token install follows the kvm check");
@@ -105,11 +109,13 @@ Deno.test("HostLifecycle.up (re-run): reuses the VM and does NOT rotate the toke
     "re-run starts the existing instance",
   );
 
-  // Token step skipped: no new token copy-in on the second run.
+  // Token step skipped: no new token install on the second run. (The binaries
+  // step still re-installs wire.json + the daemon binaries, so key off an
+  // install of the TOKEN specifically, not any install.)
   assertEquals(second.provision.tokenRotated, false);
   assert(
-    !secondLines.some((l) => l.includes(`:${HOSTD_TOKEN}`)),
-    "re-run must not re-copy the token",
+    !secondLines.some((l) => l.includes("install") && l.includes(HOSTD_TOKEN)),
+    "re-run must not re-install the token",
   );
   const tokenStep = second.provision.steps.find((s) => s.name === "token");
   assertEquals(tokenStep?.status, "skipped");
@@ -124,8 +130,8 @@ Deno.test("HostLifecycle.up --rotate-token re-mints even when present", async ()
   assertEquals(second.provision.tokenRotated, true);
   const secondLines = runner.commandLines().slice(boundary);
   assert(
-    secondLines.some((l) => l.includes(`:${HOSTD_TOKEN}`)),
-    "rotate re-copies the token",
+    secondLines.some((l) => l.includes("install") && l.includes(HOSTD_TOKEN)),
+    "rotate re-installs the token",
   );
 });
 

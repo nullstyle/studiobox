@@ -109,7 +109,17 @@ export class FakeHostRunner implements HostCommandRunner {
       case "cp": {
         const dst = rest[1] ?? "";
         const colon = dst.indexOf(":");
-        if (colon >= 0) this.guestFiles.add(dst.slice(colon + 1));
+        if (colon >= 0) {
+          const remote = dst.slice(colon + 1);
+          // The lima copyIn now rsyncs into a user-writable /tmp staging path
+          // (`limactl cp` runs as the unprivileged lima user and cannot write a
+          // root-owned dest). The file only reaches its FINAL dest via the
+          // subsequent `sudo install` (modeled in #guestBody), so do NOT record
+          // the transient staging file as a guest file.
+          if (!remote.startsWith("/tmp/.studiobox-cp-")) {
+            this.guestFiles.add(remote);
+          }
+        }
         return ok();
       }
       case "shell": {
@@ -130,6 +140,15 @@ export class FakeHostRunner implements HostCommandRunner {
 
     if (/test -e \/dev\/kvm/.test(inner)) {
       return this.kvm ? ok() : failed();
+    }
+    // lima copyIn's second half: `install -m <mode> '<staging>' '<dest>' && rm …`
+    // run via the sudo guest-exec path. The file lands at its FINAL <dest> here
+    // (the preceding `limactl cp` only staged it under /tmp), so record <dest>
+    // as a guest file — mirroring the no-lima `sudo install` handler in #respond.
+    const installFile = /install -m \S+ '[^']*' '([^']*)'/.exec(inner);
+    if (installFile !== null) {
+      this.guestFiles.add(installFile[1]);
+      return ok();
     }
     const testFile = /test -f (\S+)/.exec(inner);
     if (testFile !== null) {
