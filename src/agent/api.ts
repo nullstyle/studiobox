@@ -167,8 +167,10 @@ export type AgentErrorCode =
  * handles, invalid specs, REPL driver faults.
  */
 export class AgentError extends Error {
+  /** The agent-plane failure class. */
   readonly code: AgentErrorCode;
 
+  /** Construct with a failure `code`, message, and optional `cause`. */
   constructor(code: AgentErrorCode, message: string, cause?: unknown) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "AgentError";
@@ -367,7 +369,9 @@ export interface AgentProcessSpawner {
 export interface AgentMakeTempOptions {
   /** In-sandbox parent directory; default: the sandbox's temp root. */
   dir?: string;
+  /** Prefix for the generated name. */
   prefix?: string;
+  /** Suffix for the generated name. */
   suffix?: string;
 }
 
@@ -404,14 +408,17 @@ export interface AgentFsFile {
   seek(offset: number | bigint, whence: SeekMode): Promise<number>;
   /** Truncate (or extend with zeros) to `length` (default 0). */
   truncate(length?: number): Promise<void>;
+  /** Stat the open handle (`Deno.FsFile.stat`). */
   stat(): Promise<FileInfo>;
   /** Flush data + metadata (fsync). */
   sync(): Promise<void>;
   /** Flush data only (fdatasync). */
   syncData(): Promise<void>;
+  /** Set the file's access and modification times. */
   utime(atime: number | Date, mtime: number | Date): Promise<void>;
   /** Advisory lock; `exclusive` defaults to false (shared). */
   lock(exclusive?: boolean): Promise<void>;
+  /** Release an advisory lock. */
   unlock(): Promise<void>;
   /**
    * Close the handle. **Idempotent** — a second `close()` resolves
@@ -710,9 +717,13 @@ export interface AgentInfo {
  * adapter.
  */
 export interface AgentApi {
+  /** Process-spawning plane (`ProcessSpawner`). */
   readonly processes: AgentProcessSpawner;
+  /** Filesystem plane (`FileSystem`). */
   readonly fs: AgentFileSystem;
+  /** Environment-variable plane. */
   readonly env: AgentEnvironment;
+  /** `deno.eval`/`repl`/`run` plane. */
   readonly deno: AgentDenoRuntime;
   /** Identity/uptime probe. */
   info(): Promise<AgentInfo>;

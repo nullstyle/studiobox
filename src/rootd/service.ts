@@ -148,8 +148,11 @@ const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
  * against.
  */
 export interface SupervisorCompatIdentitySource {
+  /** The negotiated wire protocol major/minor. */
   readonly protocol: { readonly major: number; readonly minor: number };
+  /** Canonical five-schema bundle hash. */
   readonly schemaSha256: string;
+  /** The `@nullstyle/capnp` runtime version the bindings were generated against. */
   readonly codegen: { readonly version: string };
 }
 
@@ -163,14 +166,23 @@ export interface SupervisorCompatIdentitySource {
  * publishes them.
  */
 export interface SupervisorIdentityOptions {
+  /** Opaque build identifier for this supervisor. */
   readonly buildId: string;
+  /** Advertised optional-feature bitset. */
   readonly featureBits?: bigint;
+  /** WASM ABI version, once capnp-deno publishes it. */
   readonly wasmAbi?: number;
+  /** WASM module hash, once published. */
   readonly wasmSha256?: Uint8Array;
+  /** Artifact-set manifest hash (M4/M5 plumbing). */
   readonly artifactHash?: Uint8Array;
+  /** Pinned Firecracker package spec. */
   readonly firecrackerPackage?: string;
+  /** Firecracker binary hash. */
   readonly firecrackerSha256?: Uint8Array;
+  /** Exact pinned Firecracker version. */
   readonly firecrackerPinned?: string;
+  /** Minimum accepted Firecracker version. */
   readonly firecrackerMin?: string;
 }
 

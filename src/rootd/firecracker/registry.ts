@@ -6,7 +6,9 @@ import {
 } from "../../state/store.ts";
 import { ExecutionIdConflictError, StaleExecutionIdError } from "./errors.ts";
 
+/** JailRecord metadata key carrying the owning sandbox id. */
 export const SANDBOX_ID_METADATA = "studiobox.sandbox-id";
+/** JailRecord metadata key carrying the boot attempt's execution id. */
 export const EXECUTION_ID_METADATA = "studiobox.execution-id";
 
 /**
@@ -24,6 +26,7 @@ export interface AtomicJailRecordStore {
   ): Promise<boolean>;
   /** Idempotently delete the low-level subrecord. */
   remove(executionId: string): Promise<void>;
+  /** Every journaled JailRecord. */
   list(): Promise<JailRecord[]>;
 }
 
@@ -31,16 +34,19 @@ export interface AtomicJailRecordStore {
 export class CreateOnlyVmRegistry implements VmRegistry {
   readonly #store: AtomicJailRecordStore;
 
+  /** Wrap an atomic record store. */
   constructor(store: AtomicJailRecordStore) {
     this.#store = store;
   }
 
+  /** Journal a new record; throws {@link ExecutionIdConflictError} on collision. */
   async put(record: JailRecord): Promise<void> {
     if (!await this.#store.create(structuredClone(record))) {
       throw new ExecutionIdConflictError(record.vmId);
     }
   }
 
+  /** Merge a patch; throws {@link StaleExecutionIdError} if the record is gone. */
   async update(
     executionId: string,
     patch: Partial<JailRecord>,
@@ -50,10 +56,12 @@ export class CreateOnlyVmRegistry implements VmRegistry {
     }
   }
 
+  /** Idempotently delete the record for `executionId`. */
   remove(executionId: string): Promise<void> {
     return this.#store.remove(executionId);
   }
 
+  /** Every journaled record (deep-cloned). */
   async list(): Promise<JailRecord[]> {
     return structuredClone(await this.#store.list());
   }
@@ -75,6 +83,7 @@ export class SandboxStateJailRecordStore implements AtomicJailRecordStore {
   readonly #maxCasAttempts: number;
   #tail: Promise<void> = Promise.resolve();
 
+  /** Bind to the authoritative sandbox state store. */
   constructor(
     state: SandboxStateStore,
     options: SandboxStateJailRecordStoreOptions = {},
@@ -84,6 +93,7 @@ export class SandboxStateJailRecordStore implements AtomicJailRecordStore {
     this.#maxCasAttempts = options.maxCasAttempts ?? 16;
   }
 
+  /** Attach a launching machine to its sandbox; false if one already exists. */
   create(record: JailRecord): Promise<boolean> {
     return this.#exclusive(async () => {
       const sandboxId = sandboxIdFrom(record);
@@ -133,6 +143,7 @@ export class SandboxStateJailRecordStore implements AtomicJailRecordStore {
     });
   }
 
+  /** CAS-merge a patch into the embedded record; false if it is absent. */
   update(
     executionId: string,
     patch: Partial<JailRecord>,
@@ -179,6 +190,7 @@ export class SandboxStateJailRecordStore implements AtomicJailRecordStore {
     });
   }
 
+  /** Drop the embedded record but keep the execution in `reclaiming`. */
   remove(executionId: string): Promise<void> {
     return this.#exclusive(async () => {
       for (let attempt = 0; attempt < this.#maxCasAttempts; attempt++) {
@@ -220,6 +232,7 @@ export class SandboxStateJailRecordStore implements AtomicJailRecordStore {
     });
   }
 
+  /** Every embedded JailRecord across all sandboxes, sorted by execution id. */
   list(): Promise<JailRecord[]> {
     return this.#exclusive(async () => {
       const records = (await this.#state.list()).flatMap((sandbox) => {

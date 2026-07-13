@@ -44,13 +44,17 @@ export type SupervisorMachineState =
 
 /** Mirror of `supervisor.capnp` `MachineStatus`. */
 export interface SupervisorMachineStatus {
+  /** The owning sandbox id (`sbx_loc_…`). */
   readonly sandboxId: string;
+  /** The boot attempt's execution id. */
   readonly executionId: string;
+  /** Current machine lifecycle state. */
   readonly state: SupervisorMachineState;
   /** VMM pid when known (live or last journaled). */
   readonly pid?: number;
   /** Exit code when the exit was observed and carried one. */
   readonly exitCode?: number;
+  /** Exit timestamp (ms since epoch) when observed. */
   readonly exitedAtUnixMs?: number;
   /** Bounded, redacted detail (termination reason, quarantine detail). */
   readonly reason?: string;
@@ -62,18 +66,27 @@ export interface SupervisorMachineStatus {
  * than failing, so callers can already depend on the shape.
  */
 export interface SupervisorMachineUsage {
+  /** Cumulative CPU time (microseconds). */
   readonly cpuTimeMicros: number;
+  /** Current memory use (bytes). */
   readonly memoryCurrentBytes: number;
+  /** Peak memory use (bytes). */
   readonly memoryPeakBytes: number;
+  /** Overlay disk use (bytes). */
   readonly diskBytes: number;
+  /** Bytes received on the sandbox NIC. */
   readonly rxBytes: number;
+  /** Bytes transmitted on the sandbox NIC. */
   readonly txBytes: number;
 }
 
 /** One reconciliation failure, redacted to logical identifiers. */
 export interface SupervisorReconcileFailure {
+  /** The sandbox id involved, when known. */
   readonly sandboxId?: string;
+  /** The execution id involved, when known. */
   readonly executionId?: string;
+  /** Bounded, redacted failure detail. */
   readonly detail: string;
 }
 
@@ -87,18 +100,25 @@ export interface SupervisorReconcileSummary {
   readonly reclaimed: number;
   /** Records parked in `quarantined` with a failure detail. */
   readonly quarantined: number;
+  /** Per-record failures encountered during the sweep. */
   readonly failures: ReadonlyArray<SupervisorReconcileFailure>;
 }
 
 /** Mirror of `supervisor.capnp` `Health`. */
 export interface SupervisorHealth {
+  /** The supervisor's build identifier. */
   readonly buildId: string;
+  /** Process start time (ms since epoch). */
   readonly startedAtUnixMs: number;
+  /** Count of non-terminal machines. */
   readonly activeMachines: number;
+  /** Count of open bridges. */
   readonly activeBridges: number;
+  /** Whether a reconciliation sweep is in progress. */
   readonly reconciling: boolean;
 }
 
+/** Mirror of `supervisor.capnp` `SbxError` code — the supervisor fault taxonomy. */
 export type SupervisorErrorCode =
   /** A request failed logical-id / wire validation. */
   | "SBX_SUP_VALIDATION"
@@ -119,8 +139,10 @@ export type SupervisorErrorCode =
 
 /** Typed domain error; becomes `SbxError` on the wire adapter. */
 export class SupervisorError extends Error {
+  /** The supervisor fault class. */
   readonly code: SupervisorErrorCode;
 
+  /** Construct with a fault `code`, message, and optional `cause`. */
   constructor(code: SupervisorErrorCode, message: string, cause?: unknown) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "SupervisorError";
@@ -201,6 +223,7 @@ export interface SupervisorApi {
    */
   reconcile(): Promise<SupervisorReconcileSummary>;
 
+  /** Snapshot of supervisor liveness/health. */
   health(): Promise<SupervisorHealth>;
 
   /**

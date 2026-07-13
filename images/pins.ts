@@ -18,8 +18,10 @@ import {
   assertUnsignedInteger,
 } from "./validate.ts";
 
+/** Guest CPU architecture a golden artifact set targets. */
 export type ArtifactArch = "aarch64" | "x86_64";
 
+/** The architectures every pin set must cover (both, in canonical order). */
 export const ARTIFACT_ARCHES: readonly ArtifactArch[] = ["aarch64", "x86_64"];
 
 export const IMAGE_PINS_VERSION = 1 as const;
@@ -65,10 +67,15 @@ export interface GuestDenoPins {
   perArch: Record<ArtifactArch, PinnedDownload>;
 }
 
+/** The validated shape of `images/pins.json` — the full input to a build. */
 export interface ImagePins {
+  /** Pins schema version; must equal {@link IMAGE_PINS_VERSION}. */
   schemaVersion: typeof IMAGE_PINS_VERSION;
+  /** Guest kernel pins (per-arch `vmlinux` url + sha256). */
   kernel: KernelPins;
+  /** Rootfs recipe pins (Debian suite/epoch, packages, sandbox user). */
   rootfs: RootfsPins;
+  /** Guest Deno release pins (per-arch download url + sha256). */
   guestDeno: GuestDenoPins;
 }
 
@@ -210,6 +217,7 @@ export function validateRootfsPins(
   };
 }
 
+/** Parse-check an arbitrary value into {@link ImagePins}, throwing on any drift. */
 export function validateImagePins(value: unknown): ImagePins {
   const pins = assertRecord(value, "image pins") as Partial<ImagePins>;
   assertKeys(
@@ -273,6 +281,7 @@ export function defaultImagePinsPath(): string {
   return fromFileUrl(new URL("./pins.json", import.meta.url));
 }
 
+/** Read and validate the committed pins (defaults to `images/pins.json`). */
 export async function loadImagePins(path?: string): Promise<ImagePins> {
   const source = path ?? defaultImagePinsPath();
   let parsed: unknown;

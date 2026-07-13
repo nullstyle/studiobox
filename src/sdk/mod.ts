@@ -42,6 +42,7 @@ export { resolveWireBackend } from "./wire_agent.ts";
 
 /** A provider installation handle; disposing restores the prior provider. */
 export interface StudioboxInstallation extends Disposable {
+  /** The provider now installed behind the `Sandbox.create`/`connect` seam. */
   readonly provider: StudioboxProvider;
   /** Restore the previously-installed provider (idempotent). */
   uninstall(): void;

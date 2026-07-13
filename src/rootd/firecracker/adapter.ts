@@ -28,18 +28,26 @@ import {
   type RuntimeMachine,
 } from "./runtime.ts";
 
+/** A stage entry with `mode` elided — the adapter always forces copy mode. */
 export type CopyStageEntry = Omit<StageEntry, "mode">;
 
+/** A jailed cold-boot request (snapshot-restore §4 twin: {@link JailedRestoreRequest}). */
 export interface JailedLaunchRequest {
+  /** The owning sandbox id (`sbx_loc_…`). */
   readonly sandboxId: string;
   /** Fresh per boot attempt; never the public stable sandbox id. */
   readonly executionId: string;
+  /** Jailer options minus `id`/`stage` (the adapter supplies those). */
   readonly jailer: Omit<JailerOptions, "id" | "stage">;
   /** Caller cannot select hardlinks; the adapter always emits copy mode. */
   readonly stage: ReadonlyArray<CopyStageEntry>;
+  /** The cold-boot machine configuration. */
   readonly config: VmConfig;
+  /** Deadline (ms) for the guest agent to become reachable. */
   readonly readinessTimeoutMs?: number;
+  /** External cancellation. */
   readonly signal?: AbortSignal;
+  /** Jailer metadata (sandbox/execution id keys). */
   readonly metadata?: Readonly<Record<string, string>>;
 }
 
@@ -67,7 +75,9 @@ export interface JailedRestoreRequest {
   readonly metadata?: Readonly<Record<string, string>>;
 }
 
+/** Shutdown controls layering a supervisor deadline over the package stages. */
 export interface AdapterShutdownOptions {
+  /** Per-stage shutdown timers passed through to the package. */
   readonly stages?: ShutdownOptions;
   /** Outer supervisor wall clock, independent of package stage timers. */
   readonly timeoutMs?: number;
@@ -83,15 +93,18 @@ export class FirecrackerAdapter {
   readonly #registry: CreateOnlyVmRegistry;
   readonly #runtime: FirecrackerRuntime;
 
+  /** Wire the registry and (optionally) an injected runtime for tests. */
   constructor(options: FirecrackerAdapterOptions) {
     this.#registry = options.registry;
     this.#runtime = options.runtime ?? nullstyleFirecrackerRuntime;
   }
 
+  /** The runtime's Firecracker compatibility window. */
   get compatibility(): FirecrackerCompatibility {
     return this.#runtime.compatibility;
   }
 
+  /** Cold-boot a jailed microVM and journal it; resolves the live machine. */
   async launch(request: JailedLaunchRequest): Promise<FirecrackerMachine> {
     assertExecutionId(request.executionId);
     const options = {
@@ -215,32 +228,39 @@ export class FirecrackerAdapter {
 
 /** A launched machine that tracks every outbound vsock connection. */
 export class FirecrackerMachine implements AsyncDisposable {
+  /** The owning sandbox id (`sbx_loc_…`). */
   readonly sandboxId: string;
   readonly #machine: RuntimeMachine;
   readonly #outbound = new Set<VsockConn>();
 
+  /** Wrap a launched/restored runtime machine for `sandboxId`. */
   constructor(sandboxId: string, machine: RuntimeMachine) {
     this.sandboxId = sandboxId;
     this.#machine = machine;
     void machine.exited.then(() => this.closeOutboundConnections());
   }
 
+  /** The boot attempt's execution id (the VMM id). */
   get executionId(): string {
     return this.#machine.vmId;
   }
 
+  /** The VMM process pid. */
   get pid(): number {
     return this.#machine.pid;
   }
 
+  /** Current VMM lifecycle state. */
   get state(): RuntimeMachine["state"] {
     return this.#machine.state;
   }
 
+  /** Resolves when the VMM process exits. */
   get exited(): Promise<VmmExit> {
     return this.#machine.exited;
   }
 
+  /** Dial a guest vsock port, tracking the connection for teardown. */
   async connectVsock(
     port: number,
     options?: VsockDialOptions,
@@ -257,6 +277,7 @@ export class FirecrackerMachine implements AsyncDisposable {
     }
   }
 
+  /** Close every tracked outbound vsock connection (idempotent). */
   closeOutboundConnections(): void {
     for (const connection of this.#outbound) {
       try {
@@ -268,6 +289,7 @@ export class FirecrackerMachine implements AsyncDisposable {
     this.#outbound.clear();
   }
 
+  /** Graceful shutdown under an optional supervisor deadline; force-kills on expiry. */
   async shutdown(options: AdapterShutdownOptions = {}): Promise<VmmExit> {
     this.closeOutboundConnections();
     const operation = "shut down Firecracker";
@@ -286,6 +308,7 @@ export class FirecrackerMachine implements AsyncDisposable {
     }
   }
 
+  /** Force-terminate the VMM; resolves the observed exit. */
   async kill(): Promise<VmmExit> {
     this.closeOutboundConnections();
     try {
@@ -297,6 +320,7 @@ export class FirecrackerMachine implements AsyncDisposable {
     }
   }
 
+  /** `await using` disposal — closes connections and disposes the VMM. */
   async [Symbol.asyncDispose](): Promise<void> {
     this.closeOutboundConnections();
     try {

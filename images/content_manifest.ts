@@ -53,13 +53,17 @@ const ENTRY_TYPES: readonly ContentEntryType[] = [
   "socket",
 ];
 
+/** One path in a rootfs tree: its type, POSIX metadata, and content hash. */
 export interface ContentEntry {
   /** Relative path, `/`-separated, no leading slash or dot segments. */
   path: string;
+  /** File type (`file`, `dir`, `symlink`, device, `fifo`, `socket`). */
   type: ContentEntryType;
   /** Permission bits only (0..0o7777). */
   mode: number;
+  /** Owning user id. */
   uid: number;
+  /** Owning group id. */
   gid: number;
   /** Byte size for files; 0 for everything else. */
   sizeBytes: number;

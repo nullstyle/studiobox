@@ -12,6 +12,9 @@ import type {
 
 /** Tier C upstream-compatible snapshot value. */
 export abstract class Snapshot {
+  /** Snapshots a volume (Tier C). Rejects with
+   * {@linkcode UnsupportedFeatureError}; post-1.0 maps onto Firecracker
+   * snapshots + overlay images. */
   static create(
     _idOrSlug: VolumeId | VolumeSlug,
     _options: SnapshotInit & BaseClientOptions,
@@ -19,6 +22,8 @@ export abstract class Snapshot {
     return Promise.reject(new UnsupportedFeatureError("Snapshot.create"));
   }
 
+  /** Fetches a snapshot by id or slug (Tier C). Rejects with
+   * {@linkcode UnsupportedFeatureError}. */
   static get(
     _idOrSlug: SnapshotId | SnapshotSlug,
     _options?: BaseClientOptions,
@@ -26,14 +31,22 @@ export abstract class Snapshot {
     return Promise.reject(new UnsupportedFeatureError("Snapshot.get"));
   }
 
+  /** The snapshot's unique id. */
   abstract get id(): string;
+  /** The snapshot's human-readable slug. */
   abstract get slug(): string;
+  /** The region the snapshot lives in. */
   abstract get region(): string;
+  /** Bytes currently allocated by the snapshot. */
   abstract get allocatedSize(): number;
+  /** Bytes of the snapshot when flattened. */
   abstract get flattenedSize(): number;
+  /** Whether a sandbox can boot from this snapshot. */
   abstract get isBootable(): boolean;
+  /** The volume this snapshot was taken from. */
   abstract get volume(): { id: VolumeId; slug: VolumeSlug };
 
+  /** Node's custom-inspect hook: renders a compact `Snapshot { … }` summary. */
   [util.inspect.custom](
     depth: number,
     options: util.InspectOptionsStylized,

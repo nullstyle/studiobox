@@ -31,11 +31,16 @@ export interface FirecrackerErrorDetails {
  * are deliberately not copied into `message` or `details`.
  */
 export class FirecrackerAdapterError extends Error {
+  /** Stable, redacted error class. */
   readonly code: FirecrackerAdapterErrorCode;
+  /** The adapter operation that failed (e.g. `"launch"`). */
   readonly operation: string;
+  /** Whether retrying the operation may succeed. */
   readonly retryable: boolean;
+  /** Redacted structured detail (no host paths or dependency text). */
   readonly details: Readonly<FirecrackerErrorDetails>;
 
+  /** Construct from an explicit code/operation/message/retryable set. */
   constructor(options: {
     code: FirecrackerAdapterErrorCode;
     operation: string;
@@ -53,9 +58,12 @@ export class FirecrackerAdapterError extends Error {
   }
 }
 
+/** Thrown when a boot attempt's execution id is already journaled. */
 export class ExecutionIdConflictError extends FirecrackerAdapterError {
+  /** The conflicting execution id. */
   readonly executionId: string;
 
+  /** Construct for the given `executionId`, preserving an optional `cause`. */
   constructor(executionId: string, cause?: unknown) {
     super({
       code: "SBX_FC_EXECUTION_CONFLICT",
@@ -69,9 +77,12 @@ export class ExecutionIdConflictError extends FirecrackerAdapterError {
   }
 }
 
+/** Thrown when a journal update targets an execution no longer in that state. */
 export class StaleExecutionIdError extends FirecrackerAdapterError {
+  /** The execution id whose state no longer matched. */
   readonly executionId: string;
 
+  /** Construct for `executionId`, naming the `operation` that was invalid. */
   constructor(executionId: string, operation = "update execution journal") {
     super({
       code: "SBX_FC_STATE",

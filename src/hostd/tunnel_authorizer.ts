@@ -6,13 +6,19 @@ import {
   type TunnelTicketBinding,
 } from "../security/tickets.ts";
 
+/** The target a privileged bridge open/reserve is scoped to. */
 export interface PrivilegedBridgeRequest {
+  /** The sandbox id the ticket must be bound to. */
   sandboxId: string;
+  /** The boot attempt (jailer id) the bridge reaches. */
   executionId: string;
+  /** Guest TCP port the bridge terminates at (1..65535). */
   guestPort: number;
 }
 
+/** Privileged (rootd-side) seam that dials a guest bridge for a request. */
 export interface PrivilegedBridgeFactory<Bridge> {
+  /** Open (dial) the guest bridge for `request`. */
   openBridge(
     request: PrivilegedBridgeRequest,
     signal?: AbortSignal,
@@ -62,6 +68,7 @@ export class TunnelAuthorizer<Bridge> {
   readonly #tickets: SingleUseTicketStore;
   readonly #bridges: PrivilegedBridgeFactory<Bridge>;
 
+  /** Wire the ticket store and the privileged bridge factory it gates. */
   constructor(
     tickets: SingleUseTicketStore,
     bridges: PrivilegedBridgeFactory<Bridge>,
@@ -70,6 +77,11 @@ export class TunnelAuthorizer<Bridge> {
     this.#bridges = bridges;
   }
 
+  /**
+   * Consume-and-burn the single-use `ticket` (unprivileged), verify the
+   * request matches its binding, then open the privileged bridge. The guest
+   * is never reached before the ticket is burned.
+   */
   async authorizeAndOpen(
     ticket: Uint8Array,
     binding: TunnelTicketBinding,

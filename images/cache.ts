@@ -56,9 +56,12 @@ export const ABANDONED_TEMP_MAX_AGE_MS = 60 * 60 * 1000;
 
 const TEMP_DIR_PREFIX = ".tmp-";
 
+/** Thrown by cache operations (bad key, uncached set, corrupt/verify failures). */
 export class ArtifactCacheError extends Error {
+  /** Stable machine-readable error code. */
   readonly code = "SBX_ARTIFACT_CACHE";
 
+  /** Construct with a message and optional `cause`. */
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "ArtifactCacheError";
@@ -76,6 +79,7 @@ export class ArtifactCacheError extends Error {
  * (or any other source); do not touch the cache.
  */
 export interface ArtifactReferenceReader {
+  /** Every manifest hash still referenced by a live journal record. */
   listReferencedManifestHashes(): Promise<string[]>;
 }
 
@@ -171,14 +175,21 @@ export function defaultArtifactCacheRoot(): string {
   return join(home, ".studiobox", "artifacts");
 }
 
+/**
+ * Manifest-hash-addressed store of golden artifact sets with refcount- and
+ * journal-aware garbage collection. Single-process, single-writer.
+ */
 export class ArtifactCache {
+  /** Absolute cache root directory (one subdir per manifest hash). */
   readonly root: string;
   #tail: Promise<void> = Promise.resolve();
 
+  /** Open a cache at `options.root` (defaults to `~/.studiobox/artifacts`). */
   constructor(options: ArtifactCacheOptions = {}) {
     this.root = options.root ?? defaultArtifactCacheRoot();
   }
 
+  /** Absolute directory for a set, after validating `hash` is sha256 hex. */
   setPath(hash: string): string {
     if (!isSha256Hex(hash)) {
       throw new ArtifactCacheError(
@@ -210,6 +221,7 @@ export class ArtifactCache {
     }
   }
 
+  /** Whether a complete set for `hash` is present in the cache. */
   async has(hash: string): Promise<boolean> {
     try {
       const info = await Deno.stat(this.setPath(hash));
@@ -243,6 +255,7 @@ export class ArtifactCache {
     return hashes.sort();
   }
 
+  /** Read and validate the `manifest.json` of a cached set. */
   async readManifest(hash: string): Promise<ArtifactManifest> {
     return await readArtifactManifest(
       join(this.setPath(hash), MANIFEST_FILE_NAME),
@@ -272,6 +285,11 @@ export class ArtifactCache {
    * a crash never leaves a half-visible set and a corrupt copy never
    * becomes visible. Returns `created: false` if the hash was already
    * cached (the existing set wins).
+   */
+  /**
+   * Import a built artifact set: staged under a temp dir, every file fsync'd
+   * and verified against the manifest's sha256 pins, then atomically renamed
+   * into place. Returns `created: false` if the hash was already cached.
    */
   store(options: StoreArtifactSetOptions): Promise<StoreArtifactSetResult> {
     return this.#exclusive(() => this.#storeLocked(options));
@@ -336,6 +354,7 @@ export class ArtifactCache {
     return { hash, dir, created: true };
   }
 
+  /** Current local reference count for a cached set (0 if none recorded). */
   refcount(hash: string): Promise<number> {
     return this.#readRefcount(hash);
   }
@@ -377,6 +396,7 @@ export class ArtifactCache {
     }
   }
 
+  /** Increment the set's refcount (durably) and return the new value. */
   acquire(hash: string): Promise<number> {
     return this.#exclusive(async () => {
       const next = (await this.#readRefcount(hash)) + 1;
@@ -385,6 +405,7 @@ export class ArtifactCache {
     });
   }
 
+  /** Decrement the set's refcount (durably); throws if already zero. */
   release(hash: string): Promise<number> {
     return this.#exclusive(async () => {
       const current = await this.#readRefcount(hash);
@@ -405,6 +426,11 @@ export class ArtifactCache {
    * corrupt is kept (fail closed) — never silently reaped. Root-level
    * `.tmp-*` directories abandoned by a crashed store are swept once
    * they are older than {@link ABANDONED_TEMP_MAX_AGE_MS}.
+   */
+  /**
+   * Delete every set that is both at refcount zero and unreferenced by the
+   * journal ({@link ArtifactReferenceReader}); corrupt-refcount sets are kept
+   * (fail closed). Also sweeps abandoned crashed-`store` temp dirs.
    */
   gc(reader: ArtifactReferenceReader): Promise<ArtifactGcResult> {
     return this.#exclusive(async () => {

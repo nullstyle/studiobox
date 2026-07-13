@@ -13,9 +13,12 @@ import { dirname } from "@std/path";
 import type { ArtifactArch, ImagePins } from "./pins.ts";
 import { sha256Hex, sha256HexOfFile } from "./validate.ts";
 
+/** Thrown when an on-disk or fetched kernel fails its sha256 pin check. */
 export class KernelVerificationError extends Error {
+  /** Stable machine-readable error code. */
   readonly code = "SBX_KERNEL_VERIFY";
 
+  /** Construct with a human-readable description of the mismatch. */
   constructor(message: string) {
     super(message);
     this.name = "KernelVerificationError";

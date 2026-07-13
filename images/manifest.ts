@@ -66,7 +66,9 @@ export interface GuestDenoArtifact {
  * not achievable across builds.
  */
 export interface RootfsIdentity {
+  /** Which identity scheme `sha256` was computed under. */
   kind: "imageBytes" | "contentManifest";
+  /** The rootfs identity digest for the chosen `kind`. */
   sha256: string;
 }
 
@@ -88,12 +90,19 @@ export interface AgentBinaryArtifact {
   placeholder: boolean;
 }
 
+/** The full `manifest.json` for a built artifact set (pins + observed identity). */
 export interface ArtifactManifest {
+  /** Manifest schema version; must equal {@link ARTIFACT_MANIFEST_VERSION}. */
   schemaVersion: typeof ARTIFACT_MANIFEST_VERSION;
+  /** Target guest architecture. */
   arch: ArtifactArch;
+  /** Pinned guest kernel (version + url + sha256). */
   kernel: KernelArtifact;
+  /** Rootfs recipe, guest Deno, and observed rootfs identity. */
   rootfs: RootfsArtifact;
+  /** The guest agent (`studioboxd`) binary staged into the set. */
   agentBinary: AgentBinaryArtifact;
+  /** Build timestamp (RFC 3339); excluded from the manifest hash. */
   createdAt: string;
 }
 
@@ -245,6 +254,7 @@ function validateAgentBinary(value: unknown): AgentBinaryArtifact {
   };
 }
 
+/** Parse-check an arbitrary value into {@link ArtifactManifest}, failing closed. */
 export function validateArtifactManifest(value: unknown): ArtifactManifest {
   const manifest = assertRecord(value, "artifact manifest") as Partial<
     ArtifactManifest
@@ -350,6 +360,7 @@ export function manifestFromPins(
   );
 }
 
+/** Read and validate a `manifest.json` from disk. */
 export async function readArtifactManifest(
   path: string,
 ): Promise<ArtifactManifest> {
@@ -364,6 +375,7 @@ export async function readArtifactManifest(
   return validateArtifactManifest(parsed);
 }
 
+/** Validate then atomically write a manifest to `path` (temp file + rename). */
 export async function writeArtifactManifest(
   path: string,
   manifest: ArtifactManifest,

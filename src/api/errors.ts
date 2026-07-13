@@ -1,7 +1,11 @@
 /** Base class for errors raised by the sandbox API. */
 export abstract class SandboxSdkError extends Error {}
 
+/** Raised when the initial handshake to a sandbox fails (bad status/code from
+ * the host while establishing the session). */
 export class ConnectionEstablishmentError extends SandboxSdkError {
+  /** Builds the error from the failing HTTP `status`, host `code`, `message`,
+   * and optional `traceId`. */
   constructor(
     public status: number,
     public code: string,
@@ -17,7 +21,10 @@ export class ConnectionEstablishmentError extends SandboxSdkError {
   }
 }
 
+/** Raised when the agent returns an error over the RPC channel, carrying the
+ * protocol `code` and optional payload. */
 export class RpcError extends SandboxSdkError {
+  /** Builds the error from the RPC `code`, `message`, and optional `data`. */
   constructor(
     public code: number,
     message: string,
@@ -28,7 +35,10 @@ export class RpcError extends SandboxSdkError {
   }
 }
 
+/** Raised when an operation is attempted on a sandbox whose connection has
+ * already closed (or the socket closed mid-flight). */
 export class ConnectionClosedError extends SandboxSdkError {
+  /** Builds the error from the optional WebSocket close `code` and `reason`. */
   constructor(
     public code: number | undefined = undefined,
     public reason: string | undefined = undefined,
@@ -44,21 +54,30 @@ export class ConnectionClosedError extends SandboxSdkError {
   }
 }
 
+/** Thrown by the `sh` builder when a command exits nonzero. Note it extends
+ * `Error`, not {@linkcode SandboxSdkError} — an upstream quirk reproduced
+ * faithfully. The message omits the command text. */
 export class SandboxCommandError extends Error {
+  /** Builds the error from the failure `message` and the process exit `code`. */
   constructor(message: string, public readonly code: number) {
     super(message);
     this.name = "SandboxCommandError";
   }
 }
 
+/** Raised when a sandbox `timeout` value is malformed or out of range. */
 export class InvalidTimeoutError extends SandboxSdkError {
+  /** Builds the error from a human-readable `message`. */
   constructor(message: string) {
     super(message);
     this.name = "InvalidTimeoutError";
   }
 }
 
+/** Raised when a `memory` value is malformed or outside the 768–4096 MiB
+ * contract (see `parseMemory` in `memory.ts`). */
 export class InvalidMemoryError extends SandboxSdkError {
+  /** Builds the error from a human-readable `message`. */
   constructor(message: string) {
     super(message);
     this.name = "InvalidMemoryError";
@@ -75,13 +94,16 @@ export class MissingTokenError extends SandboxSdkError {
 
 /** Exported for upstream type compatibility; Studiobox never validates a cloud token. */
 export class InvalidTokenError extends SandboxSdkError {
+  /** Builds the error from a human-readable `message`. */
   constructor(message: string) {
     super(message);
     this.name = "InvalidTokenError";
   }
 }
 
+/** Raised when a `kill()` request to the host is rejected. */
 export class SandboxKillError extends SandboxSdkError {
+  /** Builds the error from the host's HTTP `status` and `response` body. */
   constructor(
     public status: number,
     public response: string,
@@ -91,7 +113,9 @@ export class SandboxKillError extends SandboxSdkError {
   }
 }
 
+/** Raised when transport to the host fails (DNS, connect, socket, TLS). */
 export class NetworkError extends SandboxSdkError {
+  /** Builds the error from a `message` and an optional underlying `cause`. */
   constructor(message: string, options: { cause?: unknown } = {}) {
     super(message, options);
     this.name = "NetworkError";
@@ -100,6 +124,8 @@ export class NetworkError extends SandboxSdkError {
 
 /** Exported for upstream type compatibility; Studiobox does not use the cloud API. */
 export class ApiError extends Error {
+  /** Builds the error from the cloud API `status`, `code`, `message`, and
+   * optional `traceId`. */
   constructor(
     public status: number,
     public code: string,
@@ -113,6 +139,7 @@ export class ApiError extends Error {
 
 /** Raised by intentionally unsupported Tier C surface area. */
 export class UnsupportedFeatureError extends SandboxSdkError {
+  /** Builds the error, tagging it with the `feature` name that is unsupported. */
   constructor(public readonly feature: string) {
     super(`${feature} is not supported by Studiobox 1.0`);
     this.name = "UnsupportedFeatureError";
@@ -121,6 +148,7 @@ export class UnsupportedFeatureError extends SandboxSdkError {
 
 /** Raised when a specific SDK feature is not yet implemented by this backend. */
 export class ImplementationPendingError extends SandboxSdkError {
+  /** Builds the error, tagging it with the `feature` name that is unimplemented. */
   constructor(public readonly feature: string) {
     super(`${feature} is not wired to a Studiobox runtime`);
     this.name = "ImplementationPendingError";
@@ -137,6 +165,8 @@ export class ImplementationPendingError extends SandboxSdkError {
  * the caller has a working import but nothing behind `Sandbox.create()`.
  */
 export class ProviderNotInstalledError extends SandboxSdkError {
+  /** Builds the actionable error, chaining the optional underlying `cause`
+   * from the failed auto-wire attempt. */
   constructor(cause?: unknown) {
     super(
       [
@@ -162,6 +192,7 @@ export class ProviderNotInstalledError extends SandboxSdkError {
 
 /** Raised before launch when the shared Firecracker host cannot admit a VM. */
 export class HostCapacityError extends SandboxSdkError {
+  /** Builds the error from a human-readable `message`. */
   constructor(message: string) {
     super(message);
     this.name = "HostCapacityError";

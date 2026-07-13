@@ -45,9 +45,12 @@ export interface DialTunnelOptions {
 
 /** A failed tunnel dial, carrying the ACK status when the server sent one. */
 export class TunnelDialError extends Error {
+  /** Stable machine-readable error code. */
   readonly code = "SBX_TUNNEL_DIAL";
+  /** The `SBXACK1` status the server sent, when it sent one. */
   readonly status?: TunnelStatus;
 
+  /** Construct with a message and the optional ACK status. */
   constructor(message: string, status?: TunnelStatus) {
     super(message);
     this.name = "TunnelDialError";

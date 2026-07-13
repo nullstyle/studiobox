@@ -244,6 +244,7 @@ export class StudioboxProvider implements SandboxProvider {
   readonly #identityOverride: ContractIdentity | undefined;
   #identity: ContractIdentity | undefined;
 
+  /** Construct with explicit control/tunnel endpoints and optional token. */
   constructor(options: StudioboxProviderOptions) {
     this.#control = options.control;
     this.#tunnel = options.tunnel;
@@ -485,6 +486,11 @@ export class StudioboxProvider implements SandboxProvider {
     });
   }
 
+  /**
+   * Back `Sandbox.create`: boot a microVM over hostd and return the façade
+   * (upstream semantics). Tier C options (`secrets`/`volumes`/`root`/`ssh`/
+   * `port`) throw `UnsupportedFeatureError`; `env` is applied post-create.
+   */
   async create(options: SandboxOptions = {}): Promise<Sandbox> {
     for (const key of ["secrets", "volumes", "root", "ssh", "port"] as const) {
       if (options[key] !== undefined) {
@@ -527,6 +533,7 @@ export class StudioboxProvider implements SandboxProvider {
     return sandbox;
   }
 
+  /** Back `Sandbox.connect`: re-attach to a running sandbox by its id. */
   async connect(id: string, options: ConnectOptions = {}): Promise<Sandbox> {
     if (!SANDBOX_ID_RE.test(id)) {
       throw new ConnectionEstablishmentError(
@@ -540,6 +547,7 @@ export class StudioboxProvider implements SandboxProvider {
     return await this.#attachSandbox(control, connection, id);
   }
 
+  /** Back `Client.sandboxes.list` (Tier A): running sandboxes, label-filtered. */
   async list(options?: SandboxesListOptions): Promise<SandboxMetadata[]> {
     const credential = this.#resolveToken({});
     const { control, connection } = await this.#connectHostControl(credential);

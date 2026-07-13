@@ -180,6 +180,7 @@ export type SupervisorLaunchPlan =
 
 /** Resolves logical artifact/allocation ids to a concrete launch plan. */
 export interface SupervisorLaunchPlanner {
+  /** Resolve a logical launch request to a concrete jailer/stage/config plan. */
   resolve(request: SupervisorLaunchRequest): Promise<SupervisorLaunchPlan>;
 }
 
@@ -190,7 +191,9 @@ export interface SupervisorLaunchPlanner {
  * the record in `quarantined` with the failure detail.
  */
 export interface ReclaimHook {
+  /** Hook name, surfaced in quarantine failure detail. */
   readonly name: string;
+  /** Reclaim this hook's studiobox-owned resources for a record. */
   reclaim(record: SandboxRecord): Promise<void>;
 }
 
@@ -268,6 +271,7 @@ const DEFAULT_RESTORE_PERSONALIZER: RestorePersonalizer = {
   },
 };
 
+/** Construction options for {@linkcode SupervisorCore}. */
 export interface SupervisorCoreOptions {
   /** The one authoritative journal (shared with the nested jail registry). */
   readonly store: SandboxStateStore;
@@ -281,6 +285,7 @@ export interface SupervisorCoreOptions {
    * ever uses it, so cold-only deploys need not configure one.
    */
   readonly personalizer?: RestorePersonalizer;
+  /** Studiobox-layer reclaimers; defaults to {@linkcode NOOP_RECLAIM_HOOKS}. */
   readonly reclaimHooks?: readonly ReclaimHook[];
   /**
    * Installs the per-sandbox host→guest port forward for
@@ -288,6 +293,7 @@ export interface SupervisorCoreOptions {
    * dataplane is configured, and `exposeHttp` fails typed-unavailable.
    */
   readonly portForward?: PortForwardInstaller;
+  /** Build identifier surfaced in {@linkcode SupervisorApi.health}. */
   readonly buildId?: string;
   /** Clock seam (unix milliseconds). */
   readonly now?: () => number;
@@ -359,6 +365,7 @@ export class SupervisorCore implements SupervisorApi {
   readonly #exposeChain = new Map<string, Promise<void>>();
   #reconciling = false;
 
+  /** Assemble the core from its journal, planner, and injection seams. */
   constructor(options: SupervisorCoreOptions) {
     this.#store = options.store;
     this.#planner = options.planner;
@@ -377,6 +384,7 @@ export class SupervisorCore implements SupervisorApi {
     this.#startedAtUnixMs = this.#now();
   }
 
+  /** Journal-before-spawn launch of one execution (see {@link SupervisorApi}). */
   async launch(
     request: SupervisorLaunchRequest,
   ): Promise<SupervisorMachineStatus> {
@@ -714,11 +722,13 @@ export class SupervisorCore implements SupervisorApi {
     return cleanupError;
   }
 
+  /** Journal + liveness view of one execution. */
   async status(executionId: string): Promise<SupervisorMachineStatus> {
     const record = await this.#byExecution(executionId);
     return this.#statusOf(record, executionId);
   }
 
+  /** Resource usage of a ready, live execution (zeros until M10/M11). */
   async usage(executionId: string): Promise<SupervisorMachineUsage> {
     const record = await this.#byExecution(executionId);
     this.#requireReadyAndLive(record, executionId, "usage");
@@ -734,6 +744,7 @@ export class SupervisorCore implements SupervisorApi {
     };
   }
 
+  /** Assert the guest agent is reachable (phase + VMM liveness + vsock probe). */
   async probeAgent(executionId: string): Promise<void> {
     const record = await this.#byExecution(executionId);
     this.#requireReadyAndLive(record, executionId, "probeAgent");
@@ -746,6 +757,7 @@ export class SupervisorCore implements SupervisorApi {
     conn.close();
   }
 
+  /** Install the per-sandbox host→guest port forward (M10 §6). */
   async exposeHttp(
     executionId: string,
     guestPort: number,
@@ -906,6 +918,7 @@ export class SupervisorCore implements SupervisorApi {
     return await this.#machines.get(executionId)!.connectVsock(port, options);
   }
 
+  /** Authorize a one-shot guest bridge for a ready, live sandbox (never dials). */
   async openBridge(
     request: SupervisorBridgeRequest,
   ): Promise<SupervisorBridgeGrant> {
@@ -1006,14 +1019,17 @@ export class SupervisorCore implements SupervisorApi {
     return entry.grant;
   }
 
+  /** Graceful stop (escalating inside the adapter), then full reclaim. */
   shutdown(executionId: string): Promise<void> {
     return this.#terminate(executionId, "shutdown");
   }
 
+  /** Immediate SIGKILL via the adapter, then full reclaim. */
   kill(executionId: string): Promise<void> {
     return this.#terminate(executionId, "kill");
   }
 
+  /** Composed destructive reconciliation sweep (DESIGN.md §6). */
   async reconcile(): Promise<SupervisorReconcileSummary> {
     if (this.#reconciling) {
       throw new SupervisorError(
@@ -1042,6 +1058,7 @@ export class SupervisorCore implements SupervisorApi {
     }
   }
 
+  /** Snapshot of supervisor liveness/health. */
   health(): Promise<SupervisorHealth> {
     this.#purgeExpiredBridges();
     let activeMachines = 0;
@@ -1061,6 +1078,7 @@ export class SupervisorCore implements SupervisorApi {
     });
   }
 
+  /** Liveness echo of an unsigned 64-bit `nonce`. */
   ping(nonce: bigint): Promise<bigint> {
     if (nonce < 0n || nonce > 0xffff_ffff_ffff_ffffn) {
       return Promise.reject(

@@ -26,6 +26,7 @@ import type { SandboxRecord } from "../state/model.ts";
  * Any journal owner (hostd, tests) can hand in its own view.
  */
 export interface SandboxRecordSource {
+  /** Every sandbox record in the journal. */
   list(): Promise<SandboxRecord[]>;
 }
 
@@ -40,6 +41,7 @@ const RELEASING_PHASE = "terminated";
 export class JournalArtifactReferenceReader implements ArtifactReferenceReader {
   readonly #source: SandboxRecordSource;
 
+  /** Read references from the given journal `source`. */
   constructor(source: SandboxRecordSource) {
     this.#source = source;
   }

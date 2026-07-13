@@ -7,6 +7,7 @@ export function createExecutionId(): string {
   return `sbx-${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
+/** Throw a jailer error unless `executionId` matches the jail-safe grammar. */
 export function assertExecutionId(executionId: string): void {
   if (!EXECUTION_ID_PATTERN.test(executionId)) {
     throw new FirecrackerAdapterError({

@@ -1180,9 +1180,13 @@ export interface WireAgentStubs {
 
 /** The {@link AgentApi}-shaped backend a facade sandbox binds to. */
 export interface SandboxBackend {
+  /** Process spawning (`spawn` → `ChildProcess`). */
   readonly processes: AgentProcessSpawner;
+  /** Filesystem plane (`readFile`…`open`/`walk`). */
   readonly fs: AgentFileSystem;
+  /** Environment-variable plane. */
   readonly env: AgentEnvironment;
+  /** `deno.eval` / `deno.repl` / `deno.run` plane. */
   readonly deno: AgentDenoRuntime;
 }
 

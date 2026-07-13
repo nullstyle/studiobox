@@ -21,9 +21,12 @@ import { assertUnsignedInteger } from "./validate.ts";
 export const OVERLAY_MIN_BYTES = 1024 * 1024;
 export const OVERLAY_MAX_BYTES = 1024 * 1024 * 1024 * 1024;
 
+/** Thrown when staging fails (bad source, existing target, inode aliasing). */
 export class StagingError extends Error {
+  /** Stable machine-readable error code. */
   readonly code = "SBX_STAGING";
 
+  /** Construct with a human-readable description of the failure. */
   constructor(message: string) {
     super(message);
     this.name = "StagingError";
@@ -44,9 +47,13 @@ export interface StageArtifactsOptions {
   overlayFileName?: string;
 }
 
+/** Absolute paths of the files staged into a jail root. */
 export interface StagedArtifacts {
+  /** The staged kernel copy. */
   kernelPath: string;
+  /** The staged golden rootfs copy (fresh inode, never the golden source). */
   rootfsPath: string;
+  /** The fresh sparse overlay file (`/dev/vdb`; formatted in-guest at boot). */
   overlayPath: string;
 }
 

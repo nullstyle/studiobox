@@ -155,6 +155,7 @@ export class UdsSupervisorAcceptSource implements SupervisorAcceptSource {
   #closed = false;
   #nextId = 0;
 
+  /** Bind (or adopt) the UDS at `path` and prepare the accept loop. */
   constructor(path: string, options: UdsAcceptSourceOptions = {}) {
     this.#path = path;
     this.#options = options;
@@ -162,10 +163,12 @@ export class UdsSupervisorAcceptSource implements SupervisorAcceptSource {
       Deno.listen({ transport: "unix", path });
   }
 
+  /** Whether {@link close} has been called. */
   get closed(): boolean {
     return this.#closed;
   }
 
+  /** Yield each accepted connection wrapped as a transport, until closed. */
   async *accept(): AsyncIterable<RpcAcceptedTransport> {
     while (!this.#closed) {
       let conn: Deno.Conn;
@@ -205,6 +208,7 @@ export class UdsSupervisorAcceptSource implements SupervisorAcceptSource {
     }
   }
 
+  /** Stop accepting and close the listener (idempotent). */
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -224,19 +228,25 @@ export interface SupervisorServerOptions extends SupervisorWireOptions {
   readonly onConnectionError?: (error: unknown) => void;
   /** See {@linkcode UdsAcceptSourceOptions.onTransportError}. */
   readonly onTransportError?: (error: unknown, connectionId: string) => void;
+  /** Per-transport graceful-close budget (ms). */
   readonly closeTimeoutMs?: number;
 }
 
 /** Accept-loop lifecycle counters. */
 export interface SupervisorServerStats {
+  /** Connections accepted since start. */
   readonly acceptedConnections: number;
+  /** Connections currently open. */
   readonly activeConnections: number;
+  /** Connections that failed init or serve. */
   readonly failedConnections: number;
 }
 
 /** A running supervisor wire server. */
 export interface SupervisorServerHandle {
+  /** The UDS path the server is listening on. */
   readonly socketPath: string;
+  /** Live accept-loop counters. */
   readonly stats: SupervisorServerStats;
   /** Stop accepting, close every active session, remove the socket file. */
   close(): Promise<void>;

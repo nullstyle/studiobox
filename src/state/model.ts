@@ -70,6 +70,7 @@ export interface MachineJournalState {
 export interface ArtifactReference {
   /** sha256 hex over the manifest input pins (`images/manifest.ts`). */
   manifestHash: string;
+  /** Guest architecture the set was built for. */
   arch: "aarch64" | "x86_64";
 }
 
