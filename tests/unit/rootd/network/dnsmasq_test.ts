@@ -91,11 +91,13 @@ Deno.test("install writes the conf-file and spawns dnsmasq with the exact argv",
   assertEquals(writer.writes, [
     { path: "/run/studiobox/dns/0.conf", contents: FRAGMENT },
   ]);
-  assertEquals(runner.calls.length, 1);
-  assertEquals(runner.calls[0].bin, "dnsmasq");
-  assertEquals(runner.calls[0].stdin, "");
-  assertEquals(runner.calls[0].args, [
-    "--keep-in-foreground=false",
+  assertEquals(runner.calls.length, 2);
+  // The run dir is created before the conf-file write + spawn.
+  assertEquals(runner.calls[0].bin, "mkdir");
+  assertEquals(runner.calls[0].args, ["-p", "/run/studiobox/dns"]);
+  assertEquals(runner.calls[1].bin, "dnsmasq");
+  assertEquals(runner.calls[1].stdin, "");
+  assertEquals(runner.calls[1].args, [
     "--pid-file=/run/studiobox/dns/0.pid",
     "--listen-address=10.201.0.1",
     "--bind-interfaces",
@@ -121,8 +123,8 @@ Deno.test("install with an empty fragment writes no conf-file and passes no --co
   });
 
   assertEquals(writer.writes, []);
-  assertEquals(runner.calls[0].args, [
-    "--keep-in-foreground=false",
+  assertEquals(runner.calls[0].bin, "mkdir");
+  assertEquals(runner.calls[1].args, [
     "--pid-file=/run/studiobox/dns/64.pid",
     "--listen-address=10.201.1.1",
     "--bind-interfaces",
@@ -135,7 +137,9 @@ Deno.test("install with an empty fragment writes no conf-file and passes no --co
 });
 
 Deno.test("install surfaces a spawn failure as DnsmasqError", async () => {
+  // mkdir succeeds, the dnsmasq spawn fails.
   const runner = new FakeRunner([
+    { success: true, code: 0, stderr: "" },
     { success: false, code: 1, stderr: "failed to bind" },
   ]);
   const controller = new DnsmasqController({
@@ -149,6 +153,25 @@ Deno.test("install surfaces a spawn failure as DnsmasqError", async () => {
         upstream: "1.1.1.1",
       }),
     DnsmasqError,
+  );
+});
+
+Deno.test("install surfaces a run-dir mkdir failure as DnsmasqError", async () => {
+  const runner = new FakeRunner([
+    { success: false, code: 1, stderr: "permission denied" },
+  ]);
+  const controller = new DnsmasqController({
+    runner,
+    writer: new FakeWriter(),
+  });
+  await assertRejects(
+    () =>
+      controller.install(subnetForSlot(0), {
+        fragment: "",
+        upstream: "1.1.1.1",
+      }),
+    DnsmasqError,
+    "run dir",
   );
 });
 

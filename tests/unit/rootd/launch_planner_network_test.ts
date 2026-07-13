@@ -225,11 +225,12 @@ Deno.test("resolve(restricted): adds one eth0 NIC, the ip=/studiobox cmdline, an
     assert(egressScript.includes("ip saddr != 10.201.0.2 drop"), egressScript);
     assert(egressScript.includes("1.2.3.4"), egressScript);
 
-    // dnsmasq.install(): bound to the gateway on the slot's TAP, upstream 1.1.1.1.
-    assertEquals(dp.dnsmasqRunner.calls.length, 1);
-    assertEquals(dp.dnsmasqRunner.calls[0].bin, "dnsmasq");
-    assertEquals(dp.dnsmasqRunner.calls[0].args, [
-      "--keep-in-foreground=false",
+    // dnsmasq.install(): mkdir the run dir, then bound to the gateway on the
+    // slot's TAP, upstream 1.1.1.1.
+    assertEquals(dp.dnsmasqRunner.calls.length, 2);
+    assertEquals(dp.dnsmasqRunner.calls[0].bin, "mkdir");
+    assertEquals(dp.dnsmasqRunner.calls[1].bin, "dnsmasq");
+    assertEquals(dp.dnsmasqRunner.calls[1].args, [
       "--pid-file=/run/studiobox/dns/0.pid",
       "--listen-address=10.201.0.1",
       "--bind-interfaces",
@@ -263,7 +264,10 @@ Deno.test("resolve(allowNet unset): egress.apply is called with an UNRESTRICTED 
     const script = dp.egressRunner.calls[0].stdin;
     assert(script.includes("table inet sbx_eg_"), script);
     assert(!script.includes("ip saddr != 10.201.0.2 drop"), script);
-    assert(dp.dnsmasqRunner.calls.length === 1, "dnsmasq still runs");
+    assert(
+      dp.dnsmasqRunner.calls.some((c) => c.bin === "dnsmasq"),
+      "dnsmasq still runs (unrestricted uses a plain forwarder)",
+    );
   });
 });
 

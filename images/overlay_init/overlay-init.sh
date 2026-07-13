@@ -24,6 +24,12 @@
 #                                 to a 0600 file on the writable overlay and
 #                                 passed as --token-file. REQUIRED — no
 #                                 fallback; a boot without it fails closed.
+#   studiobox.ip=<CIDR>           Static guest address for eth0 (e.g.
+#                                 10.201.0.2/30; M10 networking). Absent for a
+#                                 netless sandbox — then eth0 is left down.
+#   studiobox.gw=<IP>             Default gateway (the host TAP address).
+#   studiobox.dns=<IP>            Resolver written to /etc/resolv.conf (the
+#                                 per-sandbox dnsmasq on the gateway).
 #
 # The token rides the kernel cmdline (visible via /proc/cmdline to the
 # in-guest workload). That is acceptable under the threat model (DESIGN.md
@@ -59,10 +65,16 @@ mount -t overlay overlay \
 # Parse the studiobox.* boot-config tokens out of the kernel cmdline.
 VSOCK_PORT=""
 TOKEN_HEX=""
+GUEST_IP=""
+GUEST_GW=""
+GUEST_DNS=""
 for tok in $(cat /proc/cmdline); do
   case "$tok" in
     studiobox.vsock_port=*) VSOCK_PORT="${tok#studiobox.vsock_port=}" ;;
     studiobox.token=*) TOKEN_HEX="${tok#studiobox.token=}" ;;
+    studiobox.ip=*) GUEST_IP="${tok#studiobox.ip=}" ;;
+    studiobox.gw=*) GUEST_GW="${tok#studiobox.gw=}" ;;
+    studiobox.dns=*) GUEST_DNS="${tok#studiobox.dns=}" ;;
   esac
 done
 [ -n "$VSOCK_PORT" ] || VSOCK_PORT="$DEFAULT_VSOCK_PORT"
@@ -70,6 +82,20 @@ done
 if [ -z "$TOKEN_HEX" ]; then
   echo "overlay-init: FATAL no studiobox.token= in kernel cmdline" >&2
   exit 1
+fi
+
+# Bring up the guest NIC from the studiobox.ip/gw tokens (M10 networking). This
+# is namespace-wide, so it survives the chroot below and studioboxd inherits it.
+# Best-effort: a netless sandbox has no studiobox.ip (eth0 stays down), the
+# kernel `ip=` autoconfig may have already configured eth0, and a transient
+# failure must NOT brick the boot — so every step is guarded (set -eu is on).
+if [ -n "$GUEST_IP" ]; then
+  ip link set eth0 up 2>/dev/null || true
+  ip addr add "$GUEST_IP" dev eth0 2>/dev/null || true
+  if [ -n "$GUEST_GW" ]; then
+    ip route add default via "$GUEST_GW" 2>/dev/null || true
+  fi
+  echo "overlay-init: eth0 configured $GUEST_IP gw ${GUEST_GW:-none}"
 fi
 
 # Re-home the API mounts inside the writable overlay, then chroot into it so
@@ -86,6 +112,13 @@ mount -t devtmpfs devtmpfs /mnt/root/dev 2>/dev/null ||
 # read-only golden root. studioboxd reads it at the in-chroot path.
 TOKEN_FILE="/run/studioboxd.token"
 ( umask 077; printf '%s' "$TOKEN_HEX" > "/mnt/root${TOKEN_FILE}" )
+
+# Point the guest resolver at the per-sandbox dnsmasq (studiobox.dns). Written
+# into the writable overlay's /etc, never the read-only golden root.
+if [ -n "$GUEST_DNS" ]; then
+  mkdir -p /mnt/root/etc
+  printf 'nameserver %s\n' "$GUEST_DNS" > /mnt/root/etc/resolv.conf
+fi
 
 echo "overlay-init: overlay mounted at /mnt/root, launching studioboxd on vsock port $VSOCK_PORT"
 exec chroot /mnt/root "$AGENT" \

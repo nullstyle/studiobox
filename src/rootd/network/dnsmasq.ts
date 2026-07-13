@@ -166,11 +166,21 @@ export class DnsmasqController {
     const pidfile = this.pidfilePath(alloc.slot);
     const hasFragment = options.fragment.length > 0;
     const confFile = hasFragment ? this.confPath(alloc.slot) : undefined;
+    // The run dir must exist before dnsmasq writes its pidfile (and before the
+    // conf-file write) — dnsmasq does not create it. Idempotent `mkdir -p`.
+    const mkdir = await this.#runner.run("mkdir", ["-p", this.#runDir], "");
+    if (!mkdir.success) {
+      throw new DnsmasqError(
+        `dnsmasq run dir ${this.#runDir} could not be created: ${mkdir.stderr}`,
+      );
+    }
     if (confFile !== undefined) {
       await this.#writer.write(confFile, options.fragment);
     }
+    // dnsmasq daemonizes by default (no `--keep-in-foreground`); it writes the
+    // pidfile we reap by. `--keep-in-foreground=false` is NOT a valid option
+    // (the flag takes no value) and dnsmasq rejects the whole command line.
     const args = [
-      "--keep-in-foreground=false",
       `--pid-file=${pidfile}`,
       `--listen-address=${alloc.hostIp}`,
       "--bind-interfaces",

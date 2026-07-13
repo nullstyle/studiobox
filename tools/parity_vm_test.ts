@@ -54,6 +54,9 @@ function flagValue(name: string): string | undefined {
 const name = flagValue("--name") ?? "fc-smoke";
 const rebuild = args.has("--rebuild");
 const siblings = args.has("--siblings");
+/** The in-guest gate file to run (default: the M8 parity gate). */
+const gateFile = flagValue("--gate") ?? "tests/vm/parity_vm_test.ts";
+const gateLabel = gateFile.split("/").pop() ?? gateFile;
 
 function skip(message: string): never {
   console.log(`\n⊘ test:vm:parity skipped — ${message}\n`);
@@ -237,8 +240,8 @@ await guest(`cd ${GUEST_REPO} && "$(command -v deno)" task daemons:compile`);
 const hostdBin = `${GUEST_REPO}/.build/studiobox-hostd`;
 const rootdBin = `${GUEST_REPO}/.build/studiobox-rootd`;
 
-// --- run the parity gate as root against the real stack ---------------------
-step("running the M8 Parity-real gate inside the guest as root…");
+// --- run the gate as root against the real stack ----------------------------
+step(`running ${gateLabel} inside the guest as root…`);
 const env = [
   "SBX_VM=1",
   `SBX_VM_CACHE=${GUEST_CACHE}`,
@@ -259,15 +262,14 @@ const env = [
 const code = await guest(
   `cd ${GUEST_REPO} && sudo mkdir -p ${GUEST_WORK} && ` +
     `sudo -E env ${env} "$(command -v deno)" test -A --unstable-vsock ` +
-    `tests/vm/parity_vm_test.ts`,
+    gateFile,
   false,
 );
 
 if (code === 0) {
   console.log(
-    `\n✓ test:vm:parity OK — the M3 parity suite is green against REAL ` +
-      `sandboxes inside ${name}.`,
+    `\n✓ ${gateLabel} OK — green against REAL sandboxes inside ${name}.`,
   );
 } else {
-  fail(`the parity gate failed inside ${name} (exit ${code})`);
+  fail(`${gateLabel} failed inside ${name} (exit ${code})`);
 }

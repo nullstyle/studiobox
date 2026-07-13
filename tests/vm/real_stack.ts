@@ -76,6 +76,24 @@ export interface RealStack extends AsyncDisposable {
   readonly tunnelPort: number;
 }
 
+/** Opt-in Tier-B networking for the real stack (M10 §W5 validation). */
+export interface RealStackNetwork {
+  /** The per-sandbox dnsmasq upstream resolver; its presence enables the dataplane. */
+  readonly upstreamDns: string;
+  /** Pool CIDR override (default `10.201.0.0/16`). */
+  readonly poolCidr?: string;
+}
+
+/** Options for {@linkcode startRealStack}. */
+export interface RealStackOptions {
+  /**
+   * When set, rootd runs the Tier-B dataplane (TAP + NAT + egress + dnsmasq)
+   * so a created sandbox boots with a real NIC. Absent ⇒ the vsock-only path
+   * (the M8 parity default), which needs no root network mutation.
+   */
+  readonly network?: RealStackNetwork;
+}
+
 /**
  * Resolve the daemon argv. A compiled binary is invoked directly; the source
  * fallback runs `deno run -A --unstable-vsock <main>` with the suite's config
@@ -220,6 +238,7 @@ async function stopDaemon(daemon: Daemon | undefined): Promise<void> {
  */
 export async function startRealStack(
   config: VmSuiteConfig = readVmConfig(),
+  options: RealStackOptions = {},
 ): Promise<RealStack> {
   const runDir = await Deno.makeTempDir({ dir: config.workBase, prefix: "rs" });
   // Short jail/overlay roots: the chroot base prefixes the guest vsock sun_path
@@ -258,6 +277,14 @@ export async function startRealStack(
     memSizeMib: 512,
     overlaySizeBytes: DEFAULT_OVERLAY_SIZE_BYTES,
     agentVsockPort: DEFAULT_AGENT_VSOCK_PORT,
+    // Setting `upstreamDns` flips rootd into the Tier-B dataplane (§W4); absent,
+    // it keeps the vsock-only launch the M8 parity gate relies on.
+    ...(options.network === undefined ? {} : {
+      upstreamDns: options.network.upstreamDns,
+      ...(options.network.poolCidr === undefined
+        ? {}
+        : { poolCidr: options.network.poolCidr }),
+    }),
   };
   await Deno.writeTextFile(launchConfigPath, JSON.stringify(launchConfig));
 
