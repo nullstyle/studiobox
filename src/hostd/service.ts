@@ -256,6 +256,9 @@ export function hostFaultToWire(error: unknown): WireSbxError {
   if (error instanceof BootstrapStateError) {
     return wireError("permissionDenied", error.message);
   }
+  // An unexpected internal error: log the cause to stderr for diagnosis before
+  // genericizing it on the wire (the client only ever sees "internal").
+  console.error("hostd: unexpected internal error:", error);
   return wireError("internal", "internal host control failure");
 }
 

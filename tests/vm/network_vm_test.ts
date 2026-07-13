@@ -133,6 +133,69 @@ Deno.test({
 });
 
 Deno.test({
+  name:
+    "M10 network: exposeHttp forwards 127.0.0.1:<hostPort> to a guest server",
+  ignore: !inGuest,
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    await using stack = await startRealStack(readVmConfig(), {
+      network: { upstreamDns: UPSTREAM_DNS },
+    });
+    const restore = installSandboxProvider(stack.provider);
+    try {
+      const sandbox = await Sandbox.create();
+      try {
+        const guestPort = 8000;
+        // Run an HTTP server inside the guest bound on all interfaces (so the
+        // DNAT'd traffic arriving at <guestIp>:8000 reaches it).
+        // `deno eval` runs with all permissions (it takes no per-permission
+        // flags), so Deno.serve binds without an --allow-net argument.
+        const server = await sandbox.spawn("deno", {
+          args: [
+            "eval",
+            `Deno.serve({ port: ${guestPort}, hostname: "0.0.0.0" }, ` +
+            `() => new Response("exposed-ok"))`,
+          ],
+        });
+        try {
+          // Lease a host loopback port + install the DNAT.
+          const url = await sandbox.exposeHttp({ port: guestPort });
+          assertStringIncludes(url, "http://127.0.0.1:401");
+
+          // Dial the exposed URL from the HOST (loopback → OUTPUT DNAT → guest),
+          // polling until the guest server is up.
+          let body = "";
+          for (let i = 0; i < 40; i++) {
+            try {
+              const res = await fetch(url, {
+                signal: AbortSignal.timeout(2000),
+              });
+              body = await res.text();
+              if (res.ok) break;
+            } catch {
+              // server not listening yet / connection resetting
+            }
+            await new Promise((r) => setTimeout(r, 500));
+          }
+          assertEquals(body, "exposed-ok");
+        } finally {
+          // Reap the server hard and CONSUME its status before closing the
+          // sandbox — otherwise its Process.wait rejects "rpc wire client is
+          // closed" on the connection drop as an unhandled rejection.
+          await server.kill("SIGKILL").catch(() => {});
+          await server.status.catch(() => {});
+        }
+      } finally {
+        await sandbox.close();
+      }
+    } finally {
+      restore();
+    }
+  },
+});
+
+Deno.test({
   name: "M10 network: reclaim leaves zero per-sandbox residue",
   ignore: !inGuest,
   sanitizeResources: false,
