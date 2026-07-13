@@ -186,6 +186,7 @@ export function createHostProbe(options: HostProbeOptions): HostProbe {
           memoryMiB: 0,
           vcpus: 0,
           allowNet: [],
+          allowNetSet: false,
           labels: [{ key: "studiobox", value: "doctor-canary" }],
           region: "ord",
           netless: true,

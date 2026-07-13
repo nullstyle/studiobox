@@ -71,6 +71,7 @@ function createParams(): CreateParams {
       memoryMiB: 1024,
       vcpus: 2,
       allowNet: [],
+      allowNetSet: false,
       labels: [],
       region: "ord",
       netless: false,

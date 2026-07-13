@@ -236,6 +236,7 @@ export interface CreateOptions {
   region: Region;
   netless: boolean;
   kernelArgs: string[];
+  allowNetSet: boolean;
 }
 
 export interface CreateResult {
@@ -707,6 +708,7 @@ export const CreateOptionsStruct: StructDescriptor<CreateOptions> = {
     region: RegionValues[0],
     netless: false,
     kernelArgs: [],
+    allowNetSet: false,
   }),
   fields: [
     {
@@ -756,6 +758,12 @@ export const CreateOptionsStruct: StructDescriptor<CreateOptions> = {
       name: "kernelArgs",
       offset: 3,
       type: { kind: "list", element: TYPE_TEXT },
+    },
+    {
+      kind: "slot",
+      name: "allowNetSet",
+      offset: 65,
+      type: TYPE_BOOL,
     },
   ],
 };

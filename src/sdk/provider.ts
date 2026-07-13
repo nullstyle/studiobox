@@ -187,7 +187,12 @@ function toCreateOptions(options: SandboxOptions): CreateOptions {
     timeout: toTimeoutSpec(options.timeout),
     memoryMiB,
     vcpus: DEFAULT_VCPUS,
-    allowNet: [],
+    // Presence-correct egress policy: an unset `allowNet` (allowNetSet=false)
+    // means UNRESTRICTED (full internet, the upstream default); a set `allowNet`
+    // (allowNetSet=true, even `[]`) means RESTRICTED. hostd/rootd decode this
+    // pair back into the undefined/[]/list distinction (see wire/supervisor.ts).
+    allowNet: options.allowNet ?? [],
+    allowNetSet: options.allowNet !== undefined,
     labels: labels.map(([key, value]) => ({ key, value })),
     region: (options.region ?? "loc") as CreateOptions["region"],
     netless: false,

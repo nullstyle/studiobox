@@ -234,6 +234,10 @@ export interface LaunchRequest {
   allocationId: string;
   bootNonce: Uint8Array;
   idempotencyKey: Uint8Array;
+  allowNet: string[];
+  allowNetSet: boolean;
+  netless: boolean;
+  vcpus: number;
 }
 
 export interface LaunchResult {
@@ -652,8 +656,8 @@ export const HealthResultCodec: StructCodec<HealthResult> = {
 export const LaunchRequestStruct: StructDescriptor<LaunchRequest> = {
   kind: "struct",
   name: "LaunchRequest",
-  dataWordCount: 0,
-  pointerCount: 6,
+  dataWordCount: 1,
+  pointerCount: 7,
   createDefault: () => ({
     sandboxId: "",
     executionId: "",
@@ -661,6 +665,10 @@ export const LaunchRequestStruct: StructDescriptor<LaunchRequest> = {
     allocationId: "",
     bootNonce: new Uint8Array(0),
     idempotencyKey: new Uint8Array(0),
+    allowNet: [],
+    allowNetSet: false,
+    netless: false,
+    vcpus: 0,
   }),
   fields: [
     {
@@ -698,6 +706,30 @@ export const LaunchRequestStruct: StructDescriptor<LaunchRequest> = {
       name: "idempotencyKey",
       offset: 5,
       type: TYPE_DATA,
+    },
+    {
+      kind: "slot",
+      name: "allowNet",
+      offset: 6,
+      type: { kind: "list", element: TYPE_TEXT },
+    },
+    {
+      kind: "slot",
+      name: "allowNetSet",
+      offset: 0,
+      type: TYPE_BOOL,
+    },
+    {
+      kind: "slot",
+      name: "netless",
+      offset: 1,
+      type: TYPE_BOOL,
+    },
+    {
+      kind: "slot",
+      name: "vcpus",
+      offset: 1,
+      type: TYPE_UINT16,
     },
   ],
 };

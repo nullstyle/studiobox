@@ -45,6 +45,7 @@ import {
   SupervisorBootstrap,
 } from "../wire/generated/supervisor_types.ts";
 import type { SbxError as WireSbxError } from "../wire/generated/common_types.ts";
+import { launchRequestToWire } from "../wire/supervisor.ts";
 import {
   type ContractIdentity,
   DEFAULT_TRANSPORT_LIMITS,
@@ -247,7 +248,10 @@ function buildSession(
       await close();
     },
     launch: async (request) => {
-      const result = await supervisor.launch(request, { timeoutMs });
+      const result = await supervisor.launch(
+        launchRequestToWire(request),
+        { timeoutMs },
+      );
       if (result.which === "error") throw wireErrorToSupervisor(result.error);
       return machineStatusFromWire(requireField(result.status, "status"));
     },

@@ -322,6 +322,12 @@ function launchRequest(
     allocationId: "alloc-fixture",
     bootNonce: crypto.getRandomValues(new Uint8Array(32)),
     idempotencyKey: crypto.getRandomValues(new Uint8Array(16)),
+    // Unrestricted egress (the default): allowNetSet=false, so rootd ignores
+    // the empty allowNet and grants full internet.
+    allowNet: [],
+    allowNetSet: false,
+    netless: false,
+    vcpus: 2,
   };
 }
 

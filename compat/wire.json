@@ -12,8 +12,8 @@
     "supervisor.capnp"
   ],
   "hashAlgorithm": "sha256(filename + NUL + rawBytes + NUL, sorted)",
-  "schemaSha256": "e4ef15197283c9a74b0c4b1ea3ae7d114c4cbf6e43e254bd4aa7ac697468c024",
-  "schemaSha256Note": "re-hashed 2026-07-11 over the carried studiobox schema/ bundle (renamed identifiers; limabox baseline was 617920c8753001a23873f850934fd2a6ebb3b964f81f4ce4a7504ab6d92fbe48)",
+  "schemaSha256": "1e3b52a1a2035f19502a703f7407005022290dae4fb2b1a5d7dabb3033f3c69e",
+  "schemaSha256Note": "re-hashed 2026-07-11 over the carried studiobox schema/ bundle (renamed identifiers; limabox baseline was 617920c8753001a23873f850934fd2a6ebb3b964f81f4ce4a7504ab6d92fbe48); re-hashed 2026-07-12 for M10 W3 (added CreateOptions.allowNetSet; LaunchRequest allowNet/allowNetSet/netless/vcpus)",
   "capnpCompiler": "Cap'n Proto version 1.4.0",
   "codegen": {
     "package": "@nullstyle/capnp",

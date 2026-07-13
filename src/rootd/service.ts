@@ -63,7 +63,6 @@ import type {
   BridgeRequest as WireBridgeRequest,
   Health as WireHealth,
   HealthResults,
-  LaunchRequest as WireLaunchRequest,
   LaunchResults,
   MachineStatus as WireMachineStatus,
   MachineUsage as WireMachineUsage,
@@ -109,6 +108,7 @@ import {
   BootstrapStateError,
 } from "../wire/bootstrap_gate.ts";
 import {
+  launchRequestFromWire,
   validateBridgeRequest,
   validateLaunchRequest,
   validateSupervisorCredential,
@@ -522,20 +522,6 @@ function bridgeGrantToWire(grant: SupervisorBridgeGrant): {
     bridgeCredential: grant.bridgeCredential.slice(),
     agentCredential: grant.agentCredential.slice(),
     expiresAtUnixMs: BigInt(grant.expiresAtUnixMs),
-  };
-}
-
-function launchRequestFromWire(value: WireLaunchRequest): WireLaunchRequest {
-  // The wire and domain launch shapes are field-identical; re-projecting to
-  // exactly the schema fields keeps the validator's exact-keys check honest
-  // against decoder shape drift.
-  return {
-    sandboxId: value.sandboxId,
-    executionId: value.executionId,
-    artifactId: value.artifactId,
-    allocationId: value.allocationId,
-    bootNonce: value.bootNonce,
-    idempotencyKey: value.idempotencyKey,
   };
 }
 

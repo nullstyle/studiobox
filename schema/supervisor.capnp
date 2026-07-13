@@ -5,6 +5,11 @@ using Common = import "common.capnp";
 # Root-boundary protocol. Requests contain only logical identifiers resolved by
 # studiobox-rootd against signed manifests and pre-reserved allocations. There are
 # deliberately no argv, host-path, UID/GID, cgroup, netns, or nftables fields.
+#
+# `allowNet` is a LOGICAL egress policy (host/IP patterns) that rootd resolves
+# internally via the nftables engine at launch — it is not an argv, host-path,
+# uid, or netns field, so it is consistent with the "logical identifiers only"
+# principle above (rootd, not the client, derives every TAP/table/rule name).
 
 enum MachineState {
   launching @0;
@@ -14,6 +19,10 @@ enum MachineState {
   cleanupPending @4;
 }
 
+# Egress presence, honored by rootd (see the header note on allowNet):
+#   netless == true                          -> no network at all (overrides allowNet)
+#   netless == false && allowNetSet == false -> UNRESTRICTED (full internet; ignore allowNet)
+#   netless == false && allowNetSet == true  -> RESTRICTED to allowNet ([] = deny-all)
 struct LaunchRequest {
   sandboxId @0 :Text;
   executionId @1 :Text;
@@ -21,6 +30,10 @@ struct LaunchRequest {
   allocationId @3 :Text;
   bootNonce @4 :Data;
   idempotencyKey @5 :Data;
+  allowNet @6 :List(Text);
+  allowNetSet @7 :Bool;
+  netless @8 :Bool;
+  vcpus @9 :UInt16;
 }
 
 struct MachineStatus {

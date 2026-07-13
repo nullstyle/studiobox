@@ -90,6 +90,17 @@ export interface CreateSandboxInput {
   readonly labels: readonly Label[];
   /** Idempotency key the client supplied (>=16 bytes; else minted). */
   readonly idempotencyKey: Uint8Array;
+  /**
+   * Logical egress policy forwarded to rootd. `undefined` ⇒ UNRESTRICTED (the
+   * upstream default); `[]` ⇒ RESTRICTED deny-all; a non-empty list ⇒
+   * RESTRICTED to those patterns. Presence is preserved across the wire via the
+   * `allowNetSet` companion (see `src/wire/supervisor.ts`).
+   */
+  readonly allowNet?: readonly string[];
+  /** No network at all (overrides {@link allowNet}). Absent ⇒ not netless. */
+  readonly netless?: boolean;
+  /** Requested guest vCPUs; absent ⇒ the planner's default. */
+  readonly vcpus?: number;
 }
 
 /** Extra create-time wiring the wire adapter supplies. */
@@ -414,7 +425,9 @@ export class HostControlCore {
         );
       }
 
-      // 3) Ask rootd to launch (journal-before-spawn on the rootd side).
+      // 3) Ask rootd to launch (journal-before-spawn on the rootd side). The
+      // network policy rides along as logical fields; presence of `allowNet`
+      // (undefined ⇒ unrestricted) is carried across the wire by `allowNetSet`.
       await this.#gateway.launch({
         sandboxId: rootdSandboxId,
         executionId,
@@ -422,6 +435,9 @@ export class HostControlCore {
         allocationId: `alloc-${suffix}`,
         bootNonce,
         idempotencyKey,
+        ...(input.allowNet === undefined ? {} : { allowNet: input.allowNet }),
+        ...(input.netless === undefined ? {} : { netless: input.netless }),
+        ...(input.vcpus === undefined ? {} : { vcpus: input.vcpus }),
       });
       launched = true;
 

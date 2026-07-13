@@ -299,6 +299,7 @@ function createParams(
       memoryMiB: 1024,
       vcpus: 2,
       allowNet: [],
+      allowNetSet: false,
       labels: [],
       region: "ord",
       netless: false,
@@ -385,6 +386,57 @@ Deno.test("host wire: create commits capacity, issues a lease, and the sandbox i
     } finally {
       await client.close();
     }
+  });
+});
+
+Deno.test("host wire: allowNet presence threads to the rootd launch (unrestricted vs restricted)", async () => {
+  await withHarness(async (h) => {
+    const client = await connect(h);
+    try {
+      const duration = { which: "durationMs", durationMs: 60_000n } as const;
+      // Three creates below; give the ledger room for all of them.
+
+      // 1) allowNetSet=false ⇒ UNRESTRICTED ⇒ domain allowNet undefined. This is
+      //    the default; a naive `allowNet ?? []` read would break it to deny-all.
+      await client.control.create(
+        createParams(duration, { allowNet: [], allowNetSet: false }),
+        { timeoutMs: TIMEOUT_MS },
+      );
+      // 2) allowNetSet=true + [] ⇒ RESTRICTED deny-all ⇒ domain allowNet []
+      //    (the empty list is preserved, NOT collapsed to unrestricted).
+      await client.control.create(
+        createParams(duration, { allowNet: [], allowNetSet: true }),
+        { timeoutMs: TIMEOUT_MS },
+      );
+      // 3) allowNetSet=true + patterns ⇒ RESTRICTED to the carried list.
+      await client.control.create(
+        createParams(duration, {
+          allowNet: ["example.com", "*.github.com:443"],
+          allowNetSet: true,
+        }),
+        { timeoutMs: TIMEOUT_MS },
+      );
+
+      assertEquals(h.gateway.launched.length, 3);
+      assertEquals(
+        h.gateway.launched[0].allowNet,
+        undefined,
+        "allowNetSet=false must decode to allowNet undefined (unrestricted)",
+      );
+      assertEquals(
+        h.gateway.launched[1].allowNet,
+        [],
+        "allowNetSet=true + [] must preserve the deny-all empty list",
+      );
+      assertEquals(h.gateway.launched[2].allowNet, [
+        "example.com",
+        "*.github.com:443",
+      ]);
+    } finally {
+      await client.close();
+    }
+  }, {
+    budget: { vcpus: 16, memoryMiB: 8192, diskBytes: 32 * 1024 * 1024 * 1024 },
   });
 });
 

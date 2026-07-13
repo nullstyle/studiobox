@@ -22,6 +22,12 @@ struct TimeoutSpec {
   }
 }
 
+# Egress-policy presence (allowNet + allowNetSet) mirrors upstream @deno/sandbox
+# semantics WITHOUT losing the undefined/[] distinction that a flat List(Text)
+# codec would collapse (an absent list decodes to []). Read them together:
+#   netless == true                         -> no network at all (overrides allowNet)
+#   netless == false && allowNetSet == false -> UNRESTRICTED (full internet; ignore allowNet)
+#   netless == false && allowNetSet == true  -> RESTRICTED to allowNet ([] = deny-all)
 struct CreateOptions {
   timeout @0 :TimeoutSpec;
   memoryMiB @1 :UInt32;
@@ -31,6 +37,7 @@ struct CreateOptions {
   region @5 :Region;
   netless @6 :Bool;
   kernelArgs @7 :List(Text);
+  allowNetSet @8 :Bool;
 }
 
 struct LeaseInfo {

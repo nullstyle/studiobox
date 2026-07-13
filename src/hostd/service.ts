@@ -349,12 +349,28 @@ function createInputFromWire(params: CreateParams): CreateSandboxInput {
   if (!Number.isSafeInteger(memoryMiB) || memoryMiB < 0) {
     throw new WireValidationError("memoryMiB must be a non-negative integer");
   }
+  // Collapse the flat wire egress presence back to the domain's undefined/[]/list
+  // distinction: `allowNetSet === false` ⇒ UNRESTRICTED (allowNet undefined, the
+  // default), `allowNetSet === true` ⇒ RESTRICTED to the carried list (`[]` is a
+  // real deny-all, not "unset"). A naive `options.allowNet ?? []` read would make
+  // every sandbox deny-all — a fail-closed break of the default.
+  const allowNetSet = options.allowNetSet ?? false;
+  const allowNet = allowNetSet ? (options.allowNet ?? []) : undefined;
+  const netless = options.netless ?? false;
+  const vcpus = options.vcpus ?? 0;
+  // NOTE: `options.kernelArgs` is intentionally NOT honored yet. Injecting an
+  // arbitrary kernel cmdline from an unprivileged client into a root-launched VM
+  // needs its own threat model / security review before it may cross the root
+  // boundary (M10 W3 defers it); `vcpus` and `allowNet` are threaded here.
   return {
     timeout: timeoutFromWire(options.timeout ?? { which: "session" }),
     memoryMiB,
     region: regionFromWire(options.region ?? "ord"),
     labels: labels.map((l) => ({ key: l.key, value: l.value })),
     idempotencyKey: params.idempotencyKey ?? new Uint8Array(0),
+    ...(allowNet === undefined ? {} : { allowNet }),
+    netless,
+    ...(vcpus > 0 ? { vcpus } : {}),
   };
 }
 
