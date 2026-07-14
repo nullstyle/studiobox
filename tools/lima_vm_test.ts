@@ -298,6 +298,20 @@ if (cached) {
   console.log(`✓ baked golden set ${manifestHash}`);
 }
 
+// --- prewarm the warm-restore template (snapshot_vm_test.ts requires it) -----
+// Without a template for this golden hash, the snapshot strategy falls SAFE to
+// cold and the restore-path assertions fail. Idempotent (reused if present).
+// `--work` MUST be OUTSIDE ${GUEST_REPO}: template:build runs as root and would
+// otherwise leave a root-owned .build/ that the next run's `rm -rf repo` (as the
+// unprivileged user) cannot remove.
+step("baking the warm-restore template…");
+await guest(
+  `cd ${GUEST_REPO} && sudo -E "$(command -v deno)" run -A --unstable-vsock ` +
+    `${configArg} tools/build_warm_template.ts --arch "$(uname -m)" ` +
+    `--hash ${manifestHash} --cache-root ${GUEST_CACHE} ` +
+    `--work ${GUEST_BASE}/template-build`,
+);
+
 // --- run the in-VM suite as root against the golden set ---------------------
 step("running the tests/vm/ suite inside the guest as root…");
 const env = [

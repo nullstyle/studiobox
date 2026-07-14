@@ -1,23 +1,30 @@
 name: Integration (real Firecracker microVMs)
 
-# The T3/T4 real-microVM suites (tests/vm/, parity, snapshot, soak) that the
-# `test:vm` Lima driver runs locally on a Mac, ported to run NATIVELY on a
-# KVM-equipped x86_64 GitHub runner. This is the #1 gap to 1.0: nothing else in
-# CI boots real Firecracker.
+# The T3/T4 real-microVM suite (tests/vm/ — cycle, reconcile, tunnel, parity,
+# network, snapshot, handshake-leak) that the `test:vm` Lima driver runs locally
+# on a Mac, ported to run NATIVELY on a KVM-equipped x86_64 GitHub runner. This
+# is the "prove x86_64 alongside aarch64" 1.0 bar: nothing else in CI boots real
+# Firecracker.
 #
 # It mirrors two proven shapes:
 #   * tools/lima_vm_test.ts — the SBX_VM_* environment contract
 #     (tests/vm/support.ts), the Firecracker v1.16.1 install
 #     (images/pins.json → kernel.firecrackerPinned), the golden bake via
-#     tools/build_golden_set.ts (final stdout line is a JSON `{ "hash", … }`),
-#     and running the suite as root against that set; and
+#     tools/build_golden_set.ts + the warm-restore template via
+#     tools/build_warm_template.ts (final stdout line is a JSON `{ "hash", … }`),
+#     the compiled shipped daemons (SBX_VM_{HOSTD,ROOTD}_BIN), and running the
+#     suite as root against that set; and
 #   * firecracker-deno's KVM integration job — the udev MODE=0666 rule,
 #     `modprobe vhost_vsock`, and a /dev/kvm preflight (PLAN.md §4).
 #
 # Two jobs share that setup shape:
-#   * `integration` runs per PR / push (T3 then sudo T4); and
-#   * `soak` runs the real-microVM 1.0 drill on a nightly cron.
+#   * `integration` runs per PR / push (the full tests/vm/ suite); and
+#   * `soak` runs the real-microVM 1.0 no-leak drill on a nightly cron.
 # Both LOUD-SKIP (staying green) when the runner has no /dev/kvm.
+#
+# The recipe is validated end-to-end on aarch64 (fc-smoke via `test:vm`); the
+# arch bytes (kernel/rootfs/deno/firecracker) are all pinned per-arch in
+# images/pins.json, so the FIRST x86_64 run is a `workflow_dispatch` away.
 
 on:
   pull_request:
@@ -101,7 +108,13 @@ jobs:
         # matching the Lima driver's guest provisioning.
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q debootstrap e2fsprogs unzip squashfs-tools
+          # Match provisionHost's package set (src/cli/provision.ts): the Tier-B
+          # dataplane the network + snapshot + soak cases exercise shells out to
+          # `nft` and `dnsmasq`, so they MUST be present, plus curl for the deno
+          # installer / fetches. (squashfs-tools is unused — build_rootfs uses
+          # `mke2fs -d`.)
+          sudo apt-get install -y -q \
+            nftables dnsmasq debootstrap e2fsprogs curl unzip
 
       - name: Cache Firecracker + jailer
         id: fc-cache
@@ -147,7 +160,7 @@ jobs:
           # imports — and the import map. A too-coarse key only costs a rebake;
           # the hash is always re-read from the sidecar, but a too-NARROW key
           # would silently reuse a stale set against a changed binary.
-          key: golden-${{ env.GOLDEN_ARCH }}-fc${{ env.FC_VERSION }}-deno${{ env.DENO_VERSION }}-${{ hashFiles('images/pins.json', 'images/build_rootfs.sh', 'images/overlay_init/**', 'src/agent/**', 'src/api/**', 'src/wire/**', 'deno.json') }}
+          key: golden-${{ env.GOLDEN_ARCH }}-fc${{ env.FC_VERSION }}-deno${{ env.DENO_VERSION }}-${{ hashFiles('images/pins.json', 'images/build_rootfs.sh', 'images/overlay_init/**', 'src/agent/**', 'src/api/**', 'src/wire/**', 'compat/wire.json', 'deno.json', 'deno.lock') }}
 
       - name: Bake the golden artifact set
         if: steps.preflight.outputs.kvm == 'true' && steps.golden-cache.outputs.cache-hit != 'true'
@@ -183,6 +196,34 @@ jobs:
           echo "GOLDEN_HASH=$hash" >> "$GITHUB_ENV"
           echo "golden manifest hash: $hash"
 
+      - name: Bake the warm-restore template
+        if: steps.preflight.outputs.kvm == 'true' && steps.golden-cache.outputs.cache-hit != 'true'
+        # snapshot_vm_test.ts asserts the RESTORE path, which needs a prewarmed
+        # template for the golden hash — without it the snapshot strategy falls
+        # SAFE to cold and those cases red (and it is the ONLY thing that
+        # exercises the x86_64-only `clock_realtime` restore branch). Writes into
+        # $GOLDEN_CACHE/templates/<hash>/ so it rides the same cache as the golden
+        # set (built only on a cache miss). Root: jailer + a real template microVM.
+        run: |
+          sudo -E "$(command -v deno)" run -A --unstable-vsock \
+            tools/build_warm_template.ts \
+            --arch "$GOLDEN_ARCH" --hash "$GOLDEN_HASH" --cache-root "$GOLDEN_CACHE" \
+            --work "$RUNNER_TEMP/template-build" \
+            --jailer-bin "$FC_DIR/jailer" --firecracker-bin "$FC_DIR/firecracker"
+          # Hand the newly-written template back to the runner so actions/cache
+          # can archive it (built root-owned; the suite runs as root regardless).
+          sudo chown -R "$(id -u):$(id -g)" "$GOLDEN_CACHE"
+
+      - name: Compile the shipped daemon binaries
+        if: steps.preflight.outputs.kvm == 'true'
+        # So the suite drives the ACTUAL shipped hostd/rootd (via
+        # SBX_VM_{HOSTD,ROOTD}_BIN below) instead of real_stack's `deno run` source
+        # fallback — the compiled binaries are what can diverge under `deno compile`
+        # and are otherwise never proven on any arch in CI.
+        run: |
+          deno compile -A --output .build/studiobox-hostd src/hostd/main.ts
+          deno compile -A --output .build/studiobox-rootd src/rootd/main.ts
+
       - name: Run the tests/vm/ suite against the golden set
         if: steps.preflight.outputs.kvm == 'true'
         # The SBX_VM_* contract from tests/vm/support.ts. Root: the jailer must
@@ -197,6 +238,8 @@ jobs:
             SBX_VM_WORK="$SBX_VM_WORK" \
             SBX_VM_JAILER_BIN="$FC_DIR/jailer" \
             SBX_VM_FIRECRACKER_BIN="$FC_DIR/firecracker" \
+            SBX_VM_HOSTD_BIN="$PWD/.build/studiobox-hostd" \
+            SBX_VM_ROOTD_BIN="$PWD/.build/studiobox-rootd" \
             "$(command -v deno)" task test:vm:run
 
       - name: Loud-skip notice (no /dev/kvm)
@@ -251,7 +294,13 @@ jobs:
         if: steps.preflight.outputs.kvm == 'true'
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q debootstrap e2fsprogs unzip squashfs-tools
+          # Match provisionHost's package set (src/cli/provision.ts): the Tier-B
+          # dataplane the network + snapshot + soak cases exercise shells out to
+          # `nft` and `dnsmasq`, so they MUST be present, plus curl for the deno
+          # installer / fetches. (squashfs-tools is unused — build_rootfs uses
+          # `mke2fs -d`.)
+          sudo apt-get install -y -q \
+            nftables dnsmasq debootstrap e2fsprogs curl unzip
 
       - name: Cache Firecracker + jailer
         id: fc-cache
@@ -288,7 +337,7 @@ jobs:
           path: |
             ${{ env.GOLDEN_CACHE }}
             ${{ env.GOLDEN_HASH_FILE }}
-          key: golden-${{ env.GOLDEN_ARCH }}-fc${{ env.FC_VERSION }}-deno${{ env.DENO_VERSION }}-${{ hashFiles('images/pins.json', 'images/build_rootfs.sh', 'images/overlay_init/**', 'src/agent/**', 'src/api/**', 'src/wire/**', 'deno.json') }}
+          key: golden-${{ env.GOLDEN_ARCH }}-fc${{ env.FC_VERSION }}-deno${{ env.DENO_VERSION }}-${{ hashFiles('images/pins.json', 'images/build_rootfs.sh', 'images/overlay_init/**', 'src/agent/**', 'src/api/**', 'src/wire/**', 'compat/wire.json', 'deno.json', 'deno.lock') }}
 
       - name: Bake the golden artifact set
         if: steps.preflight.outputs.kvm == 'true' && steps.golden-cache.outputs.cache-hit != 'true'

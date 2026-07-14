@@ -4,10 +4,13 @@
  *
  * Armed only in-guest (`SBX_VM=1`, Linux + KVM + root); off-guest every case is
  * ignored so the file still imports/typechecks on macOS. A warm template for
- * the golden hash must already be baked (`deno task template:build --hash
- * <hash>`); the `tools/lima_vm_test.ts` driver bakes it before running this
- * suite. The stack drives the same `@deno/sandbox` client path as M8, only with
- * rootd resolving `launchStrategy: "snapshot"`.
+ * the golden hash must ALREADY be baked (`deno task template:build --hash
+ * <hash>`), else the snapshot strategy falls safe to cold and the restore
+ * assertions here fail. The `tools/lima_vm_test.ts` driver, the
+ * `tools/parity_vm_test.ts --gate …snapshot…` driver, and the CI integration
+ * job all bake it after the golden set, before running this suite. The stack
+ * drives the same `@deno/sandbox` client path as M8, only with rootd resolving
+ * `launchStrategy: "snapshot"`.
  *
  * It proves the three claims the feature makes:
  *

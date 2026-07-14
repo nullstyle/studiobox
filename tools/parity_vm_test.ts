@@ -236,6 +236,21 @@ if (cached) {
   console.log(`✓ baked golden set ${manifestHash}`);
 }
 
+// --- prewarm the warm-restore template when running the snapshot gate --------
+// snapshot_vm_test.ts asserts the RESTORE path, which needs a template for this
+// golden hash (else it falls safe to cold and the assertions fail). Idempotent.
+// `--work` stays OUTSIDE ${GUEST_REPO} so the root-owned build tree never blocks
+// the next run's `rm -rf repo`.
+if (gateFile.includes("snapshot")) {
+  step("baking the warm-restore template (snapshot gate)…");
+  await guest(
+    `cd ${GUEST_REPO} && sudo -E "$(command -v deno)" run -A --unstable-vsock ` +
+      `${configArg} tools/build_warm_template.ts --arch "$(uname -m)" ` +
+      `--hash ${manifestHash} --cache-root ${GUEST_CACHE} ` +
+      `--work ${GUEST_BASE}/template-build`,
+  );
+}
+
 // --- compile the daemons in-guest (the ACTUAL shipped binaries) -------------
 step("compiling studiobox-rootd + studiobox-hostd in-guest…");
 await guest(`cd ${GUEST_REPO} && "$(command -v deno)" task daemons:compile`);
