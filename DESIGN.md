@@ -268,7 +268,8 @@ A sandbox boots from a **versioned artifact set** keyed by manifest hash:
 - **Golden rootfs** — an ext4 built by pinned `debootstrap` (against
   `snapshot.debian.org` for reproducibility): user `sandbox` (uid 1000, home
   `/home/app` to match upstream), pinned Deno, the compiled `studioboxd` binary,
-  and a minimal overlay-init that mounts a writable overlay and execs the agent.
+  `tini` (the guest pid-1 init/reaper), and a minimal overlay-init that mounts a
+  writable overlay and execs `tini`, which in turn execs the agent.
 - `manifest.json` — records versions + hashes of every input (kernel, rootfs,
   studioboxd build, Deno version, schema bundle hash). The manifest hash is part
   of `ContractIdentity`, so a client, hostd, and guest that disagree about
@@ -337,8 +338,9 @@ regardless of connections), identical to upstream observable behavior.
 
 ## 10. The guest agent: studioboxd
 
-A single static `deno compile` binary (per arch) that overlay-init execs as
-pid-adjacent supervisor inside the guest:
+A single static `deno compile` binary (per arch) that overlay-init runs — under
+`tini` (guest pid 1, which reaps orphaned grandchildren the workload leaves
+behind and forwards signals) — as the guest supervisor:
 
 - Listens on AF_VSOCK
   (`Deno.listen({ transport: "vsock", cid: 3, port:

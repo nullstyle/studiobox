@@ -34,6 +34,10 @@ import {
   type VmConfig,
   type VmRegistry,
 } from "@nullstyle/firecracker";
+import {
+  assertOverlaySizeBytes,
+  createSparseOverlay,
+} from "../../../images/overlay.ts";
 import type {
   TemplateBakeArtifacts,
   TemplateBaker,
@@ -115,6 +119,7 @@ export class MachineTemplateBaker implements TemplateBaker {
     this.#guestMac = options.guestMac ?? DEFAULT_TEMPLATE_GUEST_MAC;
     this.#overlaySizeBytes = options.overlaySizeBytes ??
       DEFAULT_OVERLAY_SIZE_BYTES;
+    assertOverlaySizeBytes(this.#overlaySizeBytes);
     this.#readinessTimeoutMs = options.readinessTimeoutMs ??
       DEFAULT_READINESS_TIMEOUT_MS;
     this.#launch = options.launch ?? ((o) => Machine.launch(o));
@@ -125,7 +130,7 @@ export class MachineTemplateBaker implements TemplateBaker {
   async bake(request: TemplateBakeRequest): Promise<TemplateBakeArtifacts> {
     await Deno.mkdir(request.workDir, { recursive: true });
     // Fresh, unformatted, sparse overlay — overlay-init formats it in-guest on
-    // first boot, exactly as the cold path (`launch_planner.ts #createOverlay`).
+    // first boot, exactly as the cold path (both call `images/overlay.ts`).
     const freshOverlayHost = join(request.workDir, "overlay-fresh.ext4");
     await this.#createSparseOverlay(freshOverlayHost);
 
@@ -141,8 +146,8 @@ export class MachineTemplateBaker implements TemplateBaker {
       "init=/sbin/overlay-init",
       `studiobox.vsock_port=${request.vsockPort}`,
       // The ONLY per-template cmdline switch: no token/ip/gw/dns (personalize
-      // injects identity after restore). overlay-init execs `studioboxd
-      // --template` with no credential and eth0 present-but-unconfigured.
+      // injects identity after restore). overlay-init execs `tini -g --
+      // studioboxd --template` with no credential and eth0 present-but-unconfigured.
       "studiobox.mode=template",
     ].join(" ");
 
@@ -255,31 +260,19 @@ export class MachineTemplateBaker implements TemplateBaker {
     }
   }
 
-  /** Create a fresh sparse, unformatted overlay (guest formats it on boot). */
+  /**
+   * Create a fresh sparse, unformatted overlay (guest formats it on boot).
+   *
+   * Unlike the cold launch path, a collision here is a stale overlay from an
+   * earlier bake in the same work dir, not an id-reuse bug — discard and retry.
+   */
   async #createSparseOverlay(path: string): Promise<void> {
-    let file: Deno.FsFile;
     try {
-      file = await Deno.open(path, {
-        createNew: true,
-        write: true,
-        mode: 0o600,
-      });
+      await createSparseOverlay(path, this.#overlaySizeBytes);
     } catch (error) {
-      if (error instanceof Deno.errors.AlreadyExists) {
-        await Deno.remove(path);
-        file = await Deno.open(path, {
-          createNew: true,
-          write: true,
-          mode: 0o600,
-        });
-      } else {
-        throw error;
-      }
-    }
-    try {
-      await file.truncate(this.#overlaySizeBytes);
-    } finally {
-      file.close();
+      if (!(error instanceof Deno.errors.AlreadyExists)) throw error;
+      await Deno.remove(path);
+      await createSparseOverlay(path, this.#overlaySizeBytes);
     }
   }
 }

@@ -20,7 +20,7 @@
     "variant": "minbase",
     "snapshotEpoch": "20260630T210956Z",
     "mirror": "https://snapshot.debian.org/archive/debian/20260630T210956Z/",
-    "packages": ["ca-certificates", "e2fsprogs", "iproute2"],
+    "packages": ["ca-certificates", "e2fsprogs", "iproute2", "tini"],
     "imageSizeMiB": 1024,
     "sandboxUser": {
       "name": "sandbox",

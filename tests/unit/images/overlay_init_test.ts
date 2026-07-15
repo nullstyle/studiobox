@@ -39,7 +39,7 @@ Deno.test("overlay-init parses studiobox.mode alongside the existing tokens", ()
     SCRIPT.includes('studiobox.mode=*) MODE="${tok#studiobox.mode=}" ;;'),
     true,
   );
-  // The pre-existing token contract is untouched (cold path byte-identical).
+  // The pre-existing token-parse contract is untouched.
   for (
     const line of [
       'studiobox.vsock_port=*) VSOCK_PORT="${tok#studiobox.vsock_port=}" ;;',
@@ -77,6 +77,48 @@ Deno.test("template branch execs studioboxd --template with NO credential file",
 
 Deno.test("the cold exec still requires the credential file", () => {
   assertEquals(coldExec().includes('--token-file "$TOKEN_FILE"'), true);
+});
+
+Deno.test("both exec sites run studioboxd under tini as guest pid 1", () => {
+  // tini reaps the orphaned grandchildren a daemonizing workload reparents to
+  // pid 1 — studioboxd (Deno) reaps only its own direct children. It is baked
+  // in via the `tini` package pin and referenced through a defaulted var.
+  assertEquals(
+    SCRIPT.includes('TINI="${STUDIOBOXD_TINI:-/usr/bin/tini}"'),
+    true,
+    "tini path is defaulted like the other guest binaries",
+  );
+
+  for (
+    const [name, block] of [
+      ["cold", coldExec()],
+      ["template", templateBranch()],
+    ] as const
+  ) {
+    // tini wraps the agent: `exec chroot /mnt/root "$TINI" -g -- "$AGENT" ...`.
+    assertEquals(
+      block.includes('"$TINI" -g -- "$AGENT"'),
+      true,
+      `${name}: agent is wrapped by tini`,
+    );
+    // -g forwards signals to the whole process group, not just studioboxd — the
+    // point of the wrap. A wrap that drops it must fail this test.
+    assertEquals(block.includes('"$TINI" -g'), true, `${name}: -g present`);
+    // Still `exec` (process replacement), so tini actually inherits pid 1 — no
+    // fork between overlay-init and tini.
+    assertEquals(
+      block.includes("exec chroot /mnt/root"),
+      true,
+      `${name}: exec-into-chroot preserved`,
+    );
+    // tini precedes the agent's own flags — a reorder that put --vsock-port
+    // ahead of tini would hand it to tini, not studioboxd.
+    assertEquals(
+      block.indexOf('"$TINI"') < block.indexOf('--vsock-port "$VSOCK_PORT"'),
+      true,
+      `${name}: tini precedes the agent argv`,
+    );
+  }
 });
 
 Deno.test("template exec precedes credential materialization (never materialized)", () => {

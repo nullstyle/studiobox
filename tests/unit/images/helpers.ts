@@ -1,6 +1,9 @@
 /** Shared fixtures for the artifact pipeline unit tests. */
 
-import type { ArtifactManifest } from "../../../images/manifest.ts";
+import {
+  ARTIFACT_MANIFEST_VERSION,
+  type ArtifactManifest,
+} from "../../../images/manifest.ts";
 import type { ImagePins } from "../../../images/pins.ts";
 
 export const SHA_A =
@@ -49,7 +52,7 @@ export function makeTestManifest(
   overrides: Partial<ArtifactManifest> = {},
 ): ArtifactManifest {
   return {
-    schemaVersion: 1,
+    schemaVersion: ARTIFACT_MANIFEST_VERSION,
     arch: "aarch64",
     kernel: {
       version: "6.1.155",
@@ -72,7 +75,7 @@ export function makeTestManifest(
       identity: { kind: "contentManifest", sha256: SHA_E },
       sizeBytes: 1024 * 1024 * 1024,
     },
-    agentBinary: { filename: "studioboxd", sha256: SHA_E, placeholder: true },
+    agentBinary: { filename: "studioboxd", sha256: SHA_E },
     createdAt: "2026-07-11T00:00:00.000Z",
     ...overrides,
   };

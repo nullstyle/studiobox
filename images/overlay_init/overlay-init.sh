@@ -6,8 +6,10 @@
 # attached as /dev/vdb (staging cannot mkfs portably from the macOS host).
 # This init runs as pid 1 (`init=/sbin/overlay-init` in the boot args),
 # formats the overlay on first boot, mounts a writable overlayfs over the
-# read-only root, then execs the compiled studioboxd agent listening on
-# AF_VSOCK cid=3.
+# read-only root, then execs `tini` — which becomes pid 1 and execs the
+# compiled studioboxd agent (listening on AF_VSOCK cid=3) as its child. tini
+# reaps orphaned grandchildren the guest workload leaves behind (daemonized
+# processes reparent to pid 1) and forwards signals to studioboxd's group.
 #
 # Boot-config contract (set by the rootd launch planner in the kernel
 # command line; DESIGN.md §7 boot_args):
@@ -55,6 +57,10 @@ set -eu
 
 OVERLAY_DEV="${OVERLAY_DEV:-/dev/vdb}"
 AGENT="${STUDIOBOXD_BIN:-/usr/local/bin/studioboxd}"
+# tini is guest pid 1: it reaps orphaned grandchildren (workloads that
+# daemonize reparent to pid 1) and forwards signals to the agent's process
+# group. Baked into the rootfs via the `tini` package pin (images/pins.json).
+TINI="${STUDIOBOXD_TINI:-/usr/bin/tini}"
 DENO_BIN="${STUDIOBOXD_DENO:-/usr/local/bin/deno}"
 SANDBOX_HOME="${STUDIOBOXD_HOME:-/home/app}"
 DEFAULT_VSOCK_PORT="1024"
@@ -127,16 +133,17 @@ mount -t sysfs sysfs /mnt/root/sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /mnt/root/dev 2>/dev/null ||
   mount --bind /dev /mnt/root/dev
 
-# Template mode (snapshot-restore §1.1/§2.2): exec studioboxd `--template` with
-# NO token file. It comes up pre-personalization holding no credential and NOT
-# yet authenticatable — accepting only `personalize`, which rootd calls after
-# restore to inject the per-restore credential and (re)configure eth0 in-band.
+# Template mode (snapshot-restore §1.1/§2.2): exec studioboxd `--template` (under
+# tini) with NO token file. It comes up pre-personalization holding no credential
+# and NOT yet authenticatable — accepting only `personalize`, which rootd calls
+# after restore to inject the per-restore credential and (re)configure eth0
+# in-band.
 # eth0 is left present-but-unconfigured here (the template carries no
 # studiobox.ip, so GUEST_IP was empty above and no eth0 config ran). The API
 # mounts above are still required so the chrooted agent sees /proc, /sys, /dev.
 if [ "$MODE" = "template" ]; then
-  echo "overlay-init: template mode, launching studioboxd --template on vsock port $VSOCK_PORT"
-  exec chroot /mnt/root "$AGENT" \
+  echo "overlay-init: template mode, launching studioboxd --template under tini on vsock port $VSOCK_PORT"
+  exec chroot /mnt/root "$TINI" -g -- "$AGENT" \
     --vsock-port "$VSOCK_PORT" \
     --template \
     --deno "$DENO_BIN" \
@@ -156,8 +163,8 @@ if [ -n "$GUEST_DNS" ]; then
   printf 'nameserver %s\n' "$GUEST_DNS" > /mnt/root/etc/resolv.conf
 fi
 
-echo "overlay-init: overlay mounted at /mnt/root, launching studioboxd on vsock port $VSOCK_PORT"
-exec chroot /mnt/root "$AGENT" \
+echo "overlay-init: overlay mounted at /mnt/root, launching studioboxd under tini on vsock port $VSOCK_PORT"
+exec chroot /mnt/root "$TINI" -g -- "$AGENT" \
   --vsock-port "$VSOCK_PORT" \
   --token-file "$TOKEN_FILE" \
   --deno "$DENO_BIN" \

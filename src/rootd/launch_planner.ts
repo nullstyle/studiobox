@@ -40,6 +40,10 @@ import {
   KERNEL_FILE_NAME,
   ROOTFS_FILE_NAME,
 } from "../../images/cache.ts";
+import {
+  assertOverlaySizeBytes,
+  createSparseOverlay,
+} from "../../images/overlay.ts";
 import type { GuestNetworkConfig } from "../agent/personalize.ts";
 import { type TemplateStore, TemplateStoreError } from "./template/mod.ts";
 import {
@@ -291,6 +295,9 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
     this.#memSizeMib = options.memSizeMib ?? 512;
     this.#overlaySizeBytes = options.overlaySizeBytes ??
       DEFAULT_OVERLAY_SIZE_BYTES;
+    // Eagerly: a misconfigured daemon must refuse to start, not fail every
+    // launch once it is already serving.
+    assertOverlaySizeBytes(this.#overlaySizeBytes);
     this.#agentVsockPort = options.agentVsockPort ?? DEFAULT_AGENT_VSOCK_PORT;
     this.#readinessTimeoutMs = options.readinessTimeoutMs ?? 15_000;
     this.#mintCredential = options.mintCredential ??
@@ -335,10 +342,17 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
     // a failure in a LATER step never strands a TAP / dnsmasq / nft table / slot
     // (§8). A failure DURING provisioning unwinds itself before rethrowing.
     let unwindNetwork: (() => Promise<void>) | undefined;
+    // Set once THIS resolve owns the per-execution state. Overlay and
+    // coordinates are keyed by executionId, so on a COLLISION they belong to the
+    // live execution that got there first — #createOverlay fails closed with
+    // SBX_SUP_STATE precisely to protect it, and the cleanup below must not then
+    // reclaim the very state the guard just refused to touch.
+    let ownsExecutionState = false;
     try {
       const setDir = this.#cache.setPath(manifestHash);
       const overlayPath = this.#overlayPath(request.executionId);
       await this.#createOverlay(overlayPath);
+      ownsExecutionState = true;
 
       const credential = this.#mintCredential();
       if (credential.byteLength !== CREDENTIAL_BYTES) {
@@ -400,16 +414,20 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
         overlayPath,
       );
     } catch (error) {
-      // The plan never reached the journal, so nothing else will release
-      // this belt: undo the acquire and drop the coordinates/overlay, then
-      // best-effort unwind any network state provisioned before the throw.
+      // The plan never reached the journal, so nothing else will release this
+      // belt: undo the acquire. This resolve always did the acquire, so this is
+      // always ours to undo.
       await this.#cache.release(manifestHash).catch(() => {});
-      this.#coordinates.delete(request.executionId);
-      // Release a template ref this resolve pinned (restore branch) before it
-      // could reach the reclaim hook — else a failed restore-plan resolve would
-      // leak the template pin forever.
-      await this.#releaseTemplatePin(request.executionId).catch(() => {});
-      await Deno.remove(this.#overlayPath(request.executionId)).catch(() => {});
+      if (ownsExecutionState) {
+        this.#coordinates.delete(request.executionId);
+        // Release a template ref this resolve pinned (restore branch) before it
+        // could reach the reclaim hook — else a failed restore-plan resolve
+        // would leak the template pin forever.
+        await this.#releaseTemplatePin(request.executionId).catch(() => {});
+        await Deno.remove(this.#overlayPath(request.executionId)).catch(
+          () => {},
+        );
+      }
       if (unwindNetwork !== undefined) await unwindNetwork().catch(() => {});
       throw error;
     }
@@ -875,13 +893,8 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
   /** Create a fresh sparse, unformatted overlay (guest formats it). */
   async #createOverlay(path: string): Promise<void> {
     await Deno.mkdir(this.#overlayDir, { recursive: true });
-    let file: Deno.FsFile;
     try {
-      file = await Deno.open(path, {
-        createNew: true,
-        write: true,
-        mode: 0o600,
-      });
+      await createSparseOverlay(path, this.#overlaySizeBytes);
     } catch (error) {
       if (error instanceof Deno.errors.AlreadyExists) {
         throw new SupervisorError(
@@ -891,11 +904,6 @@ export class GoldenArtifactLaunchPlanner implements SupervisorLaunchPlanner {
         );
       }
       throw error;
-    }
-    try {
-      await file.truncate(this.#overlaySizeBytes);
-    } finally {
-      file.close();
     }
   }
 

@@ -134,7 +134,7 @@ Deno.test("manifestFromPins mirrors the committed pins", async () => {
     arch: "x86_64",
     builderScriptSha256: SHA_A,
     overlayInitSha256: SHA_B,
-    agentBinary: { filename: "studioboxd", sha256: SHA_C, placeholder: true },
+    agentBinary: { filename: "studioboxd", sha256: SHA_C },
     identity: { kind: "contentManifest", sha256: SHA_A },
     rootfsSizeBytes: 1024,
     createdAt: "2026-07-11T00:00:00.000Z",

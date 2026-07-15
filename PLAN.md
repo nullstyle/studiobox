@@ -158,22 +158,30 @@ studioboxd (both arches) boots and serves the plane over UDS. **Demo:**
 
 `images/`: kernel fetch + sha256 verify (per arch); golden rootfs build via
 pinned debootstrap against `snapshot.debian.org` (user `sandbox`/uid 1000, home
-`/home/app`, pinned Deno, studioboxd baked in — committed placeholder until
-M3/M5 delivers the compiled agent; the agent sha is an input pin so the manifest
-hash rolls automatically on swap — overlay-init); sparse overlay creation
-(unformatted; in-guest overlay-init formats on first boot); a `manifest.json`
-whose hash covers input pins only, feeding `ContractIdentity`; copy-only staging
-into jail layout; artifact cache + refcount GC under `~/.studiobox/artifacts/`,
-with journal-referenced sets protected from GC. Builds run inside the Lima VM
-(or any Linux as root — no loop devices needed; `mke2fs -d` packs the tree
-directly). **Exit:** `studiobox images build` produces a manifest-addressed set
-twice with identical hashes — rootfs reproducibility is defined as
-**content-manifest identity** (sorted path/mode/owner/sha per file; raw ext4
-byte-identity is unattainable with mke2fs and the manifest supports `imageBytes`
-identity if e2fsprogs becomes reproducible); staging drill copies into a fake
-jail and never mutates the golden inode (regression test). **Demo:** one command
-→ verified artifact set. _Status 2026-07-11: delivered and fc-smoke-validated
-(two builds, identical content-manifest hashes)._
+`/home/app`, pinned Deno, the compiled studioboxd baked in — its sha is an input
+pin, so rebuilding the agent rolls the manifest hash on its own — overlay-init);
+sparse overlay creation (unformatted; in-guest overlay-init formats on first
+boot); a `manifest.json` whose hash covers input pins only, feeding
+`ContractIdentity`; copy-only staging into jail layout; artifact cache +
+refcount GC under `~/.studiobox/artifacts/`, with journal-referenced sets
+protected from GC. Builds run inside the Lima VM (or any Linux as root — no loop
+devices needed; `mke2fs -d` packs the tree directly). **Exit:**
+`studiobox images build` produces a manifest-addressed set twice with identical
+hashes — rootfs reproducibility is defined as **content-manifest identity**
+(sorted path/mode/owner/sha per file; raw ext4 byte-identity is unattainable
+with mke2fs and the manifest supports `imageBytes` identity if e2fsprogs becomes
+reproducible); staging drill copies into a fake jail and never mutates the
+golden inode (regression test). **Demo:** one command → verified artifact set.
+_Status 2026-07-11: delivered and fc-smoke-validated (two builds, identical
+content-manifest hashes)._
+
+_Superseded since: M5 replaced M4's host-side `stageArtifacts()` with the
+jailer's own copy-mode staging (it chowns into the jail uid/gid, which the host
+helper never did), so the golden-inode exit drill is now discharged on the real
+launch path by `tests/fake/rootd/process_contract_test.ts`. Only the overlay
+half of M4's staging survives, shared by both launch paths as
+`images/overlay.ts`. M5 also swapped in the compiled agent, and the manifest's
+vestigial `agentBinary.placeholder` flag was dropped in schema v2._
 
 ### M5 — First real microVM (in-VM happy path) (8 pts)
 

@@ -1,6 +1,6 @@
 /**
- * Guest image toolchain: pinned kernel/rootfs artifact identity, staging,
- * and the content-addressed artifact cache.
+ * Guest image toolchain: pinned kernel/rootfs artifact identity, the per-boot
+ * overlay, and the content-addressed artifact cache.
  *
  * Published as the `./images` subpath of `@nullstyle/studiobox`. This barrel
  * re-exports the public surface of the `images/` modules; it has no
@@ -39,9 +39,14 @@ export {
 } from "./content_manifest.ts";
 export type { ContentEntry } from "./content_manifest.ts";
 
-// Staging: per-boot copies of golden artifacts plus the sparse overlay.
-export { stageArtifacts, StagingError } from "./staging.ts";
-export type { StagedArtifacts } from "./staging.ts";
+// Overlay: the host half of the per-boot overlay contract (the guest half is
+// the `overlay-init` stub the rootfs bakes in).
+export {
+  assertOverlaySizeBytes,
+  createSparseOverlay,
+  OVERLAY_MAX_BYTES,
+  OVERLAY_MIN_BYTES,
+} from "./overlay.ts";
 
 // Cache: manifest-hash-addressed artifact sets with refcount-aware GC.
 export {

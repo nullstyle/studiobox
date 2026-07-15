@@ -534,9 +534,10 @@ export interface CgroupMemoryEvents {
 export interface CgroupReader {
   /**
    * Resolve the absolute path of the `memory.events` file for the agent's
-   * OWN cgroup. studioboxd runs as guest pid 1 and its children inherit
-   * its cgroup, so its cgroup (read from `/proc/self/cgroup`) is the one a
-   * killed child belonged to — and, unlike `/proc/<pid>/cgroup`, it is
+   * OWN cgroup. studioboxd and the children it spawns share one cgroup (the
+   * guest pid 1, tini, creates no sub-cgroup), so its cgroup (read from
+   * `/proc/self/cgroup`) is the one a killed child belonged to — and, unlike
+   * `/proc/<pid>/cgroup`, it is
    * still readable after the child is reaped. Rejects on a non-cgroup-v2
    * host or a malformed/unreadable `/proc/self/cgroup`.
    */

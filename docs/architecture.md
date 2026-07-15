@@ -128,7 +128,8 @@ manifest hash:
 - `vmlinux` — pinned Firecracker-CI kernel per arch, sha256-verified.
 - **Golden rootfs** — an ext4 built by pinned `debootstrap` (against
   `snapshot.debian.org` for reproducibility): user `sandbox` (uid 1000, home
-  `/home/app`), pinned Deno, the compiled `studioboxd`, and an overlay-init.
+  `/home/app`), pinned Deno, the compiled `studioboxd`, `tini` (guest pid-1
+  init/reaper), and an overlay-init.
 - `manifest.json` — records versions + hashes of every input; the manifest hash
   is part of `ContractIdentity`, so a client/hostd/guest that disagree about
   artifacts fail negotiation.

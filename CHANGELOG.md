@@ -4,6 +4,62 @@ All notable changes to `@nullstyle/studiobox` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 aims to follow [semantic versioning](https://semver.org/) from 1.0 onward.
 
+## [0.2.0] — 2026-07-14
+
+Breaking, on the `./images` subpath and the artifact manifest schema. Pre-1.0,
+so these ride a minor bump.
+
+### Removed
+
+- **`stageArtifacts()`, `StagingError`, and `StagedArtifacts` (`./images`).**
+  They were never on the runtime launch path — and could not have been. The
+  firecracker jailer chowns every staged file into the jail uid/gid
+  (hard-failing without root), computes chroot-internal destinations that are
+  its own private layout, and refuses a pre-existing jail root;
+  `stageArtifacts()` never chowned, took no uid/gid, and pre-populated the jail
+  itself, so any jail it produced would have been rejected. Real staging is
+  declarative — `rootd` emits a stage list that the adapter pins to
+  `mode: "copy"` — and is covered on the real path by
+  `tests/fake/rootd/process_contract_test.ts`.
+- **`agentBinary.placeholder` from `manifest.json`.** The compiled `studioboxd`
+  has been baked in since M5; the flag had been hardcoded `false` ever since.
+
+### Added
+
+- **`createSparseOverlay()` + `assertOverlaySizeBytes()` (`./images`)**, in the
+  new `images/overlay.ts` — the host half of the overlay contract, next to the
+  guest half (`images/overlay_init/`) it pairs with. It replaces three
+  near-identical copies of the same open-truncate dance and, unlike the launch
+  planner before it, actually bounds the overlay budget: a size outside the 1
+  MiB–1 TiB window is now rejected when the daemon is constructed, rather than
+  accepted and used.
+- **`tini` is now the guest's pid-1 init.** Added to the pinned rootfs packages,
+  and `overlay-init` execs `tini -g -- studioboxd …` on both the cold and
+  template boot paths (studioboxd becomes tini's child). tini reaps the orphaned
+  grandchildren a daemonizing workload reparents to pid 1 — which studioboxd, as
+  a Deno program, only ever waited on its own direct children for — and forwards
+  signals to the agent's process group, where studioboxd's existing
+  SIGTERM/SIGINT handler already does a graceful shutdown.
+
+### Changed
+
+- **`ARTIFACT_MANIFEST_VERSION` is now `2`, and the rootfs recipe changed.**
+  Dropping `placeholder` and adding the `tini` package + the `overlay-init` edit
+  each rolled the manifest hash, so **v1 artifact sets must be re-baked**
+  (`deno task images:build`, or `studiobox host up --bake`) — once, for all of
+  these together. Stale sets fail closed with "unsupported artifact manifest
+  schema version" and are reclaimed by the cache's normal refcount GC — nothing
+  is stranded.
+
+### Fixed
+
+- **A reused `executionId` no longer damages the live sandbox it collides
+  with.** The launch planner correctly refused the duplicate (`SBX_SUP_STATE`),
+  but its cleanup path then unconditionally deleted the overlay file and the
+  host-side credential — both keyed by `executionId`, and both belonging to the
+  execution that already held them. The guard's own cleanup defeated the guard.
+  A failed `resolve()` now reclaims only what that call actually created.
+
 ## [0.1.2] — 2026-07-13
 
 ### Fixed

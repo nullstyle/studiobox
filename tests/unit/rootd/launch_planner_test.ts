@@ -6,7 +6,7 @@
  * touches the artifact cache + the overlay temp file.
  */
 
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 
 import { ArtifactCache } from "../../../images/cache.ts";
@@ -125,6 +125,65 @@ Deno.test("planner: resolve emits the boot recipe and acquires the refcount", as
     const overlay = join(workDir, "ov", "ov-e-plan-1.ext4");
     assertEquals((await Deno.stat(overlay)).size, 256 * 1024 * 1024);
   });
+});
+
+Deno.test("planner: REGRESSION: a reused execution id is refused without harming the live one", async () => {
+  await withDirs(async (cacheRoot, workDir) => {
+    await seedCache(cacheRoot);
+    const cache = new ArtifactCache({ root: cacheRoot });
+    const planner = plannerFor(cacheRoot, workDir);
+
+    const live = await planner.resolve(request());
+    assert(live.kind !== "restore");
+    const liveCredential = planner.coordinatesFor("e-plan-1")!.credential;
+    const overlay = join(workDir, "ov", "ov-e-plan-1.ext4");
+
+    // Overlay and coordinates are keyed by executionId, so a second resolve on
+    // the same id would scribble on a LIVE sandbox. Fail closed.
+    const error = await assertRejects(
+      () => planner.resolve(request()),
+      SupervisorError,
+      "already exists",
+    );
+    assertEquals((error as SupervisorError).code, "SBX_SUP_STATE");
+
+    // ...and the refused resolve must undo only ITS OWN acquire. The cleanup
+    // used to reclaim the overlay + coordinates unconditionally, which destroyed
+    // the credential and the disk of the very execution the guard protects.
+    assertEquals(await cache.refcount(HASH), 1, "only the live belt remains");
+    assertEquals(
+      planner.coordinatesFor("e-plan-1")?.credential,
+      liveCredential,
+      "the live execution keeps its credential",
+    );
+    assertEquals(
+      (await Deno.stat(overlay)).size,
+      256 * 1024 * 1024,
+      "the live execution keeps its overlay",
+    );
+  });
+});
+
+Deno.test("planner: refuses an overlay budget outside the size window", () => {
+  assertThrows(
+    () =>
+      new GoldenArtifactLaunchPlanner({
+        cache: new ArtifactCache({ root: "/nonexistent" }),
+        manifestHash: HASH,
+        arch: "aarch64",
+        jailerBin: "/usr/local/bin/jailer",
+        firecrackerBin: "/usr/local/bin/firecracker",
+        uid: 0,
+        gid: 0,
+        chrootBaseDir: "/nonexistent/jail",
+        overlayDir: "/nonexistent/ov",
+        // Too small to hold a filesystem — a misconfigured daemon must refuse to
+        // start, not fail every launch once it is already serving.
+        overlaySizeBytes: 4096,
+      }),
+    TypeError,
+    "overlaySizeBytes",
+  );
 });
 
 Deno.test("planner: request.vcpus overrides the static default in machine_config", async () => {

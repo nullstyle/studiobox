@@ -104,9 +104,10 @@ firecracker contract):
 
 ## `studioboxd` — the in-guest agent
 
-A single static `deno compile` binary (per arch) that overlay-init execs inside
-the guest microVM. It listens on AF_VSOCK and serves the `SandboxAgent` plane
-(process exec, fs, env, Deno eval) for exactly one sandbox.
+A single static `deno compile` binary (per arch) that overlay-init runs under
+`tini` (guest pid 1) inside the guest microVM. It listens on AF_VSOCK and serves
+the `SandboxAgent` plane (process exec, fs, env, Deno eval) for exactly one
+sandbox.
 
 - **Compiled with `-A --unstable-vsock`** (see `deno.json` `agent:compile`). The
   `--unstable-vsock` flag is **baked at compile time**: Deno 2.9 gates the vsock

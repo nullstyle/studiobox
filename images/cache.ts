@@ -41,7 +41,7 @@ import {
 export const MANIFEST_FILE_NAME = "manifest.json";
 export const REFCOUNT_FILE_NAME = "refcount.json";
 
-/** Conventional kernel file name inside an artifact set (see staging.ts). */
+/** Conventional kernel file name inside an artifact set. */
 export const KERNEL_FILE_NAME = "vmlinux";
 /** Conventional golden-rootfs file name inside an artifact set. */
 export const ROOTFS_FILE_NAME = "rootfs.ext4";

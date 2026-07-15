@@ -97,9 +97,9 @@ function assembleAgent(
   denoPath: string | undefined,
 ): AgentAssembly {
   // The real guest seeds the agent environment from its boot environment,
-  // under a guaranteed default PATH + HOME (overlay-init execs studioboxd with
-  // the kernel's bare init env, so a bare-name spawn would otherwise fail with
-  // "no path to search"); the fake host seeds explicitly instead (see
+  // under a guaranteed default PATH + HOME (overlay-init execs studioboxd, under
+  // tini, with the kernel's bare init env, so a bare-name spawn would otherwise
+  // fail with "no path to search"); the fake host seeds explicitly instead (see
   // `testing/mod.ts`).
   const env = new AgentEnv(
     guestBaseEnvironment(sandboxHome(config), Deno.env.toObject()),

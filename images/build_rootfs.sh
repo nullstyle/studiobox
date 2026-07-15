@@ -3,10 +3,10 @@
 #
 # Debootstraps a minbase Debian tree against a pinned snapshot.debian.org
 # epoch, adds the sandbox user (uid 1000, home /home/app), installs the
-# pinned linux Deno, the agent binary (M4: the committed placeholder —
-# see images/agent/), and the overlay-init stub, normalizes everything
-# reproducibility-relevant, emits the canonical content manifest via
-# images/emit_content_manifest.ts, and packs a fixed-UUID ext4 image.
+# pinned linux Deno, the compiled studioboxd agent binary (--agent, required),
+# and the overlay-init stub, normalizes everything reproducibility-relevant,
+# emits the canonical content manifest via images/emit_content_manifest.ts,
+# and packs a fixed-UUID ext4 image.
 #
 # Runs on Linux as root (loop-free: mke2fs -d needs no mounts). Defaults
 # mirror images/pins.json; the driver passes pins explicitly so the
@@ -23,7 +23,7 @@ ARCH="aarch64"
 SUITE="bookworm"
 EPOCH="20260630T210956Z"
 MIRROR=""
-PACKAGES="ca-certificates,e2fsprogs,iproute2"
+PACKAGES="ca-certificates,e2fsprogs,iproute2,tini"
 IMAGE_SIZE_MIB="1024"
 SANDBOX_USER="sandbox"
 SANDBOX_UID="1000"
@@ -134,6 +134,10 @@ mkdir -p "$ROOT/var/cache/apt" "$ROOT/var/lib/apt/lists/partial"
 rm -rf "$ROOT"/var/log
 mkdir -p "$ROOT/var/log"
 rm -f "$ROOT"/var/cache/ldconfig/aux-cache
+# The Debian `tini` package ships both /usr/bin/tini (dynamic — what overlay-init
+# runs as pid 1) and /usr/bin/tini-static (~600 KiB, unused here since libc6 is
+# always present). Drop the static build so the image ships only what it runs.
+rm -f "$ROOT"/usr/bin/tini-static
 rm -f "$ROOT"/etc/resolv.conf
 [ -f "$ROOT/etc/machine-id" ] && : > "$ROOT/etc/machine-id"
 echo "studiobox" > "$ROOT/etc/hostname"

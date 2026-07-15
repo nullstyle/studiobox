@@ -2,9 +2,8 @@
  * Bake the REAL golden artifact set and store it in the M4 artifact cache
  * (PLAN.md §M5, DESIGN.md §7). This is the `images:build` task.
  *
- * Unlike the M4 placeholder path, this bakes the **compiled studioboxd**
- * (`agentBinary.placeholder: false`) so a launched microVM comes up on the
- * real `sandbox_agent.capnp` vsock plane. End to end it:
+ * It bakes the **compiled studioboxd** into the rootfs, so a launched microVM
+ * comes up on the real `sandbox_agent.capnp` vsock plane. End to end it:
  *
  *   1. `deno compile`s `src/agent/main.ts` for the target arch (native when
  *      the tool runs on that arch), producing the self-contained
@@ -189,7 +188,7 @@ const manifest = manifestFromPins({
   arch,
   builderScriptSha256: await sha256HexOfFile(builderScript),
   overlayInitSha256: await sha256HexOfFile(overlayInit),
-  agentBinary: { filename: "studioboxd", sha256: agentSha, placeholder: false },
+  agentBinary: { filename: "studioboxd", sha256: agentSha },
   identity: { kind: "contentManifest", sha256: identitySha },
   rootfsSizeBytes,
 });

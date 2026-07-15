@@ -10,8 +10,9 @@ import {
 } from "../../../src/agent/env.ts";
 
 Deno.test("guestBaseEnvironment: default PATH + HOME sit UNDER the boot env", () => {
-  // A bare init env (overlay-init execs studioboxd with no PATH/HOME) still
-  // yields a usable PATH so bare-name spawns resolve, and HOME = sandbox home.
+  // A bare init env (overlay-init execs studioboxd, under tini, with no
+  // PATH/HOME) still yields a usable PATH so bare-name spawns resolve, and
+  // HOME = sandbox home.
   const base = guestBaseEnvironment("/home/app", {});
   assertEquals(base.PATH, DEFAULT_GUEST_PATH);
   assertEquals(base.HOME, "/home/app");

@@ -29,7 +29,15 @@ import {
   sha256HexOfText,
 } from "./validate.ts";
 
-export const ARTIFACT_MANIFEST_VERSION = 1 as const;
+/**
+ * Manifest schema version.
+ *
+ * v2 dropped the vestigial `agentBinary.placeholder` flag. Because the agent
+ * binary is an input pin, that rolled every manifest hash: v1 artifact sets are
+ * unreadable and must be re-baked (they still GC normally — the cache reaps by
+ * refcount and never parses `manifest.json`).
+ */
+export const ARTIFACT_MANIFEST_VERSION = 2 as const;
 
 export interface KernelArtifact {
   version: string;
@@ -82,12 +90,8 @@ export interface RootfsArtifact {
 export interface AgentBinaryArtifact {
   /** File name inside the artifact set, e.g. `studioboxd`. */
   filename: string;
+  /** Digest of the compiled `studioboxd` baked into the rootfs — an input pin. */
   sha256: string;
-  /**
-   * True while the committed placeholder stands in for the compiled
-   * studioboxd (the M3/M5 swap point — see `images/agent/`).
-   */
-  placeholder: boolean;
 }
 
 /** The full `manifest.json` for a built artifact set (pins + observed identity). */
@@ -237,20 +241,12 @@ function validateAgentBinary(value: unknown): AgentBinaryArtifact {
   const agent = assertRecord(value, "manifest agentBinary") as Partial<
     AgentBinaryArtifact
   >;
-  assertKeys(
-    agent,
-    ["filename", "sha256", "placeholder"],
-    "manifest agentBinary",
-  );
+  assertKeys(agent, ["filename", "sha256"], "manifest agentBinary");
   assertArtifactFileName(agent.filename, "agentBinary filename");
   assertSha256(agent.sha256, "agentBinary sha256");
-  if (typeof agent.placeholder !== "boolean") {
-    throw new TypeError("agentBinary placeholder must be a boolean");
-  }
   return {
     filename: agent.filename,
     sha256: agent.sha256,
-    placeholder: agent.placeholder,
   };
 }
 
