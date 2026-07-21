@@ -83,7 +83,7 @@ Exit codes: `0` success, `1` a runtime failure (incl. an unhealthy `doctor`),
 
 `host up` on macOS starts `studiobox-host-<arch>` from the committed template
 [`tools/lima/studiobox-host.yaml`](../tools/lima/studiobox-host.yaml), rendered
-by `renderLimaTemplate()` in `src/cli/lima_template.ts` (the file is asserted
+by `renderLimaTemplate()` in `src/cli/host_template.ts` (the file is asserted
 byte-identical to the generator, so it can never drift). The template pins:
 
 - `vmType: vz` + `nestedVirtualization: true` — the microVMs studiobox launches

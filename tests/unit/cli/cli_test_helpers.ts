@@ -1,42 +1,31 @@
 /**
- * Host-safe fakes for the CLI lifecycle tests: a recording `limactl`/`bash`
- * command runner and an in-memory local filesystem. Together they model a
- * coherent host — instances, running state, guest files, `/dev/kvm`, daemon
- * activeness — so the lifecycle module can be driven end to end with NO VM and
- * the exact argv sequence asserted (PLAN.md §M9).
+ * Host-safe fakes for the CLI lifecycle tests. The generic `limactl` argv
+ * state machine now lives in `@nullstyle/lima/testing`'s `FakeLimactl`;
+ * {@linkcode FakeHostRunner} extends it with the studiobox-specific guest
+ * semantics — golden-bake discriminators, `/dev/kvm`, `systemctl is-active` —
+ * plus the `no-lima` host branch (`bash`, `git`, `tar`, `sudo install`).
+ * Together with {@linkcode FakeLocalFs} they model a coherent host so the
+ * lifecycle module is driven end to end with NO VM and the exact argv
+ * sequence asserted (PLAN.md §M9).
  */
 
-import type {
-  HostCommandOptions,
-  HostCommandResult,
-  HostCommandRunner,
-} from "../../../src/cli/exec.ts";
+import type { CommandResult } from "@nullstyle/lima";
+import {
+  failed,
+  FakeLimactl,
+  type GuestScriptCall,
+  ok,
+  type RecordedCall,
+} from "@nullstyle/lima/testing";
 import type { LocalFs } from "../../../src/cli/local_fs.ts";
 
-/** One recorded invocation. */
-export interface RecordedCall {
-  readonly bin: string;
-  readonly args: readonly string[];
-  readonly stdin?: string;
-}
+export type { RecordedCall };
 
-function ok(stdout = ""): HostCommandResult {
-  return { success: true, code: 0, stdout, stderr: "" };
-}
+/** Pseudo-instance key the `no-lima` host branch records guest files under. */
+const NO_LIMA = "(no-lima)";
 
-function failed(code = 1): HostCommandResult {
-  return { success: false, code, stdout: "", stderr: "" };
-}
-
-/** A recording, stateful fake for {@linkcode HostCommandRunner}. */
-export class FakeHostRunner implements HostCommandRunner {
-  readonly calls: RecordedCall[] = [];
-  /** Lima instances that exist. */
-  readonly instances = new Set<string>();
-  /** Lima instances currently running. */
-  readonly running = new Set<string>();
-  /** Absolute paths present "in the guest". */
-  readonly guestFiles = new Set<string>();
+/** The studiobox extension of `FakeLimactl` (see the module doc). */
+export class FakeHostRunner extends FakeLimactl {
   /** unit name -> `systemctl is-active` answer. */
   readonly daemonActive = new Map<string, string>();
   /** Whether `/dev/kvm` is present in the guest. */
@@ -51,30 +40,57 @@ export class FakeHostRunner implements HostCommandRunner {
   /** When true, the bake command exits nonzero. */
   bakeFails = false;
 
-  run(
-    bin: string,
-    args: readonly string[],
-    options?: HostCommandOptions,
-  ): Promise<HostCommandResult> {
-    this.calls.push({
-      bin,
-      args: [...args],
-      ...(options?.stdin === undefined ? {} : { stdin: options.stdin }),
-    });
-    return Promise.resolve(this.#respond(bin, args));
+  /** Whether the named instance reports `Running`. */
+  instanceRunning(name: string): boolean {
+    return this.instances.get(name)?.status === "Running";
   }
 
-  /** Every recorded call flattened to a single string (assertion convenience). */
-  commandLines(): string[] {
-    return this.calls.map((c) => `${c.bin} ${c.args.join(" ")}`);
+  /** Whether a path is a guest file on ANY instance (or the no-lima host). */
+  hasGuestFile(path: string): boolean {
+    for (const files of this.guestFiles.values()) {
+      if (files.has(path)) return true;
+    }
+    return false;
   }
 
-  #respond(bin: string, args: readonly string[]): HostCommandResult {
-    if (bin.endsWith("limactl")) return this.#limactl(args);
-    if (bin === "bash") return this.#guestBody(args[args.length - 1] ?? "");
+  /**
+   * Auto-vivify instances for `shell`/`cp` so HostEnv can be driven directly
+   * (bake/provision tests) without a preceding `limactl start` — the leniency
+   * the pre-extraction fake had.
+   */
+  protected override limactl(call: RecordedCall): CommandResult {
+    const args = call.args;
+    if (args[0] === "shell") {
+      const name = args[1] === "--workdir" ? args[3] : args[1];
+      if (name !== undefined && !this.instances.has(name)) {
+        this.setInstance(name);
+      }
+    }
+    if (args[0] === "cp") {
+      for (const arg of args.slice(1)) {
+        const colon = arg.indexOf(":");
+        if (colon > 0 && !this.instances.has(arg.slice(0, colon))) {
+          this.setInstance(arg.slice(0, colon));
+        }
+      }
+    }
+    return super.limactl(call);
+  }
+
+  protected override onGuestScript(
+    call: GuestScriptCall,
+  ): CommandResult | undefined {
+    return this.#interpret(call.script, call.instance);
+  }
+
+  protected override onCommand(call: RecordedCall): CommandResult | undefined {
+    const { bin, args } = call;
+    if (bin === "bash") {
+      return this.#guestBody(args[args.length - 1] ?? "");
+    }
     if (bin.endsWith("sudo") && args[0] === "install") {
       // no-lima copyIn: `sudo install -m <mode> <local> <dst>`.
-      this.guestFiles.add(args[args.length - 1]);
+      this.guestFilesFor(NO_LIMA).add(args[args.length - 1]!);
       return ok();
     }
     // Host-side bake commands (HostEnv.hostExec / no-lima copyFileIn).
@@ -84,73 +100,19 @@ export class FakeHostRunner implements HostCommandRunner {
     return ok();
   }
 
-  #limactl(args: readonly string[]): HostCommandResult {
-    const [cmd, ...rest] = args;
-    switch (cmd) {
-      case "list": {
-        if (rest.includes("-q")) return ok([...this.instances].join("\n"));
-        const lines = [...this.instances].map((n) =>
-          `${n}\t${this.running.has(n) ? "Running" : "Stopped"}`
-        );
-        return ok(lines.join("\n"));
-      }
-      case "start": {
-        const nameFlag = rest.find((a) => a.startsWith("--name="));
-        if (nameFlag !== undefined) {
-          const name = nameFlag.slice("--name=".length);
-          this.instances.add(name);
-          this.running.add(name);
-        } else {
-          const name = rest.find((a) => !a.startsWith("--"));
-          if (name !== undefined) {
-            this.instances.add(name);
-            this.running.add(name);
-          }
-        }
-        return ok();
-      }
-      case "stop": {
-        this.running.delete(rest[0]);
-        return ok();
-      }
-      case "delete": {
-        const name = rest[rest.length - 1];
-        this.instances.delete(name);
-        this.running.delete(name);
-        return ok();
-      }
-      case "cp": {
-        const dst = rest[1] ?? "";
-        const colon = dst.indexOf(":");
-        if (colon >= 0) {
-          const remote = dst.slice(colon + 1);
-          // The lima copyIn now rsyncs into a user-writable /tmp staging path
-          // (`limactl cp` runs as the unprivileged lima user and cannot write a
-          // root-owned dest). The file only reaches its FINAL dest via the
-          // subsequent `sudo install` (modeled in #guestBody), so do NOT record
-          // the transient staging file as a guest file.
-          if (!remote.startsWith("/tmp/.studiobox-cp-")) {
-            this.guestFiles.add(remote);
-          }
-        }
-        return ok();
-      }
-      case "shell": {
-        return this.#guestBody(args[args.length - 1] ?? "");
-      }
-      default:
-        return ok();
-    }
-  }
-
-  #guestBody(body: string): HostCommandResult {
+  /** The `no-lima` guest path: unwrap sudo/strict, then interpret. */
+  #guestBody(body: string): CommandResult {
     let inner = body;
     const sudoWrap = /^sudo -E bash -lc '([\s\S]*)'$/.exec(body);
     if (sudoWrap !== null) {
       inner = sudoWrap[1].replaceAll(`'\\''`, "'");
     }
     inner = inner.replace(/^set -euo pipefail;\s*/, "");
+    return this.#interpret(inner, NO_LIMA);
+  }
 
+  /** Studiobox guest-script semantics (shared by the lima and no-lima paths). */
+  #interpret(inner: string, instance: string): CommandResult {
     // --- golden-bake discriminators (order-independent; checked first) ---
     // Marker write: `printf '%s' <hash> | sudo tee …/golden.hash`. Record the
     // hash so a subsequent probe on the same runner is a cache hit.
@@ -174,20 +136,20 @@ export class FakeHostRunner implements HostCommandRunner {
     }
 
     if (/test -e \/dev\/kvm/.test(inner)) {
-      return this.kvm ? ok() : failed();
+      return this.kvm ? ok() : failed(1);
     }
     // lima copyIn's second half: `install -m <mode> '<staging>' '<dest>' && rm …`
     // run via the sudo guest-exec path. The file lands at its FINAL <dest> here
-    // (the preceding `limactl cp` only staged it under /tmp), so record <dest>
-    // as a guest file — mirroring the no-lima `sudo install` handler in #respond.
+    // (the preceding `limactl cp` only staged it), so record <dest> as a guest
+    // file — mirroring the no-lima `sudo install` handler in onCommand.
     const installFile = /install -m \S+ '[^']*' '([^']*)'/.exec(inner);
     if (installFile !== null) {
-      this.guestFiles.add(installFile[1]);
+      this.guestFilesFor(instance).add(installFile[1]);
       return ok();
     }
     const testFile = /test -f (\S+)/.exec(inner);
     if (testFile !== null) {
-      return this.guestFiles.has(testFile[1]) ? ok() : failed();
+      return this.hasGuestFile(testFile[1]) ? ok() : failed(1);
     }
     const isActive = /systemctl is-active (\S+)/.exec(inner);
     if (isActive !== null) {

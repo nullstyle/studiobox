@@ -1,6 +1,6 @@
 {
   "name": "@nullstyle/studiobox",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./mod.ts",
@@ -11,6 +11,8 @@
     "./unstable-host": "./unstable-host.ts"
   },
   "imports": {
+    "@nullstyle/lima": "../lima-deno/mod.ts",
+    "@nullstyle/lima/testing": "../lima-deno/testing/mod.ts",
     "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.4",
     "@nullstyle/capnp/encoding": "jsr:@nullstyle/capnp@^0.4/encoding",
     "@nullstyle/capnp/rpc": "jsr:@nullstyle/capnp@^0.4/rpc",

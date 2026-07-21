@@ -1,6 +1,6 @@
 # studiobox-host — committed Lima template (macOS host).
 #
-# Source of truth: src/cli/lima_template.ts renderLimaTemplate(). Do NOT edit by
+# Source of truth: src/cli/host_template.ts renderLimaTemplate(). Do NOT edit by
 # hand — regenerate from the generator (see tools/lima_template_write.ts). A unit
 # test pins this file byte-for-byte to renderLimaTemplate() so it cannot drift.
 #

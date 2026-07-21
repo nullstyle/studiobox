@@ -33,6 +33,12 @@
  */
 
 import { fromFileUrl, join } from "@std/path";
+import {
+  buildShellArgv,
+  type CommandResult,
+  Limactl,
+  strictWrap,
+} from "@nullstyle/lima";
 
 const REPO_ROOT = fromFileUrl(new URL("../", import.meta.url)).replace(
   /\/$/,
@@ -72,7 +78,7 @@ function step(message: string): void {
   console.log(`\n▸ ${message}`);
 }
 
-/** Run a host command, inheriting stdio. Returns the exit code. */
+/** Run a host command, inheriting stdio (git/tar — the non-limactl work). */
 async function host(cmd: string[], check = true): Promise<number> {
   console.log(`$ ${cmd.join(" ")}`);
   const status = await new Deno.Command(cmd[0], {
@@ -99,20 +105,63 @@ async function hostCapture(cmd: string[]): Promise<string> {
   return new TextDecoder().decode(out.stdout);
 }
 
-/** Run a bash script in the guest with Deno on PATH and cwd = the synced repo. */
-function guestScript(script: string): string {
-  return `export PATH="$HOME/.deno/bin:$PATH"; set -euo pipefail; ${script}`;
+// All limactl work flows through @nullstyle/lima. The package CAPTURES guest
+// output (bounded at 64 KiB unless a call opts out) instead of streaming it,
+// so the helpers below echo the captured streams after each command completes.
+const lima = new Limactl();
+const vm = lima.instance(name);
+
+/** Await a package call, converting its typed failure into the driver's ✗ fail. */
+async function orFail<T>(promise: Promise<T>): Promise<T> {
+  try {
+    return await promise;
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
 }
-function guest(script: string, check = true): Promise<number> {
-  return host(
-    ["limactl", "shell", name, "--", "bash", "-lc", guestScript(script)],
-    check,
-  );
+
+/**
+ * Run a bash script in the guest with Deno on PATH. `exec()` adds the old
+ * inline helper's `set -euo pipefail; ` wrap itself; the `uncapped` path
+ * rebuilds the identical argv from the package's exported shell grammar,
+ * because `exec()` has no capture-cap escape hatch.
+ */
+function guestRun(script: string, uncapped: boolean): Promise<CommandResult> {
+  const withPath = `export PATH="$HOME/.deno/bin:$PATH"; ${script}`;
+  return uncapped
+    ? lima.raw(buildShellArgv(name, strictWrap(withPath)), { uncapped: true })
+    : vm.exec(withPath);
 }
-function guestCapture(script: string): Promise<string> {
-  return hostCapture(
-    ["limactl", "shell", name, "--", "bash", "-lc", guestScript(script)],
-  );
+
+/** Guest exec, echoing captured output; `check` (default) fails the driver on nonzero exit. */
+async function guest(
+  script: string,
+  options: { check?: boolean; uncapped?: boolean } = {},
+): Promise<CommandResult> {
+  console.log(`$ [${name}] ${script}`);
+  const result = await guestRun(script, options.uncapped === true);
+  const out = result.stdout.trimEnd();
+  if (out.length > 0) console.log(out);
+  const err = result.stderr.trimEnd();
+  if (err.length > 0) console.error(err);
+  if (options.check !== false && !result.success) {
+    fail(`guest command failed (${result.code}): ${script}`);
+  }
+  return result;
+}
+
+/** Guest exec returning stdout (stderr echoed after completion); fails on nonzero exit. */
+async function guestCapture(
+  script: string,
+  options: { uncapped?: boolean } = {},
+): Promise<string> {
+  const result = await guestRun(script, options.uncapped === true);
+  const err = result.stderr.trimEnd();
+  if (err.length > 0) console.error(err);
+  if (!result.success) {
+    fail(`guest command failed (${result.code}): ${script}`);
+  }
+  return result.stdout;
 }
 
 // --- host gates -------------------------------------------------------------
@@ -123,20 +172,15 @@ if (Deno.build.os !== "darwin") {
       "tests/vm/support.ts)",
   );
 }
-try {
-  await new Deno.Command("limactl", { args: ["--version"], stdout: "null" })
-    .output();
-} catch {
+if (!(await lima.available())) {
   skip("Lima not installed (`brew install lima`)");
 }
 
-const instances = (await hostCapture(["limactl", "list", "-q"])).split("\n")
-  .map((s) => s.trim());
-const exists = instances.includes(name);
+const exists = await orFail(lima.exists(name));
 
 if (recreate && exists) {
   step(`deleting Lima instance ${name}`);
-  await host(["limactl", "delete", "-f", name]);
+  await orFail(vm.delete());
 }
 if (!exists && !recreate) {
   skip(
@@ -147,20 +191,18 @@ if (!exists && !recreate) {
 }
 if (recreate || !exists) {
   step(`creating Lima instance ${name} (first run downloads an image)…`);
-  await host([
-    "limactl",
-    "start",
-    `--name=${name}`,
-    "--vm-type=vz",
-    "--nested-virt",
-    "--tty=false",
-    "template:ubuntu-24.04",
-  ]);
+  // Same argv as before — `limactl start --name=<name> --vm-type=vz
+  // --nested-virt --tty=false template:ubuntu-24.04` — but the package
+  // captures the boot log, so nothing prints until start returns.
+  await orFail(lima.create(name, { template: "ubuntu-24.04" }, {
+    vmType: "vz",
+    nestedVirtualization: true,
+  }));
 }
 // A reused, already-running instance is left untouched (no stop/restart).
 
 // --- nested virtualization is the whole point -------------------------------
-if (await guest("test -e /dev/kvm", false) !== 0) {
+if (!(await guest("test -e /dev/kvm", { check: false })).success) {
   fail(
     `/dev/kvm missing in ${name}: nested virtualization needs an M3+ Mac on ` +
       `macOS 15+ with vmType vz. The instance is kept for inspection ` +
@@ -223,7 +265,7 @@ await host([
   listPath,
 ]);
 await guest(`mkdir -p ${GUEST_BASE}`);
-await host(["limactl", "cp", tgzPath, `${name}:${GUEST_BASE}/repo.tgz`]);
+await orFail(vm.copyIn(tgzPath, `${GUEST_BASE}/repo.tgz`));
 await guest(
   `rm -rf ${GUEST_REPO} && mkdir -p ${GUEST_REPO} && ` +
     `tar --warning=no-unknown-keyword -xzf ${GUEST_BASE}/repo.tgz ` +
@@ -255,7 +297,7 @@ if (siblings) {
     await Deno.writeTextFile(sl, sibList);
     const st = await Deno.makeTempFile({ suffix: `.${sib}.tgz` });
     await host(["tar", "--no-xattrs", "-czf", st, "-C", sibRoot, "-T", sl]);
-    await host(["limactl", "cp", st, `${name}:${GUEST_BASE}/${sib}.tgz`]);
+    await orFail(vm.copyIn(st, `${GUEST_BASE}/${sib}.tgz`));
     await guest(
       `rm -rf ${GUEST_BASE}/${sib} && mkdir -p ${GUEST_BASE}/${sib} && ` +
         `tar --warning=no-unknown-keyword -xzf ${GUEST_BASE}/${sib}.tgz ` +
@@ -284,6 +326,9 @@ if (cached) {
     `cd ${GUEST_REPO} && sudo -E "$(command -v deno)" run -A ${configArg} ` +
       `tools/build_golden_set.ts --arch "$(uname -m)" ` +
       `--cache-root ${GUEST_CACHE} --work ${GUEST_BUILD}`,
+    // The build log's LAST line feeds JSON.parse below, so the capture must
+    // be whole — lift the package's 64 KiB cap.
+    { uncapped: true },
   );
   const lastLine = buildOut.trim().split("\n").at(-1) ?? "";
   let parsed: { hash?: string };
@@ -324,10 +369,13 @@ const env = [
   sbxConfigEnv,
 ].filter((e) => e !== "").join(" ");
 
-const code = await guest(
+// Tradeoff vs the old inherit-stdio helper: the package captures output, so
+// the suite's report prints only AFTER `test:vm:run` finishes (uncapped — the
+// report and any failure tail must not be truncated), instead of streaming.
+const { code } = await guest(
   `cd ${GUEST_REPO} && sudo mkdir -p ${GUEST_WORK} && ` +
     `sudo -E env ${env} "$(command -v deno)" task test:vm:run`,
-  false,
+  { check: false, uncapped: true },
 );
 
 if (code === 0) {

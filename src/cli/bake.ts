@@ -49,7 +49,7 @@ const HASH_RE = /^[0-9a-f]{64}$/;
 /** Which phase of the bake failed (carried by {@linkcode BakeError}). */
 export type BakePhase = "probe" | "sync" | "deno" | "build" | "parse";
 
-/** A bake-specific failure (command failures surface as `HostCommandError`). */
+/** A bake-specific failure (command failures surface as `CommandError`). */
 export class BakeError extends Error {
   readonly phase: BakePhase;
   constructor(phase: BakePhase, message: string) {

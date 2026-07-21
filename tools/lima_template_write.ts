@@ -12,7 +12,7 @@
  */
 
 import { fromFileUrl } from "@std/path";
-import { renderLimaTemplate } from "../src/cli/lima_template.ts";
+import { renderLimaTemplate } from "../src/cli/host_template.ts";
 
 const target = fromFileUrl(
   import.meta.resolve("./lima/studiobox-host.yaml"),

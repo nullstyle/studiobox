@@ -1,6 +1,8 @@
 {
   "extends": "./deno.json",
   "imports": {
+    "@nullstyle/lima": "../lima-deno/mod.ts",
+    "@nullstyle/lima/testing": "../lima-deno/testing/mod.ts",
     "@nullstyle/capnp": "../capnp-deno/src/mod.ts",
     "@nullstyle/capnp/encoding": "../capnp-deno/src/encoding.ts",
     "@nullstyle/capnp/rpc": "../capnp-deno/src/rpc.ts",

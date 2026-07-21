@@ -36,26 +36,29 @@ export type {
   HostUpResult,
 } from "./host_lifecycle.ts";
 
-// The subprocess seam.
-export { DenoHostCommandRunner, HostCommandError, runChecked } from "./exec.ts";
-export type {
-  HostCommandOptions,
-  HostCommandResult,
-  HostCommandRunner,
-} from "./exec.ts";
+// The subprocess seam — now `@nullstyle/lima`'s (0.3.0 renames: the former
+// HostCommand* names are that package's Command* names; DenoHostCommandRunner
+// is DenoCommandRunner).
+export {
+  CommandError,
+  DenoCommandRunner,
+  runChecked,
+  shellQuote,
+} from "@nullstyle/lima";
+export type { CommandResult, CommandRunner, RunOptions } from "@nullstyle/lima";
 
 // The host execution environment (Lima / no-lima).
-export { HostEnv, shellQuote } from "./host_env.ts";
+export { HostEnv } from "./host_env.ts";
 export type { HostEnvOptions, HostMode } from "./host_env.ts";
 
-// The committed Lima template + generator.
+// The committed Lima template + generator (YAML rendered by @nullstyle/lima).
 export {
   DEFAULT_LIMA_TEMPLATE_OPTIONS,
   DEFAULT_PORTS,
   hostVmName,
   renderLimaTemplate,
-} from "./lima_template.ts";
-export type { HostPortConfig, LimaTemplateOptions } from "./lima_template.ts";
+} from "./host_template.ts";
+export type { HostPortConfig, LimaTemplateOptions } from "./host_template.ts";
 
 // Provisioning.
 export {

@@ -18,7 +18,7 @@ import {
   parseCliArgs,
   USAGE,
 } from "./args.ts";
-import { DenoHostCommandRunner, type HostCommandRunner } from "./exec.ts";
+import { type CommandRunner, DenoCommandRunner } from "@nullstyle/lima";
 import { HostLifecycle } from "./host_lifecycle.ts";
 import { type DoctorReport, formatDoctorReport } from "./doctor.ts";
 import type { HostStatus } from "./host_lifecycle.ts";
@@ -32,8 +32,8 @@ export const CLI_VERSION: string = denoJson.version;
 
 /** Injectable dependencies for {@linkcode runCli}. */
 export interface RunCliDeps {
-  /** Subprocess seam. @default DenoHostCommandRunner */
-  readonly runner?: HostCommandRunner;
+  /** Subprocess seam. @default DenoCommandRunner */
+  readonly runner?: CommandRunner;
   /** Normal output sink. @default console.log */
   readonly stdout?: (line: string) => void;
   /** Error output sink. @default console.error */
@@ -127,7 +127,7 @@ export async function runCli(
 function defaultLifecycleFactory(
   deps: RunCliDeps,
 ): (flags: HostFlags) => HostLifecycle {
-  const runner = deps.runner ?? new DenoHostCommandRunner();
+  const runner = deps.runner ?? new DenoCommandRunner();
   const log = deps.stdout ?? ((line: string) => console.log(line));
   return (flags) =>
     new HostLifecycle({

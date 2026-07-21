@@ -7,9 +7,12 @@
  * virtualization, NO host mounts (`mounts: []`, so a hostile guest workload can
  * never reach the developer's filesystem), containerd disabled, and the three
  * static loopback port forwards the topology needs — control (40000), tunnel
- * (40001), and the exposeHttp range (40100–40199). The rendered default is
- * committed at `tools/lima/studiobox-host.yaml`; a unit test asserts the file
- * is byte-identical to `renderLimaTemplate(DEFAULT_LIMA_TEMPLATE_OPTIONS)`, so
+ * (40001), and the exposeHttp range (40100–40199). The YAML itself is rendered
+ * by `@nullstyle/lima`'s deterministic
+ * {@linkcode import("@nullstyle/lima").renderLimaYaml}; this module owns only
+ * the studiobox choices. The rendered default is committed at
+ * `tools/lima/studiobox-host.yaml`; a unit test asserts the file is
+ * byte-identical to `renderLimaTemplate(DEFAULT_LIMA_TEMPLATE_OPTIONS)`, so
  * the committed artifact can never drift from the generator.
  *
  * The template composes Lima's builtin `ubuntu-24.04` base
@@ -28,6 +31,7 @@
  */
 
 import type { ArtifactArch } from "../../images/pins.ts";
+import { type LimaConfig, renderLimaYaml } from "@nullstyle/lima";
 
 /** The three static loopback port forwards (DESIGN.md §3/§11). */
 export interface HostPortConfig {
@@ -72,10 +76,23 @@ export function hostVmName(arch: ArtifactArch): string {
   return `studiobox-host-${arch}`;
 }
 
+const HEADER = `studiobox-host — committed Lima template (macOS host).
+
+Source of truth: src/cli/host_template.ts renderLimaTemplate(). Do NOT edit by
+hand — regenerate from the generator (see tools/lima_template_write.ts). A unit
+test pins this file byte-for-byte to renderLimaTemplate() so it cannot drift.
+
+The Lima instance name is supplied by \`limactl start --name studiobox-host-<arch>\`
+(aarch64 / x86_64), so this single config serves both architectures.
+
+Linux hosts do NOT use this file: \`studiobox host up --no-lima\` provisions the
+machine directly. A Linux developer who wants a Lima VM would set vmType: qemu
+(KVM-accelerated) instead of vz.`;
+
 /**
- * Render the studiobox-host Lima template YAML. Deterministic and
- * dependency-free (hand-rendered, not via a YAML serializer) so the committed
- * artifact is stable and the drift test is exact.
+ * Render the studiobox-host Lima template YAML. Deterministic — the byte
+ * output is `@nullstyle/lima`'s render contract, so the committed artifact is
+ * stable and the drift test is exact.
  */
 export function renderLimaTemplate(
   options: LimaTemplateOptions = {},
@@ -86,57 +103,56 @@ export function renderLimaTemplate(
   const disk = options.disk ?? DEFAULT_LIMA_TEMPLATE_OPTIONS.disk;
   const [exposeStart, exposeEnd] = ports.exposeRange;
 
-  return `# studiobox-host — committed Lima template (macOS host).
-#
-# Source of truth: src/cli/lima_template.ts renderLimaTemplate(). Do NOT edit by
-# hand — regenerate from the generator (see tools/lima_template_write.ts). A unit
-# test pins this file byte-for-byte to renderLimaTemplate() so it cannot drift.
-#
-# The Lima instance name is supplied by \`limactl start --name studiobox-host-<arch>\`
-# (aarch64 / x86_64), so this single config serves both architectures.
-#
-# Linux hosts do NOT use this file: \`studiobox host up --no-lima\` provisions the
-# machine directly. A Linux developer who wants a Lima VM would set vmType: qemu
-# (KVM-accelerated) instead of vz.
+  const config: LimaConfig = {
+    base: "template://ubuntu-24.04",
+    vmType: "vz",
+    nestedVirtualization: true,
+    rosetta: { enabled: false },
+    cpus,
+    memory,
+    disk,
+    mounts: [],
+    containerd: { system: false, user: false },
+    portForwards: [
+      {
+        guestPort: ports.control,
+        hostIP: "127.0.0.1",
+        hostPort: ports.control,
+        comment: "HostControl plane (client -> studiobox-hostd).",
+      },
+      {
+        guestPort: ports.tunnel,
+        hostIP: "127.0.0.1",
+        hostPort: ports.tunnel,
+        comment:
+          "Ticketed agent tunnel (client -> studioboxd, spliced by studiobox-rootd).",
+      },
+      {
+        guestPortRange: [exposeStart, exposeEnd],
+        hostIP: "127.0.0.1",
+        hostPortRange: [exposeStart, exposeEnd],
+        comment: "exposeHttp reserved range (Tier B).",
+      },
+    ],
+  };
 
-# Compose Lima's builtin Ubuntu 24.04 base for the arch-appropriate cloud image.
-base: template://ubuntu-24.04
-
-# Apple Virtualization.framework + nested virtualization: the microVMs studiobox
-# launches run inside this VM, so /dev/kvm must be present (Apple Silicon M3+,
-# macOS 15+).
-vmType: vz
-nestedVirtualization: true
-rosetta:
-  enabled: false
-
-cpus: ${cpus}
-memory: "${memory}"
-disk: "${disk}"
-
-# No host mounts. A sandbox workload is hostile (DESIGN.md §8); the VM must never
-# have a path back to the developer's filesystem.
-mounts: []
-
-# studiobox launches Firecracker microVMs, not containers.
-containerd:
-  system: false
-  user: false
-
-# Static loopback forwards (DESIGN.md §3/§11). Each binds the HOST side to
-# 127.0.0.1 only — the control token rides this loopback, never a public iface.
-portForwards:
-  # HostControl plane (client -> studiobox-hostd).
-  - guestPort: ${ports.control}
-    hostIP: "127.0.0.1"
-    hostPort: ${ports.control}
-  # Ticketed agent tunnel (client -> studioboxd, spliced by studiobox-rootd).
-  - guestPort: ${ports.tunnel}
-    hostIP: "127.0.0.1"
-    hostPort: ${ports.tunnel}
-  # exposeHttp reserved range (Tier B).
-  - guestPortRange: [${exposeStart}, ${exposeEnd}]
-    hostIP: "127.0.0.1"
-    hostPortRange: [${exposeStart}, ${exposeEnd}]
-`;
+  return renderLimaYaml(config, {
+    header: HEADER,
+    comments: {
+      base:
+        "Compose Lima's builtin Ubuntu 24.04 base for the arch-appropriate cloud image.",
+      vmType:
+        "Apple Virtualization.framework + nested virtualization: the microVMs studiobox\n" +
+        "launches run inside this VM, so /dev/kvm must be present (Apple Silicon M3+,\n" +
+        "macOS 15+).",
+      cpus: "",
+      mounts:
+        "No host mounts. A sandbox workload is hostile (DESIGN.md §8); the VM must never\n" +
+        "have a path back to the developer's filesystem.",
+      containerd: "studiobox launches Firecracker microVMs, not containers.",
+      portForwards:
+        "Static loopback forwards (DESIGN.md §3/§11). Each binds the HOST side to\n" +
+        "127.0.0.1 only — the control token rides this loopback, never a public iface.",
+    },
+  });
 }

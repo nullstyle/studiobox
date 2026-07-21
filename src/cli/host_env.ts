@@ -1,37 +1,45 @@
 /**
  * The host execution environment: the thin translation layer between the
  * lifecycle's semantic operations (create/start/stop/delete the VM, run a
- * script in the guest, copy a file in) and the concrete `limactl`/`bash`/`cp`
- * argv the {@linkcode HostCommandRunner} executes (PLAN.md §M9; DESIGN.md §11).
+ * script in the guest, copy a file in) and how they execute on each target
+ * (PLAN.md §M9; DESIGN.md §11).
  *
  * Two modes, one interface:
  *
- * - **`lima`** (macOS): VM ops are `limactl start|stop|delete`; guest scripts
- *   run as `limactl shell <name> -- bash -lc <script>`; files land in the guest
- *   via `limactl cp <src> <name>:<dst>` — the pinned token path (DESIGN.md §8),
+ * - **`lima`** (macOS): every operation delegates to `@nullstyle/lima`
+ *   ({@linkcode Limactl} / {@linkcode LimaInstance}) — the extracted,
+ *   generalized home of the argv shapes this module used to own. Files land
+ *   in the guest via `limactl cp` — the pinned token path (DESIGN.md §8),
  *   NEVER the forwarded control port.
  * - **`no-lima`** (Linux workstation / CI): there is no VM, so the VM ops are
  *   no-ops; guest scripts run as `bash -lc <script>` directly on the machine;
  *   `copyIn` installs the file locally with `install -m`.
  *
- * The lifecycle depends only on {@linkcode HostEnv}, so a fake runner drives the
- * whole flow with no VM present and the tests assert the exact argv order.
+ * The lifecycle depends only on {@linkcode HostEnv}, so a fake runner drives
+ * the whole flow with no VM present and the tests assert the exact argv order.
  *
  * @module
  */
 
 import {
-  type HostCommandResult,
-  type HostCommandRunner,
+  type CommandResult,
+  type CommandRunner,
+  Limactl,
+  type LimaInstance,
   runChecked,
-} from "./exec.ts";
+  shellQuote,
+  strictWrap,
+  sudoWrap,
+} from "@nullstyle/lima";
+
+export { shellQuote };
 
 /** The provisioning target. */
 export type HostMode = "lima" | "no-lima";
 
 /** Options for {@linkcode HostEnv}. */
 export interface HostEnvOptions {
-  readonly runner: HostCommandRunner;
+  readonly runner: CommandRunner;
   readonly mode: HostMode;
   /** Lima instance name (ignored in `no-lima` mode). */
   readonly name: string;
@@ -41,7 +49,7 @@ export interface HostEnvOptions {
   readonly sudoBin?: string;
 }
 
-/** A guest exec that failed a required-success contract. */
+/** Options for {@linkcode HostEnv.guestExec}. */
 export interface GuestExecOptions {
   /** When true, a nonzero exit throws instead of returning the result. */
   readonly check?: boolean;
@@ -49,27 +57,25 @@ export interface GuestExecOptions {
   readonly sudo?: boolean;
 }
 
-/**
- * Wrap a bash body so it runs with a predictable shell: `set -euo pipefail` and
- * a login shell, matching the reference smoke drivers.
- */
-function wrapScript(script: string): string {
-  return `set -euo pipefail; ${script}`;
-}
-
 export class HostEnv {
-  readonly #runner: HostCommandRunner;
+  readonly #runner: CommandRunner;
   readonly #mode: HostMode;
   readonly #name: string;
-  readonly #limactl: string;
   readonly #sudo: string;
+  readonly #lima: Limactl;
+  readonly #vm: LimaInstance;
 
   constructor(options: HostEnvOptions) {
     this.#runner = options.runner;
     this.#mode = options.mode;
     this.#name = options.name;
-    this.#limactl = options.limactlBin ?? "limactl";
     this.#sudo = options.sudoBin ?? "sudo";
+    this.#lima = new Limactl({
+      runner: options.runner,
+      ...(options.limactlBin === undefined ? {} : { bin: options.limactlBin }),
+      ...(options.sudoBin === undefined ? {} : { sudoBin: options.sudoBin }),
+    });
+    this.#vm = this.#lima.instance(this.#name);
   }
 
   get mode(): HostMode {
@@ -83,54 +89,37 @@ export class HostEnv {
   /** Whether the Lima instance exists (always `true` in `no-lima` mode). */
   async vmExists(): Promise<boolean> {
     if (this.#mode === "no-lima") return true;
-    const result = await this.#runner.run(this.#limactl, ["list", "-q"]);
-    return result.stdout.split("\n").map((s) => s.trim()).includes(this.#name);
+    return await this.#vm.exists();
   }
 
   /** Whether the Lima instance reports `Running` (always `true` in no-lima). */
   async vmRunning(): Promise<boolean> {
     if (this.#mode === "no-lima") return true;
-    const result = await this.#runner.run(this.#limactl, [
-      "list",
-      "--format",
-      "{{.Name}}\t{{.Status}}",
-    ]);
-    for (const line of result.stdout.split("\n")) {
-      const [name, status] = line.split("\t");
-      if (name?.trim() === this.#name) {
-        return status?.trim().toLowerCase() === "running";
-      }
-    }
-    return false;
+    return await this.#vm.isRunning();
   }
 
   /** Create + boot the Lima instance from a rendered template file. No-op in no-lima. */
   async createVm(templatePath: string): Promise<void> {
     if (this.#mode === "no-lima") return;
-    await runChecked(this.#runner, this.#limactl, [
-      "start",
-      `--name=${this.#name}`,
-      "--tty=false",
-      templatePath,
-    ]);
+    await this.#lima.create(this.#name, { file: templatePath });
   }
 
   /** Start (a no-op when already running) the Lima instance. No-op in no-lima. */
   async startVm(): Promise<void> {
     if (this.#mode === "no-lima") return;
-    await runChecked(this.#runner, this.#limactl, ["start", this.#name]);
+    await this.#vm.start();
   }
 
   /** Stop the Lima instance. No-op in no-lima (daemons are stopped separately). */
   async stopVm(): Promise<void> {
     if (this.#mode === "no-lima") return;
-    await runChecked(this.#runner, this.#limactl, ["stop", this.#name]);
+    await this.#vm.stop();
   }
 
   /** Delete the Lima instance (forced). No-op in no-lima. */
   async deleteVm(): Promise<void> {
     if (this.#mode === "no-lima") return;
-    await runChecked(this.#runner, this.#limactl, ["delete", "-f", this.#name]);
+    await this.#vm.delete();
   }
 
   /**
@@ -140,24 +129,22 @@ export class HostEnv {
   async guestExec(
     script: string,
     options: GuestExecOptions = {},
-  ): Promise<HostCommandResult> {
-    const body = options.sudo === true
-      ? `${this.#sudo} -E bash -lc ${shellQuote(wrapScript(script))}`
-      : wrapScript(script);
-    const [bin, args] = this.#mode === "lima"
-      ? [this.#limactl, [
-        "shell",
-        this.#name,
-        "--",
-        "bash",
-        "-lc",
-        body,
-      ]] as const
-      : ["bash", ["-lc", body]] as const;
-    if (options.check === true) {
-      return await runChecked(this.#runner, bin, args);
+  ): Promise<CommandResult> {
+    if (this.#mode === "lima") {
+      return await this.#vm.exec(script, {
+        ...(options.check === undefined ? {} : { check: options.check }),
+        ...(options.sudo === undefined ? {} : { sudo: options.sudo }),
+      });
     }
-    return await this.#runner.run(bin, args);
+    const wrapped = strictWrap(script);
+    const body = options.sudo === true
+      ? sudoWrap(wrapped, { sudoBin: this.#sudo })
+      : wrapped;
+    const args = ["-lc", body] as const;
+    if (options.check === true) {
+      return await runChecked(this.#runner, "bash", args);
+    }
+    return await this.#runner.run("bash", args);
   }
 
   /**
@@ -171,7 +158,7 @@ export class HostEnv {
     bin: string,
     args: readonly string[],
     options: { check?: boolean; uncapped?: boolean } = {},
-  ): Promise<HostCommandResult> {
+  ): Promise<CommandResult> {
     const runOptions = options.uncapped === true ? { uncapped: true } : {};
     return options.check === true
       ? await runChecked(this.#runner, bin, args, runOptions)
@@ -190,18 +177,16 @@ export class HostEnv {
       await runChecked(this.#runner, "cp", [localPath, remotePath]);
       return;
     }
-    await runChecked(this.#runner, this.#limactl, [
-      "cp",
-      localPath,
-      `${this.#name}:${remotePath}`,
-    ]);
+    await this.#vm.copyIn(localPath, remotePath);
   }
 
   /**
-   * Deliver a host-side file into the target. In lima mode this is
-   * `limactl cp <local> <name>:<remote>` — the pinned token-delivery path
-   * (DESIGN.md §8), never the forwarded port. In no-lima mode it is a local
-   * `install -m <mode> <local> <remote>` so ownership/mode match.
+   * Deliver a host-side file into the target. In lima mode this delegates to
+   * {@linkcode LimaInstance.copyInAsRoot} — `limactl cp` into a user-writable
+   * staging path, then `sudo install -m <mode>` into place (the pinned
+   * token-delivery path, DESIGN.md §8 — never the forwarded port). In no-lima
+   * mode it is a local `install -m <mode> <local> <remote>` so ownership/mode
+   * match.
    */
   async copyIn(
     localPath: string,
@@ -218,28 +203,6 @@ export class HostEnv {
       ]);
       return;
     }
-    // `limactl cp` rsyncs as the unprivileged lima user, which cannot write into
-    // a root-owned destination (e.g. `/etc/studiobox`, created 0710 root by the
-    // directories step). Stage into a user-writable temp path, then sudo-install
-    // it into place with the requested mode (mirroring the no-lima branch); the
-    // caller adjusts ownership afterward where it matters (e.g. the hostd token).
-    const staging = `/tmp/.studiobox-cp-${crypto.randomUUID()}`;
-    await runChecked(this.#runner, this.#limactl, [
-      "cp",
-      localPath,
-      `${this.#name}:${staging}`,
-    ]);
-    await this.guestExec(
-      `install -m ${mode} ${shellQuote(staging)} ${
-        shellQuote(remotePath)
-      } && ` +
-        `rm -f ${shellQuote(staging)}`,
-      { check: true, sudo: true },
-    );
+    await this.#vm.copyInAsRoot(localPath, remotePath, { mode });
   }
-}
-
-/** Single-quote a string for safe embedding in a bash command line. */
-export function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
 }

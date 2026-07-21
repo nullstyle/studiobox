@@ -40,7 +40,7 @@ import type { ArtifactArch } from "../../images/pins.ts";
 import { BAKE_LOG, bakeGoldenSet } from "./bake.ts";
 import { GUEST_CACHE_DIR, GUEST_STATE_DIR } from "./guest_layout.ts";
 import type { HostEnv } from "./host_env.ts";
-import type { HostPortConfig } from "./lima_template.ts";
+import type { HostPortConfig } from "./host_template.ts";
 import type { LocalFs } from "./local_fs.ts";
 
 // Guest-side layout (logical-id / short paths; DESIGN.md §8, §12).
@@ -427,7 +427,7 @@ export async function provisionHost(
       });
     } catch (error) {
       bakeFailed = true;
-      // The build's stderr went to BAKE_LOG (so HostCommandError's own stderr
+      // The build's stderr went to BAKE_LOG (so CommandError's own stderr
       // slice is empty); tail it for a useful diagnostic in the warning.
       const tail =
         (await env.guestExec(`tail -n 60 ${BAKE_LOG}`, { sudo: true })

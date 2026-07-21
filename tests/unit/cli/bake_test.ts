@@ -13,7 +13,7 @@ import {
 import { GUEST_CACHE_DIR } from "../../../src/cli/guest_layout.ts";
 import { buildLaunchConfig } from "../../../src/cli/provision.ts";
 import { HostEnv } from "../../../src/cli/host_env.ts";
-import { HostCommandError } from "../../../src/cli/exec.ts";
+import { CommandError } from "@nullstyle/lima";
 import { FakeHostRunner, FakeLocalFs } from "./cli_test_helpers.ts";
 
 function makeEnv(
@@ -142,7 +142,7 @@ Deno.test("bakeGoldenSet: no-lima bakes locally with no sync (no limactl/git/tar
   );
 });
 
-Deno.test("bakeGoldenSet: a failing bake command rejects with HostCommandError", async () => {
+Deno.test("bakeGoldenSet: a failing bake command rejects with CommandError", async () => {
   const runner = new FakeHostRunner();
   runner.bakeFails = true;
   await assertRejects(
@@ -153,7 +153,7 @@ Deno.test("bakeGoldenSet: a failing bake command rejects with HostCommandError",
         arch: "aarch64",
         sourceRoot: "/repo",
       }),
-    HostCommandError,
+    CommandError,
   );
   // A failed bake never records the pointer.
   assert(

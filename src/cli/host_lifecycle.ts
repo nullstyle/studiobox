@@ -22,7 +22,7 @@ import { type ArtifactArch, assertArtifactArch } from "../../images/pins.ts";
 import type { ContractIdentity } from "../wire/contract.ts";
 import { buildHostContractIdentity } from "../hostd/service.ts";
 import type { HostCompatIdentitySource } from "../hostd/service.ts";
-import type { HostCommandRunner } from "./exec.ts";
+import type { CommandRunner } from "@nullstyle/lima";
 import { HostEnv, type HostMode } from "./host_env.ts";
 import {
   DEFAULT_PORTS,
@@ -30,7 +30,7 @@ import {
   hostVmName,
   type LimaTemplateOptions,
   renderLimaTemplate,
-} from "./lima_template.ts";
+} from "./host_template.ts";
 import { DenoLocalFs, type LocalFs } from "./local_fs.ts";
 import {
   type BakeRequest,
@@ -60,7 +60,7 @@ export interface HostBakeOptions {
 /** Options for {@linkcode HostLifecycle}. */
 export interface HostLifecycleOptions {
   /** The subprocess seam (REQUIRED — the one dependency with no default). */
-  readonly runner: HostCommandRunner;
+  readonly runner: CommandRunner;
   /** `lima` (macOS) or `no-lima` (Linux/CI). @default "lima" */
   readonly mode?: HostMode;
   /** Target arch. @default this host's arch */

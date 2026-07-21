@@ -4,7 +4,7 @@ import {
   DEFAULT_PORTS,
   hostVmName,
   renderLimaTemplate,
-} from "../../../src/cli/lima_template.ts";
+} from "../../../src/cli/host_template.ts";
 
 Deno.test("renderLimaTemplate: sets vmType vz + nested virtualization", () => {
   const yaml = renderLimaTemplate();

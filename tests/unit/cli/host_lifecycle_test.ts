@@ -9,7 +9,7 @@ import {
   ROOTD_TOKEN,
   WIRE_JSON,
 } from "../../../src/cli/provision.ts";
-import { DEFAULT_PORTS } from "../../../src/cli/lima_template.ts";
+import { DEFAULT_PORTS } from "../../../src/cli/host_template.ts";
 import { BakeSourceUnavailableError } from "../../../src/cli/bake.ts";
 import {
   FakeHostRunner,
@@ -98,14 +98,14 @@ Deno.test("HostLifecycle.up (fresh): creates the VM, checks kvm, provisions", as
   assertEquals(result.provision.installedDaemons, ["hostd", "rootd"]);
 
   // Guest received the tokens, the compat pin; the host got its SDK token.
-  assert(runner.guestFiles.has(HOSTD_TOKEN));
-  assert(runner.guestFiles.has(ROOTD_TOKEN));
-  assert(runner.guestFiles.has(WIRE_JSON));
+  assert(runner.hasGuestFile(HOSTD_TOKEN));
+  assert(runner.hasGuestFile(ROOTD_TOKEN));
+  assert(runner.hasGuestFile(WIRE_JSON));
   assert(fs.files.has(HOST_TOKEN), "SDK token written on the host");
 
   // The instance now exists and is running.
   assert(runner.instances.has("studiobox-host-aarch64"));
-  assert(runner.running.has("studiobox-host-aarch64"));
+  assert(runner.instanceRunning("studiobox-host-aarch64"));
 });
 
 Deno.test("HostLifecycle.up (re-run): reuses the VM and does NOT rotate the token", async () => {
@@ -194,7 +194,7 @@ Deno.test("HostLifecycle.down (lima): stops the running instance", async () => {
   await lifecycle.down();
   const lines = runner.commandLines().slice(boundary);
   assert(lines.some((l) => l === "limactl stop studiobox-host-aarch64"));
-  assert(!runner.running.has("studiobox-host-aarch64"));
+  assert(!runner.instanceRunning("studiobox-host-aarch64"));
 });
 
 Deno.test("HostLifecycle.status: reports vm + daemon + token + ports", async () => {
@@ -238,7 +238,7 @@ Deno.test("HostLifecycle.provision (--no-lima): no limactl, provisions locally",
   );
   assertEquals(result.installedDaemons, ["hostd", "rootd"]);
   // Guest files land via `sudo install` locally.
-  assert(runner.guestFiles.has(HOSTD_TOKEN));
+  assert(runner.hasGuestFile(HOSTD_TOKEN));
   assert(fs.files.has(HOST_TOKEN));
 });
 

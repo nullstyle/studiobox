@@ -4,6 +4,44 @@ All notable changes to `@nullstyle/studiobox` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 aims to follow [semantic versioning](https://semver.org/) from 1.0 onward.
 
+## [0.3.0] — 2026-07-21
+
+Breaking, on the `./cli` subpath. Pre-1.0, so it rides a minor bump: the Lima
+layer was extracted into the standalone
+[`jsr:@nullstyle/lima`](https://jsr.io/@nullstyle/lima) package, and `./cli` now
+re-exports that package's names.
+
+### Removed
+
+- **The in-repo Lima layer** (`src/cli/exec.ts`, `src/cli/lima_template.ts`, and
+  `HostEnv`'s hand-built limactl argv). The subprocess seam, the limactl
+  wrapper, and the deterministic template renderer now live in `@nullstyle/lima`
+  — generalized (typed `list --json` status, versions/compat probing,
+  AbortSignal/timeout, snapshots/disks/copy-out, `waitReady`) and smoke-verified
+  against limactl 2.1.4. The argv this package emits is byte-identical to
+  0.2.0's except `copyIn`'s staging prefix (`/tmp/.studiobox-cp-` → the
+  package's `/tmp/.lima-cp-`).
+
+### Changed
+
+- **`./cli` re-export renames** (old 0.2.0 name → new): `HostCommandRunner` →
+  `CommandRunner`, `HostCommandResult` → `CommandResult`, `HostCommandOptions` →
+  `RunOptions`, `HostCommandError` → `CommandError`, `DenoHostCommandRunner` →
+  `DenoCommandRunner`. `runChecked`, `shellQuote`, `HostEnv`, `HostMode`,
+  `HostEnvOptions`, `renderLimaTemplate`, `DEFAULT_PORTS`, `hostVmName`,
+  `HostPortConfig`, `LimaTemplateOptions`, `LocalFs`, and `DenoLocalFs` keep
+  their names (the template module moved to `src/cli/host_template.ts`; its YAML
+  is rendered by `@nullstyle/lima`'s byte-deterministic renderer — the committed
+  `tools/lima/studiobox-host.yaml` changed only its source-of-truth comment
+  line).
+- **`tools/lima_vm_test.ts` / `tools/parity_vm_test.ts`** drive limactl through
+  `@nullstyle/lima` instead of their own inline `Deno.Command` helpers.
+
+### Added
+
+- Dependency on `jsr:@nullstyle/lima@^0.1` (recorded in
+  `compat/dependencies.json`; local-dev remap in `deno.local.json`).
+
 ## [0.2.0] — 2026-07-14
 
 Breaking, on the `./images` subpath and the artifact manifest schema. Pre-1.0,
