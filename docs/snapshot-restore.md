@@ -28,7 +28,7 @@ from memory.
 - **The crux — per-restore personalization.** Every restore shares one
   snapshot's guest memory, so identity **cannot** be baked at boot (today's
   `studiobox.token` / `studiobox.ip` kernel cmdline,
-  `launch_planner.ts:300-318`, `overlay-init.sh:71-99`). Instead rootd injects
+  `launch_planner.ts:300-318`, `overlay-init.sh:91-124`). Instead rootd injects
   it **after restore+resume** over the in-jail vsock via a new pre-auth
   bootstrap method `personalize(...)` carrying
   `{credential, bootNonce, sandboxId, guestNetwork}`. studioboxd boots in a
@@ -95,14 +95,14 @@ conflict (one guest IP for all).
 Today identity is baked **at boot**, into memory, from the kernel cmdline:
 
 - the credential: `studiobox.token=<hex>` is put on the cmdline by the planner
-  (`launch_planner.ts:301`), parsed by `overlay-init.sh:74`, materialized to
-  `/run/studioboxd.token` (`overlay-init.sh:113-114`), and read by studioboxd
+  (`launch_planner.ts:301`), parsed by `overlay-init.sh:95`, materialized to
+  `/run/studioboxd.token` (`overlay-init.sh:156-157`), and read by studioboxd
   `--token-file` (`agent/main.ts:186-191`, `readCredentialFile` 206-225). It is
   the shared secret `AgentBootstrap.authenticate` checks constant-time
   (`agent/service.ts:1522-1540`).
 - the network: `studiobox.ip/gw/dns` on the cmdline
-  (`launch_planner.ts:315-317`) configure `eth0` in `overlay-init.sh:92-99` and
-  write `/etc/resolv.conf` (`overlay-init.sh:118-121`).
+  (`launch_planner.ts:315-317`) configure `eth0` in `overlay-init.sh:117-124`
+  and write `/etc/resolv.conf` (`overlay-init.sh:161-164`).
 
 A snapshot captures all of that in memory. **Therefore per-sandbox identity must
 move out of boot and be injected after restore.** That injection is
@@ -124,8 +124,8 @@ the artifact cache, `images/cache.ts:182 setPath`). It is:
 - Deno + the capnp WASM session core loaded and warm (studioboxd has already
   imported them — this is where most of the cold 3.7 s goes);
 - **not** holding a real credential (template mode; §2.2);
-- with the overlayfs mounted (`overlay-init.sh:53-63`) and chrooted
-  (`overlay-init.sh:124`), i.e. exactly the runtime state a normal boot reaches
+- with the overlayfs mounted (`overlay-init.sh:73-82`) and chrooted
+  (`overlay-init.sh:146`), i.e. exactly the runtime state a normal boot reaches
   **minus** the personalization;
 - with an `eth0` NIC **device present but unconfigured** (link may be up, but no
   IP / route) so `network_overrides` has an interface to re-point on restore
@@ -181,7 +181,7 @@ iface_id}` in the pinned schema, deno doc
    host_dev_name:"sbxtap-tmpl", guest_mac:…}]`,
    same shape as `launch_planner.ts:350-358`) but **does not** put
    `studiobox.ip/gw/dns` on the cmdline — so `overlay-init` leaves `eth0`
-   **down/unconfigured** (`overlay-init.sh:92` gates all eth0 config on a
+   **down/unconfigured** (`overlay-init.sh:117` gates all eth0 config on a
    non-empty `GUEST_IP`);
 3. after snapshot, tears the placeholder TAP down. Restores never use it — each
    restore's `network_overrides` re-points `eth0` to its own `sbxtap<slot>`.
@@ -270,7 +270,7 @@ interface AgentBootstrap {
 ```
 
 `network.guestCidr` empty ⇒ netless — this mirrors the existing cmdline contract
-exactly (`overlay-init.sh:92` gates on non-empty `GUEST_IP`), so no separate
+exactly (`overlay-init.sh:117` gates on non-empty `GUEST_IP`), so no separate
 "netless" flag is needed.
 
 **Regen procedure (identical to recent milestones):**
@@ -297,8 +297,8 @@ against the rebaked set.
 
 ### 2.2 studioboxd's side: template mode + personalization state
 
-**Boot in template mode.** `overlay-init` execs studioboxd with a `--template`
-flag and **no** `--token-file` (§3). `agent/main.ts` today requires
+**Boot in template mode.** `overlay-init` execs studioboxd (under `tini`) with a
+`--template` flag and **no** `--token-file` (§3). `agent/main.ts` today requires
 `--token-file` (`main.ts:186-191`) and reads it before serving
 (`main.ts:362-364`); template mode makes it optional and starts studioboxd in a
 **pre-personalization** state.
@@ -339,8 +339,8 @@ object, `agent/service.ts:1558-1640`):
    `already personalized`.
 3. validate `credential` (32 bytes), `bootNonce`, `sandboxId`.
 4. **apply the network in-band** (when `network.guestCidr` non-empty): run, as
-   root in the guest (overlay-init execs studioboxd as a pid-1 descendant
-   without dropping uid — `overlay-init.sh:124`, so studioboxd holds
+   root in the guest (overlay-init execs `tini` — guest pid 1 — which execs
+   studioboxd as its child without dropping uid, so studioboxd holds
    `CAP_NET_ADMIN`, and `iproute2` is in the rootfs — `images/pins.json`
    packages):
    - `ip addr flush dev eth0`
@@ -348,7 +348,7 @@ object, `agent/service.ts:1558-1640`):
    - `ip link set eth0 up`
    - `ip route replace default via <gateway>`
    - write `nameserver <dns>` to `/etc/resolv.conf` These replace
-     `overlay-init.sh:92-121` for the snapshot path. `flush` first is
+     `overlay-init.sh:117-164` for the snapshot path. `flush` first is
      load-bearing: even though the template leaves `eth0` unconfigured (§1.4), a
      flush makes personalize idempotent-safe against any residual state.
 5. set `controller.credential/expectedSandboxId/expectedBootNonce`, flip
@@ -444,9 +444,9 @@ Sub-analyses:
 
 ## 3. The overlay (byte-identical, per-restore copy)
 
-The snapshot's memory has the overlayfs **mounted** (`overlay-init.sh:53-63`
-mkfs+mount, then `overlay-init.sh:61-63` mounts overlayfs, then chroot at
-`:124`). The in-memory mount state references the exact ext4 superblock,
+The snapshot's memory has the overlayfs **mounted** (`overlay-init.sh:73-82`
+mkfs+mount, then `overlay-init.sh:80-82` mounts overlayfs, then chroot at
+`:146`). The in-memory mount state references the exact ext4 superblock,
 journal, and `upper`/`work` inodes present at snapshot time. If a restore's
 `/dev/vdb` (the overlay drive, `launch_planner.ts:341-345`) diverged from that
 image — e.g. a fresh `mkfs.ext4` — the mounted filesystem in memory would
@@ -456,7 +456,7 @@ reference blocks the new device does not have: **corruption**.
 
 1. Snapshot the template with a **freshly-formatted, empty** overlay (the
    builder stages a fresh sparse `overlay.ext4`; `overlay-init` formats it once
-   — `overlay-init.sh:54-57` — and mounts it; studioboxd writes little/nothing
+   — `overlay-init.sh:73-77` — and mounts it; studioboxd writes little/nothing
    in template mode). Capture **that exact** `overlay.ext4` as the template
    overlay (§1.5 step 5).
 2. Each restore's jail gets a **byte-for-byte copy** of that template overlay
@@ -466,7 +466,7 @@ reference blocks the new device does not have: **corruption**.
 Contrast with the cold path, which stages a fresh **unformatted** sparse overlay
 that `overlay-init` formats on first boot
 (`launch_planner.ts:508-533
-#createOverlay`, `overlay-init.sh:54-57`). The
+#createOverlay`, `overlay-init.sh:73-77`). The
 snapshot path **cannot** do this — the guest already formatted+mounted at
 snapshot time.
 
@@ -771,9 +771,9 @@ fc-smoke-only.
 
 - **WI-3 — overlay-init template branch.** ▶ WI-1 (coordinate the rebake).
   _Touch:_ `images/overlay_init/overlay-init.sh` (`studiobox.mode=template` ⇒
-  exec `studioboxd --template` with no token/ip; else today's path). Rolls
-  `overlayInitSha256` (`manifest.ts:337`) — folded into WI-1's rebake. **HS**
-  for the cmdline-parse logic in isolation; boot proof is **VM**.
+  exec `tini -g -- studioboxd --template` with no token/ip; else today's path).
+  Rolls `overlayInitSha256` (`manifest.ts:337`) — folded into WI-1's rebake.
+  **HS** for the cmdline-parse logic in isolation; boot proof is **VM**.
 
 - **WI-4 — firecracker adapter `restore` surface.** ▶ (independent of WI-1).
   _Touch:_ `src/rootd/firecracker/runtime.ts` (add `restore` to
