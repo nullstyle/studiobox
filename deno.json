@@ -11,8 +11,8 @@
     "./unstable-host": "./unstable-host.ts"
   },
   "imports": {
-    "@nullstyle/lima": "../lima-deno/mod.ts",
-    "@nullstyle/lima/testing": "../lima-deno/testing/mod.ts",
+    "@nullstyle/lima": "jsr:@nullstyle/lima@^0.1",
+    "@nullstyle/lima/testing": "jsr:@nullstyle/lima@^0.1/testing",
     "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.4",
     "@nullstyle/capnp/encoding": "jsr:@nullstyle/capnp@^0.4/encoding",
     "@nullstyle/capnp/rpc": "jsr:@nullstyle/capnp@^0.4/rpc",

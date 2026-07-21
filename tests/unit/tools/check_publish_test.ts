@@ -6,6 +6,8 @@ const readyConfig = {
   version: "1.0.0",
   exports: { ".": "./mod.ts" },
   imports: {
+    "@nullstyle/lima": "jsr:@nullstyle/lima@^0.1",
+    "@nullstyle/lima/testing": "jsr:@nullstyle/lima@^0.1/testing",
     "@nullstyle/capnp": "jsr:@nullstyle/capnp@^0.1",
     "@nullstyle/capnp/rpc": "jsr:@nullstyle/capnp@^0.1/rpc",
     "@nullstyle/firecracker": "jsr:@nullstyle/firecracker@^0.2",
@@ -25,6 +27,11 @@ const readyConfig = {
 };
 
 const readyManifest = {
+  lima: {
+    package: "@nullstyle/lima",
+    version: "0.1.0",
+    releaseSpecifier: "jsr:@nullstyle/lima@^0.1",
+  },
   capnp: {
     package: "@nullstyle/capnp",
     version: "0.1.0",

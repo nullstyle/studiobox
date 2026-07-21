@@ -5,6 +5,7 @@
     "jsr:@nullstyle/capnp@0.4": "0.4.0",
     "jsr:@nullstyle/firecracker@*": "0.2.0",
     "jsr:@nullstyle/firecracker@0.2": "0.2.0",
+    "jsr:@nullstyle/lima@0.1": "0.1.0",
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/fs@^1.0.19": "1.0.24",
     "jsr:@std/internal@^1.0.12": "1.0.14",
@@ -36,6 +37,9 @@
       "dependencies": [
         "jsr:@std/path@1"
       ]
+    },
+    "@nullstyle/lima@0.1.0": {
+      "integrity": "e39c84200f6540854f65692b527a2145de7ed9cf0b6ab7b94dc4b7298178fd34"
     },
     "@std/assert@1.0.19": {
       "integrity": "eaada96ee120cb980bc47e040f82814d786fe8162ecc53c91d8df60b8755991e",
@@ -90,16 +94,10 @@
     "dependencies": [
       "jsr:@nullstyle/capnp@0.4",
       "jsr:@nullstyle/firecracker@0.2",
+      "jsr:@nullstyle/lima@0.1",
       "jsr:@std/assert@1",
       "jsr:@std/fs@^1.0.19",
       "jsr:@std/path@1"
-    ],
-    "links": {
-      "jsr:@nullstyle/lima@0.1.0": {
-        "dependencies": [
-          "jsr:@std/assert@1"
-        ]
-      }
-    }
+    ]
   }
 }

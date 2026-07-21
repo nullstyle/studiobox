@@ -1,9 +1,16 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-11",
+  "generatedAt": "2026-07-21",
   "deno": {
     "development": "2.9.1",
     "minimum": "2.9.0"
+  },
+  "lima": {
+    "package": "@nullstyle/lima",
+    "version": "0.1.0",
+    "releaseSpecifier": "jsr:@nullstyle/lima@^0.1",
+    "localPath": "../lima-deno",
+    "limactlMinimum": "2.1.0"
   },
   "capnp": {
     "package": "@nullstyle/capnp",

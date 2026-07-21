@@ -16,6 +16,7 @@ interface DependencyPin {
 
 interface CompatibilityManifest {
   deno: { development: string; minimum: string };
+  lima: DependencyPin & { limactlMinimum: string };
   capnp: DependencyPin & { wasmAbi: number };
   firecracker: DependencyPin & {
     firecrackerPinned: string;
@@ -44,7 +45,7 @@ if (compareVersions(Deno.version.deno, manifest.deno.minimum) < 0) {
   );
 }
 
-for (const pin of [manifest.capnp, manifest.firecracker]) {
+for (const pin of [manifest.lima, manifest.capnp, manifest.firecracker]) {
   const release = pin.releaseSpecifier;
   if (release === null || !release.startsWith(`jsr:${pin.package}@`)) {
     failures.push(
@@ -84,7 +85,7 @@ for (const [name, specifier] of Object.entries(denoConfig.imports)) {
 
 const lock = await readLock();
 if (lock !== null) {
-  for (const pin of [manifest.capnp, manifest.firecracker]) {
+  for (const pin of [manifest.lima, manifest.capnp, manifest.firecracker]) {
     const release = pin.releaseSpecifier;
     if (release === null) continue;
     const window = rangeWindow(release);
@@ -104,7 +105,7 @@ if (lock !== null) {
 }
 
 if (checkLocal) {
-  for (const pin of [manifest.capnp, manifest.firecracker]) {
+  for (const pin of [manifest.lima, manifest.capnp, manifest.firecracker]) {
     await inspectLocalCheckout(pin);
   }
 }

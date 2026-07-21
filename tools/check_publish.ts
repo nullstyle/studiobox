@@ -15,6 +15,7 @@ interface PublishDependency {
 }
 
 interface PublishManifest {
+  lima: PublishDependency;
   capnp: PublishDependency;
   firecracker: PublishDependency;
 }
@@ -51,7 +52,9 @@ export function publishReadinessFailures(
     }
   }
 
-  for (const dependency of [manifest.capnp, manifest.firecracker]) {
+  for (
+    const dependency of [manifest.lima, manifest.capnp, manifest.firecracker]
+  ) {
     const release = dependency.releaseSpecifier;
     if (release === null || !release.startsWith(`jsr:${dependency.package}@`)) {
       failures.push(
