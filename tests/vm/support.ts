@@ -18,6 +18,9 @@
  * - `SBX_VM_JAILER_BIN`       — jailer path (default `/usr/local/bin/jailer`).
  * - `SBX_VM_FIRECRACKER_BIN`  — firecracker path (default
  *                              `/usr/local/bin/firecracker`).
+ * - `SBX_VM_SHARED_HW=1`      — the host is shared CI hardware; relaxes the
+ *                              perf-shaped assertions only ({@linkcode
+ *                              sharedHardware}).
  *
  * @module
  */
@@ -40,6 +43,24 @@ import * as wireStreams from "../../src/wire/generated/streams_types.ts";
 
 /** True only when the in-VM tier is armed (Linux + KVM + root, set up). */
 export const inGuest = Deno.env.get("SBX_VM") === "1";
+
+/**
+ * True when the tier runs on SHARED, virtualized CI hardware (a GitHub-hosted
+ * runner) rather than a dedicated host.
+ *
+ * A wall-clock RATIO between two microVM boots is not measurable there: noisy
+ * neighbours and a network-backed disk swamp the difference the measurement is
+ * after (the snapshot case's per-restore 512 MiB memory-file copy costs more
+ * than the whole boot it replaces, so restore measures ~1.0x cold instead of
+ * the ~1.5-2x a real host shows). Cases gate their perf-shaped assertion on
+ * this and fall back to a gross-regression bound, logging the numbers loudly;
+ * every FUNCTIONAL assertion stays exactly as strict either way.
+ *
+ * Set EXPLICITLY by the job that knows its hardware (`SBX_VM_SHARED_HW=1`),
+ * never inferred from `CI` — a dedicated self-hosted runner must keep the
+ * strict gate.
+ */
+export const sharedHardware = Deno.env.get("SBX_VM_SHARED_HW") === "1";
 
 /**
  * `--config <path>` args for subprocesses this tier spawns, propagating the

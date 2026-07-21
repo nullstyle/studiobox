@@ -17,6 +17,13 @@ name: Integration (real Firecracker microVMs)
 #   * firecracker-deno's KVM integration job — the udev MODE=0666 rule,
 #     `modprobe vhost_vsock`, and a /dev/kvm preflight (PLAN.md §4).
 #
+# One thing the Lima guest gives for free and a GitHub-hosted runner does not:
+# an unobstructed `filter/forward` hook. Docker is preinstalled AND running
+# here, and dockerd sets the FORWARD policy to DROP — which blackholes every
+# guest's NAT'd egress no matter what rootd's own nftables tables accept. The
+# "Open the host forward path" step below is what makes the M10 network cases
+# possible at all (see docs/networking-dataplane.md §3).
+#
 # Two jobs share that setup shape:
 #   * `integration` runs per PR / push (the full tests/vm/ suite); and
 #   * `soak` runs the real-microVM 1.0 no-leak drill on a nightly cron.
@@ -62,6 +69,13 @@ env:
   # Short work base: it prefixes the vsock sun_path (~104-byte sockaddr_un),
   # so it MUST stay short — mirrors the Lima driver's /tmp/sbxw.
   SBX_VM_WORK: /tmp/sbxw
+  # The dataplane's guest pool (src/rootd/network/allocator.ts →
+  # DEFAULT_POOL_CIDR). The forward-path step below scopes its ACCEPTs to it.
+  SBX_POOL_CIDR: 10.201.0.0/16
+  # The address the M10 egress cases dial (tests/vm/network_vm_test.ts →
+  # UPSTREAM_DNS / REACH_IP): the guests NAT out to it through the runner's
+  # uplink, so the host must reach it too. Preflighted below.
+  SBX_EGRESS_PROBE_IP: 1.1.1.1
 
 jobs:
   integration:
@@ -115,6 +129,52 @@ jobs:
           # `mke2fs -d`.)
           sudo apt-get install -y -q \
             nftables dnsmasq debootstrap e2fsprogs curl unzip
+
+      - name: Open the host forward path + preflight egress
+        if: steps.preflight.outputs.kvm == 'true'
+        # GitHub-hosted runners ship a RUNNING Docker daemon, and dockerd sets
+        # the filter table's FORWARD policy to DROP. Guest egress is FORWARDED
+        # traffic (per-sandbox TAP → host gateway → NAT uplink,
+        # docs/networking-dataplane.md §3), and a base-chain `accept` is NOT
+        # terminal across netfilter tables: rootd's own `studiobox_nat` /
+        # `sbx_eg_*` tables accept the packet and Docker's policy DROP still
+        # kills it at the same hook. The guest is left with no route out, so the
+        # M10 egress cases (network_vm_test.ts:49 and :91) blackhole and surface
+        # as an opaque in-guest `SandboxAgentError: aborted due to timeout` —
+        # reproduced exactly in the `fc-smoke` Lima guest by injecting
+        # `iptables -P FORWARD DROP`, and cleared by the two rules below.
+        #
+        # They are inserted ABOVE Docker's `-j DOCKER-USER` jump, and an ACCEPT
+        # verdict inside the iptables filter table is terminal for THAT table
+        # only — so this lifts the blanket policy WITHOUT weakening what the
+        # suite proves: rootd's per-sandbox `inet sbx_eg_*` forward chain is a
+        # different table and still drops a restricted sandbox's denied
+        # destinations (so the `allowNet` case stays a real assertion instead of
+        # passing because everything is blocked). `-C` before `-I` for
+        # idempotency.
+        run: |
+          echo "── FORWARD before:"; sudo iptables -S FORWARD
+          for dir in -s -d; do
+            sudo iptables -C FORWARD "$dir" "$SBX_POOL_CIDR" -j ACCEPT 2>/dev/null \
+              || sudo iptables -I FORWARD "$dir" "$SBX_POOL_CIDR" -j ACCEPT
+          done
+          echo "── FORWARD after:"; sudo iptables -S FORWARD
+          # The guests NAT out through the runner's uplink, so the host itself
+          # must reach what they dial. Fail LOUDLY here rather than as a
+          # mystery timeout deep inside the suite.
+          if ! curl -sS --max-time 20 -o /dev/null "https://${SBX_EGRESS_PROBE_IP}"; then
+            echo "::error::runner cannot reach https://${SBX_EGRESS_PROBE_IP} — the M10 microVM egress cases NAT out through this host and cannot pass without outbound internet. Use a runner with egress, or drop the network cases from the gate." >&2
+            exit 1
+          fi
+          # …and the other half: the per-sandbox dnsmasq forwards guest queries
+          # upstream over UDP/53 from THIS host, so probe that separately (a
+          # reachable :443 says nothing about :53 egress). `deno eval` runs
+          # fully permissioned.
+          if ! deno eval "console.log((await Deno.resolveDns('one.one.one.one', 'A', { nameServer: { ipAddr: '${SBX_EGRESS_PROBE_IP}', port: 53 } })).join(','))"; then
+            echo "::error::runner cannot query ${SBX_EGRESS_PROBE_IP}:53 over UDP — the per-sandbox dnsmasq forwards guest DNS upstream from this host, so the DNS half of the M10 egress cases cannot pass here." >&2
+            exit 1
+          fi
+          echo "✓ host egress to ${SBX_EGRESS_PROBE_IP} works (443 + DNS)"
 
       - name: Cache Firecracker + jailer
         id: fc-cache
@@ -229,10 +289,19 @@ jobs:
         # The SBX_VM_* contract from tests/vm/support.ts. Root: the jailer must
         # chroot / mknod / drop privilege. `deno task test:vm:run` →
         # `deno test -A --unstable-vsock tests/vm/`.
+        #
+        # SBX_VM_SHARED_HW=1 declares this host as shared, virtualized CI
+        # hardware (tests/vm/support.ts → `sharedHardware`): the FUNCTIONAL
+        # assertions stay exactly as strict, but the wall-clock RATIO the
+        # snapshot case gates on is unmeasurable next to noisy neighbours and a
+        # network-backed disk, so it relaxes to a gross-regression bound and
+        # logs its numbers loudly. Never auto-detected from `CI` — a dedicated
+        # self-hosted runner must keep the strict gate.
         run: |
           sudo mkdir -p "$SBX_VM_WORK"
           sudo -E env \
             SBX_VM=1 \
+            SBX_VM_SHARED_HW=1 \
             SBX_VM_CACHE="$GOLDEN_CACHE" \
             SBX_VM_MANIFEST_HASH="$GOLDEN_HASH" \
             SBX_VM_WORK="$SBX_VM_WORK" \
@@ -301,6 +370,52 @@ jobs:
           # `mke2fs -d`.)
           sudo apt-get install -y -q \
             nftables dnsmasq debootstrap e2fsprogs curl unzip
+
+      - name: Open the host forward path + preflight egress
+        if: steps.preflight.outputs.kvm == 'true'
+        # GitHub-hosted runners ship a RUNNING Docker daemon, and dockerd sets
+        # the filter table's FORWARD policy to DROP. Guest egress is FORWARDED
+        # traffic (per-sandbox TAP → host gateway → NAT uplink,
+        # docs/networking-dataplane.md §3), and a base-chain `accept` is NOT
+        # terminal across netfilter tables: rootd's own `studiobox_nat` /
+        # `sbx_eg_*` tables accept the packet and Docker's policy DROP still
+        # kills it at the same hook. The guest is left with no route out, so the
+        # M10 egress cases (network_vm_test.ts:49 and :91) blackhole and surface
+        # as an opaque in-guest `SandboxAgentError: aborted due to timeout` —
+        # reproduced exactly in the `fc-smoke` Lima guest by injecting
+        # `iptables -P FORWARD DROP`, and cleared by the two rules below.
+        #
+        # They are inserted ABOVE Docker's `-j DOCKER-USER` jump, and an ACCEPT
+        # verdict inside the iptables filter table is terminal for THAT table
+        # only — so this lifts the blanket policy WITHOUT weakening what the
+        # suite proves: rootd's per-sandbox `inet sbx_eg_*` forward chain is a
+        # different table and still drops a restricted sandbox's denied
+        # destinations (so the `allowNet` case stays a real assertion instead of
+        # passing because everything is blocked). `-C` before `-I` for
+        # idempotency.
+        run: |
+          echo "── FORWARD before:"; sudo iptables -S FORWARD
+          for dir in -s -d; do
+            sudo iptables -C FORWARD "$dir" "$SBX_POOL_CIDR" -j ACCEPT 2>/dev/null \
+              || sudo iptables -I FORWARD "$dir" "$SBX_POOL_CIDR" -j ACCEPT
+          done
+          echo "── FORWARD after:"; sudo iptables -S FORWARD
+          # The guests NAT out through the runner's uplink, so the host itself
+          # must reach what they dial. Fail LOUDLY here rather than as a
+          # mystery timeout deep inside the suite.
+          if ! curl -sS --max-time 20 -o /dev/null "https://${SBX_EGRESS_PROBE_IP}"; then
+            echo "::error::runner cannot reach https://${SBX_EGRESS_PROBE_IP} — the M10 microVM egress cases NAT out through this host and cannot pass without outbound internet. Use a runner with egress, or drop the network cases from the gate." >&2
+            exit 1
+          fi
+          # …and the other half: the per-sandbox dnsmasq forwards guest queries
+          # upstream over UDP/53 from THIS host, so probe that separately (a
+          # reachable :443 says nothing about :53 egress). `deno eval` runs
+          # fully permissioned.
+          if ! deno eval "console.log((await Deno.resolveDns('one.one.one.one', 'A', { nameServer: { ipAddr: '${SBX_EGRESS_PROBE_IP}', port: 53 } })).join(','))"; then
+            echo "::error::runner cannot query ${SBX_EGRESS_PROBE_IP}:53 over UDP — the per-sandbox dnsmasq forwards guest DNS upstream from this host, so the DNS half of the M10 egress cases cannot pass here." >&2
+            exit 1
+          fi
+          echo "✓ host egress to ${SBX_EGRESS_PROBE_IP} works (443 + DNS)"
 
       - name: Cache Firecracker + jailer
         id: fc-cache

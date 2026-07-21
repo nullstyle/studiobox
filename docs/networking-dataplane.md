@@ -220,6 +220,27 @@ EOF
 > _unrestricted_ sandboxes whose own filter chain is empty
 > ([`ruleset.ts:230-239`](../src/rootd/network/ruleset.ts)).
 
+> **Host prerequisite — nothing else on the host may DROP at the
+> `filter/forward` hook.** `ensureGlobal` opens forwarding and installs its own
+> tables, but a base-chain `accept` is **not** terminal across tables: every
+> base chain registered on the hook still runs, and any one of them may DROP. A
+> co-tenant ruleset with a blanket forward-drop therefore blackholes ALL guest
+> egress even though every studiobox rule accepted. The one seen in the wild is
+> **Docker** — `dockerd` sets `iptables -P FORWARD DROP` when it starts — which
+> is why the CI runner (Docker preinstalled and running) needs the pool-scoped
+> ACCEPTs `.github/workflows/integration.yml` inserts before the suite:
+>
+> ```
+> iptables -I FORWARD -s 10.201.0.0/16 -j ACCEPT
+> iptables -I FORWARD -d 10.201.0.0/16 -j ACCEPT
+> ```
+>
+> An ACCEPT inside the iptables `filter` table is terminal for **that table
+> only**, so the per-sandbox `inet sbx_eg_*` filter is a different table and
+> still judges — and still drops — a restricted sandbox's denied destinations. A
+> dedicated studiobox host (`studiobox host up` into a fresh Lima VM) has no
+> such co-tenant and needs nothing.
+
 ### Per-sandbox, at launch (before firecracker boots)
 
 Ordered; `<uid>`/`<gid>` are the jailer's drop-to ids
